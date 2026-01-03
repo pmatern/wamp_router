@@ -170,17 +170,6 @@ cmake --build build-system
 ctest --test-dir build-local --output-on-failure
 ```
 
-### Test Coverage
-
-The project includes comprehensive tests:
-- **test_wamp_id.cpp**: ID generator tests
-- **test_raw_socket.cpp**: RawSocket framing tests
-- **test_wamp_serializer.cpp**: CBOR message serialization tests
-- **test_subscription_manager.cpp**: Topic subscription tests
-- **test_wamp_session.cpp**: Protocol state machine tests
-- **test_procedure_handler.cpp**: RPC handling tests
-- **test_integration.cpp**: End-to-end integration tests
-
 ## Connecting Clients
 
 The router uses WAMP RawSocket transport with CBOR serialization:
@@ -216,37 +205,6 @@ runner = ApplicationRunner(
     serializers=['cbor']
 )
 runner.run(MyComponent)
-```
-
-## Project Structure
-
-```
-wamp_router/
-├── main.cpp                    # Entry point
-├── CMakeLists.txt             # Build configuration
-├── CMakePresets.json          # CMake presets
-├── vcpkg.json                 # Dependencies
-├── Dockerfile                 # Container image
-├── .clang-format              # Code style
-├── scripts/                   # Build/run scripts
-│   ├── build.sh              # Build Docker image
-│   ├── cmake-build.sh        # Build project
-│   ├── run.sh                # Run in container
-│   └── shell.sh              # Interactive shell
-├── include/                   # Header-only implementation
-│   ├── wamp_server.hpp       # Server and connection handler
-│   ├── wamp_session.hpp      # Protocol state machine
-│   ├── wamp_messages.hpp     # Message type definitions
-│   ├── wamp_serializer.hpp   # CBOR serialization
-│   ├── raw_socket.hpp        # RawSocket framing
-│   ├── wamp_id.hpp           # ID generation
-│   ├── pubsub_handler.hpp    # PubSub implementation
-│   ├── procedure_handler.hpp # RPC implementation
-│   ├── subscription_manager.hpp
-│   ├── registration_manager.hpp
-│   ├── invocation_tracker.hpp
-│   └── event_channel.hpp     # Async event delivery
-└── tests/                     # Catch2 tests
 ```
 
 ## Architecture
@@ -313,40 +271,6 @@ spdlog::set_level(spdlog::level::debug);
 gdb ./build/wamp_router
 (gdb) run 8080
 ```
-
-### Adding New Features
-
-See [CLAUDE.md](CLAUDE.md) for detailed development guidance including:
-- Adding new WAMP message types
-- Extending the protocol
-- Performance tuning
-- Architecture details
-
-## Performance
-
-- **Single-threaded**: ~10K messages/sec on single core
-- **Memory**: ~1KB per session
-- **Latency**: Sub-millisecond message routing
-
-### Optimization Ideas
-
-1. **Thread Pool**: Run multiple `io_context.run()` threads
-2. **Buffer Pooling**: Reuse message buffers
-3. **Zero-Copy**: Use `std::span` and views throughout
-4. **Message Batching**: Combine multiple small messages
-
-## Production Considerations
-
-For production deployment, consider adding:
-
-1. **Authentication**: Implement WAMP-CRA or WAMP-Cryptosign
-2. **TLS Support**: Secure transport layer
-3. **Rate Limiting**: Per-client message rate limits
-4. **Monitoring**: Prometheus metrics export
-5. **Graceful Shutdown**: Handle SIGTERM/SIGINT properly
-6. **Configuration**: YAML/JSON config file
-7. **Clustering**: Multi-router federation
-8. **Persistence**: Store sessions/subscriptions to Redis
 
 ## References
 
