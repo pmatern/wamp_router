@@ -1,0 +1,98 @@
+# Clang-Format Configuration for C++23 Projects
+# Based on LLVM style with modern C++ adjustments
+# Copy this file to your project root as .clang-format
+
+---
+Language: Cpp
+BasedOnStyle: LLVM
+
+# C++ Standard
+Standard: c++23
+
+# Indentation
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+IndentCaseLabels: true
+IndentPPDirectives: AfterHash
+IndentWrappedFunctionNames: false
+
+# Line length and breaking
+ColumnLimit: 100
+AlwaysBreakAfterReturnType: None
+AlwaysBreakTemplateDeclarations: Yes
+BreakBeforeBraces: Attach
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+
+# Spacing
+SpaceAfterCStyleCast: false
+SpaceAfterTemplateKeyword: true
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeCpp11BracedList: false
+SpaceBeforeCtorInitializerColon: true
+SpaceBeforeInheritanceColon: true
+SpaceBeforeParens: ControlStatements
+SpaceBeforeRangeBasedForLoopColon: true
+SpaceInEmptyParentheses: false
+SpacesInAngles: false
+SpacesInCStyleCastParentheses: false
+SpacesInContainerLiterals: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# Alignment
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignEscapedNewlines: Left
+AlignOperands: true
+AlignTrailingComments: true
+
+# Include ordering
+SortIncludes: true
+IncludeBlocks: Regroup
+IncludeCategories:
+  # C++ standard library headers
+  - Regex: '<[a-z_]+>'
+    Priority: 1
+  # System headers
+  - Regex: '<.+\.h>'
+    Priority: 2
+  # Third-party library headers
+  - Regex: '<.+>'
+    Priority: 3
+  # Project headers
+  - Regex: '".*"'
+    Priority: 4
+
+# Pointers and references
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# Functions and parameters
+AllowAllParametersOfDeclarationOnNextLine: true
+AllowShortFunctionsOnASingleLine: Inline
+BinPackParameters: false
+
+# Control statements
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# Namespaces
+CompactNamespaces: false
+FixNamespaceComments: true
+NamespaceIndentation: None
+
+# Modern C++ features
+Cpp11BracedListStyle: true
+
+# Comments
+ReflowComments: true
+
+# Other
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+...

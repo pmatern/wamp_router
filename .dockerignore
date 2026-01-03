@@ -1,0 +1,52 @@
+# .dockerignore - Optimize Docker build context
+
+# Git files
+.git/
+.gitignore
+.gitattributes
+
+# Documentation (not needed in image)
+README.md
+docs/
+*.md
+
+# Version file (used by build script, not needed in image)
+.version
+
+# IDE and editor files
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build artifacts (exclude both local and container builds)
+build/
+build-local/
+build-system/
+cmake-build-debug/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# vcpkg local cache (if any)
+.vcpkg-cache/
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Test executables (tests will be built inside container)
+wamp_tests
+
+# Settings
+settings.local.json

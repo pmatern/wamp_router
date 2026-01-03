@@ -1,0 +1,192 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+
+# CMake generated files (in root, not in subdirs since build/ is ignored)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+*.cmake
+!CMakeLists.txt
+!CMakePresets.json
+
+# vcpkg installed dependencies
+vcpkg_installed/
+
+# Compiled binaries
+wamp_router
+wamp_tests
+*.exe
+*.out
+*.app
+
+# Object files and libraries
+*.o
+*.obj
+*.lo
+*.slo
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+
+# Precompiled headers
+*.gch
+*.pch
+
+# Test outputs
+*.tlog
+*.lastbuildstate
+
+# CTest outputs
+DartConfiguration.tcl
+CTestCustom.cmake
+
+# Coverage files
+*.gcov
+*.gcda
+*.gcno
+coverage/
+*.profdata
+*.profraw
+
+# Valgrind/profiling
+callgrind.*
+cachegrind.*
+massif.*
+
+# Sanitizer outputs
+*.asan
+*.ubsan
+*.tsan
+
+# IDE and editor files
+.vscode/
+.idea/
+.fleet/
+*.swp
+*.swo
+*~
+.clangd/
+compile_commands.json
+.cache/
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# JetBrains IDEs
+.idea/
+*.iml
+*.iws
+.idea_modules/
+
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# Vim
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+
+# Emacs
+\#*\#
+.\#*
+*~
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+.directory
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Core dumps
+core
+core.*
+*.core
+vgcore.*
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# Logs
+*.log
+
+# Package manager files (keep manifests, ignore locks for development)
+# Note: Uncomment vcpkg.lock if you want reproducible builds
+# vcpkg.lock
+conan.lock
+
+# Environment and local configuration files
+.env
+.env.local
+.env.*.local
+*.local.json
+settings.local.json
+
+# Claude Code directory (tool-specific state)
+.claude/
+
+# NuGet (if accidentally used)
+.nuget/
+*.nupkg
+*.snupkg
+
+# Python (if scripts are added)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+*.so
+*.egg-info/
+.venv/
+venv/
+
+# Node.js (if tooling is added)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Rust (if FFI is added)
+target/
+Cargo.lock
+
+# Documentation build artifacts
+docs/_build/
+docs/.doctrees/
+site/
+
+# Backup files from editors
+*~
+*.orig
+*.rej
+
+# OS-specific
+.Spotlight-V100
+.Trashes
+ehthumbs_vista.db

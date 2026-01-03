@@ -1,0 +1,11 @@
+{
+  "name": "tcp-echo-server",
+  "version": "0.1.0",
+  "dependencies": [
+    "boost-asio",
+    "fmt",
+    "spdlog",
+    "nlohmann-json",
+    "catch2"
+  ]
+}

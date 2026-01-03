@@ -1,0 +1,77 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "local-debug",
+      "displayName": "Local Debug",
+      "description": "Local development build with debug symbols",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-local",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_TOOLCHAIN_FILE": {
+          "type": "FILEPATH",
+          "value": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+        }
+      },
+      "condition": {
+        "type": "notEquals",
+        "lhs": "$env{VCPKG_ROOT}",
+        "rhs": ""
+      }
+    },
+    {
+      "name": "local-release",
+      "displayName": "Local Release",
+      "description": "Local optimized release build",
+      "inherits": "local-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "container",
+      "displayName": "Container Build (Clang 18)",
+      "description": "Build inside Docker container with Clang 18 + libc++",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang-18",
+        "CMAKE_CXX_COMPILER": "clang++-18",
+        "CMAKE_TOOLCHAIN_FILE": "/opt/vcpkg/scripts/buildsystems/vcpkg.cmake"
+      }
+    },
+    {
+      "name": "system-packages",
+      "displayName": "System Packages (No vcpkg)",
+      "description": "Use system-installed packages instead of vcpkg",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-system",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "local-debug",
+      "configurePreset": "local-debug"
+    },
+    {
+      "name": "local-release",
+      "configurePreset": "local-release"
+    },
+    {
+      "name": "container",
+      "configurePreset": "container"
+    }
+  ]
+}

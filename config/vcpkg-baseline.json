@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "wamp-router-baseline",
+  "version": "1.0.0",
+  "description": "vcpkg baseline configuration for WAMP Router",
+  "builtin-baseline": "2024.11.16",
+  "remarks": [
+    "This baseline pins vcpkg to a specific version for reproducible builds.",
+    "To update: Change the builtin-baseline date to a newer vcpkg release.",
+    "Check available versions at: https://github.com/microsoft/vcpkg/releases"
+  ]
+}
