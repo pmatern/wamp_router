@@ -82,14 +82,6 @@ public:
         return info;
     }
 
-    [[nodiscard]] std::optional<PendingCall> peek(uint64_t invocation_id) const {
-        auto map_it = invocation_map_.find(invocation_id);
-        if (map_it == invocation_map_.end()) {
-            return std::nullopt;
-        }
-        return map_it->second->second;
-    }
-
     // Remove all pending invocations for a session (called on disconnect)
     void remove_caller_session(uint64_t caller_session_id) {
         auto it = lru_list_.begin();
@@ -109,10 +101,6 @@ public:
 
     [[nodiscard]] size_t max_capacity() const {
         return max_pending_calls_;
-    }
-
-    [[nodiscard]] bool is_full() const {
-        return lru_list_.size() >= max_pending_calls_;
     }
 
 private:

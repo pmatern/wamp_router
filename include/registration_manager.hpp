@@ -120,10 +120,6 @@ public:
         return it->second;
     }
 
-    [[nodiscard]] bool is_registered(const std::string& procedure) const {
-        return procedure_to_registration_.contains(procedure);
-    }
-
 private:
     // procedure URI -> registration_id (O(1) lookup by procedure)
     // Only one registration per procedure for simplicity

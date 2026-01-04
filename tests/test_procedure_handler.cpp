@@ -48,11 +48,11 @@ TEST_CASE("RegistrationManager basic operations", "[procedure_handler][registrat
 
     SECTION("Unregister by registration ID") {
         manager.register_procedure(200, "com.example.divide", 1);
-        REQUIRE(manager.is_registered("com.example.divide"));
+        REQUIRE(manager.find_callee("com.example.divide").has_value());
 
         bool success = manager.unregister(200);
         REQUIRE(success);
-        REQUIRE(!manager.is_registered("com.example.divide"));
+        REQUIRE(!manager.find_callee("com.example.divide").has_value());
     }
 
     SECTION("Unregister invalid registration ID") {
@@ -89,12 +89,11 @@ TEST_CASE("RegistrationManager session cleanup", "[procedure_handler][registrati
         manager.unregister_session(1);
 
         // Session 1's procedures should be gone
-        REQUIRE(!manager.is_registered("com.example.proc1"));
-        REQUIRE(!manager.is_registered("com.example.proc2"));
-        REQUIRE(!manager.is_registered("com.example.proc3"));
+        REQUIRE(!manager.find_callee("com.example.proc1").has_value());
+        REQUIRE(!manager.find_callee("com.example.proc2").has_value());
+        REQUIRE(!manager.find_callee("com.example.proc3").has_value());
 
         // Session 2's procedure should still exist
-        REQUIRE(manager.is_registered("com.example.proc4"));
         auto reg = manager.find_callee("com.example.proc4");
         REQUIRE(reg.has_value());
         REQUIRE(reg->session_id == 2);
@@ -107,7 +106,7 @@ TEST_CASE("RegistrationManager session cleanup", "[procedure_handler][registrati
         manager.unregister_session(999);
 
         // Original registration should be unaffected
-        REQUIRE(manager.is_registered("com.example.test"));
+        REQUIRE(manager.find_callee("com.example.test").has_value());
     }
 }
 
@@ -161,20 +160,6 @@ TEST_CASE("InvocationTracker basic operations", "[procedure_handler][invocation]
         REQUIRE(!result.has_value());
     }
 
-    SECTION("Peek without removing") {
-        PendingCall call{5, 777};
-        tracker.track(54321, call);
-
-        auto peeked = tracker.peek(54321);
-        REQUIRE(peeked.has_value());
-        REQUIRE(peeked->caller_session_id == 5);
-        REQUIRE(tracker.pending_count() == 1);  // Still there
-
-        auto retrieved = tracker.retrieve(54321);
-        REQUIRE(retrieved.has_value());
-        REQUIRE(tracker.pending_count() == 0);  // Now removed
-    }
-
     SECTION("Track multiple invocations") {
         tracker.track(1, PendingCall{1, 100});
         tracker.track(2, PendingCall{2, 200});
@@ -198,7 +183,7 @@ TEST_CASE("InvocationTracker LRU eviction", "[procedure_handler][invocation]") {
         tracker.track(3, PendingCall{3, 300});
 
         REQUIRE(tracker.pending_count() == 3);
-        REQUIRE(tracker.is_full());
+        REQUIRE(tracker.pending_count() >= tracker.max_capacity());
 
         // Adding 4th entry should evict oldest (1)
         tracker.track(4, PendingCall{4, 400});

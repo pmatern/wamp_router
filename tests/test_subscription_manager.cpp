@@ -25,8 +25,6 @@ TEST_CASE("SubscriptionManager basic operations", "[subscription_manager]") {
     SECTION("Subscribe to a topic") {
         manager.subscribe(1, "com.example.topic", 100);
 
-        REQUIRE(manager.has_subscribers("com.example.topic"));
-
         auto subscribers = manager.get_subscribers("com.example.topic");
         REQUIRE(subscribers.size() == 1);
         REQUIRE(std::count(subscribers.begin(), subscribers.end(), 1) == 1);
@@ -47,9 +45,6 @@ TEST_CASE("SubscriptionManager basic operations", "[subscription_manager]") {
     SECTION("Subscriptions to different topics") {
         manager.subscribe(1, "com.example.topic1", 100);
         manager.subscribe(2, "com.example.topic2", 101);
-
-        REQUIRE(manager.has_subscribers("com.example.topic1"));
-        REQUIRE(manager.has_subscribers("com.example.topic2"));
 
         auto sub1 = manager.get_subscribers("com.example.topic1");
         auto sub2 = manager.get_subscribers("com.example.topic2");
@@ -81,10 +76,10 @@ TEST_CASE("SubscriptionManager unsubscribe operations", "[subscription_manager]"
 
     SECTION("Unsubscribe from topic") {
         manager.subscribe(1, "com.example.topic", 100);
-        REQUIRE(manager.has_subscribers("com.example.topic"));
+        REQUIRE(!manager.get_subscribers("com.example.topic").empty());
 
         manager.unsubscribe(1);
-        REQUIRE(!manager.has_subscribers("com.example.topic"));
+        REQUIRE(manager.get_subscribers("com.example.topic").empty());
     }
 
     SECTION("Unsubscribe one of multiple subscribers") {
@@ -126,7 +121,7 @@ TEST_CASE("SubscriptionManager session cleanup", "[subscription_manager]") {
 
         // Session 101's subscription should remain
         REQUIRE(manager.get_subscription(4).has_value());
-        REQUIRE(manager.has_subscribers("com.example.topic1"));
+        REQUIRE(!manager.get_subscribers("com.example.topic1").empty());
     }
 
     SECTION("Cleanup non-existent session") {
@@ -135,7 +130,7 @@ TEST_CASE("SubscriptionManager session cleanup", "[subscription_manager]") {
         // Should not affect existing subscriptions
         manager.unsubscribe_session(999);
 
-        REQUIRE(manager.has_subscribers("com.example.topic"));
+        REQUIRE(!manager.get_subscribers("com.example.topic").empty());
     }
 }
 
@@ -145,7 +140,6 @@ TEST_CASE("SubscriptionManager edge cases", "[subscription_manager]") {
     SECTION("Empty topic") {
         manager.subscribe(1, "", 100);
 
-        REQUIRE(manager.has_subscribers(""));
         auto subscribers = manager.get_subscribers("");
         REQUIRE(subscribers.size() == 1);
     }
@@ -154,7 +148,7 @@ TEST_CASE("SubscriptionManager edge cases", "[subscription_manager]") {
         std::string complex_topic = "com.example.topic.with.many.parts.ąćę中文";
         manager.subscribe(1, complex_topic, 100);
 
-        REQUIRE(manager.has_subscribers(complex_topic));
+        REQUIRE(!manager.get_subscribers(complex_topic).empty());
     }
 
     SECTION("Same session subscribing to same topic twice with different subscription IDs") {
@@ -166,8 +160,6 @@ TEST_CASE("SubscriptionManager edge cases", "[subscription_manager]") {
     }
 
     SECTION("Query non-existent topic") {
-        REQUIRE(!manager.has_subscribers("com.nonexistent.topic"));
-
         auto subscribers = manager.get_subscribers("com.nonexistent.topic");
         REQUIRE(subscribers.empty());
     }

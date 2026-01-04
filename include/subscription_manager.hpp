@@ -112,11 +112,6 @@ public:
         return it->second;
     }
 
-    [[nodiscard]] bool has_subscribers(const std::string& topic) const {
-        auto it = topic_subscriptions_.find(topic);
-        return it != topic_subscriptions_.end() && !it->second.empty();
-    }
-
 private:
     // topic -> set of subscription IDs (O(1) lookup by topic)
     std::unordered_map<std::string, std::unordered_set<uint64_t>> topic_subscriptions_;

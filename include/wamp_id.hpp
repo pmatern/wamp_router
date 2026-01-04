@@ -82,37 +82,4 @@ private:
     uint64_t next_id_;
 };
 
-// ============================================================================
-// Session Scope ID Generator
-// ============================================================================
-// Used for: Request IDs (within a single session)
-// Requirement: "IDs in the session scope MUST be incremented by 1 beginning
-//              with 1 and wrapping to 1 after it reached 2^53"
-class SessionScopeIdGenerator {
-public:
-    SessionScopeIdGenerator()
-        : next_id_(WAMP_ID_MIN)
-    {
-    }
-
-    uint64_t generate() {
-        uint64_t id = next_id_;
-
-        if (next_id_ == WAMP_ID_MAX) {
-            next_id_ = WAMP_ID_MIN;
-        } else {
-            ++next_id_;
-        }
-
-        return id;
-    }
-
-    void reset() {
-        next_id_ = WAMP_ID_MIN;
-    }
-
-private:
-    uint64_t next_id_;
-};
-
 } // namespace wamp
