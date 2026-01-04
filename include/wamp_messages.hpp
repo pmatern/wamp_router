@@ -1,7 +1,23 @@
+// Copyright 2026 Patrick Matern
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
 #pragma once
 
 #include <string>
 #include <unordered_map>
+#include <map>
 #include <cstdint>
 #include <vector>
 #include <variant>
@@ -120,7 +136,7 @@ struct HelloMessage {
     {}
 
     static HelloMessage create_client(const std::string& realm_uri) {
-        HelloMessage msg(realm_uri);
+        HelloMessage msg{realm_uri};
 
         // Add basic client roles
         msg.roles.push_back(Role{"caller", {}});
@@ -173,7 +189,7 @@ struct WelcomeMessage {
     {}
 
     static WelcomeMessage create_router(uint64_t session_id, const std::string& realm_uri) {
-        WelcomeMessage msg(session_id, realm_uri);
+        WelcomeMessage msg{session_id, realm_uri};
 
         // Add basic router roles
         msg.roles.push_back(Role{"broker", {}});
@@ -261,6 +277,49 @@ struct AbortMessage {
         details["message"] = "Realm does not exist: " + realm;
         return AbortMessage{details, "wamp.error.no_such_realm"};
     }
+};
+
+// ============================================================================
+// CHALLENGE Message: [4, AuthMethod, Extra]
+// ============================================================================
+// Sent by router during authentication to challenge the client
+struct ChallengeMessage {
+    static constexpr MessageType TYPE = MessageType::CHALLENGE;
+
+    std::string authmethod;  // e.g., "cryptosign"
+    std::map<std::string, std::string> extra;  // Challenge data
+
+    ChallengeMessage(std::string auth_method, std::map<std::string, std::string> extra_data)
+        : authmethod(std::move(auth_method))
+        , extra(std::move(extra_data))
+    {}
+
+    static ChallengeMessage create_cryptosign(const std::string& challenge_hex) {
+        std::map<std::string, std::string> extra;
+        extra["challenge"] = challenge_hex;
+        return ChallengeMessage{"cryptosign", extra};
+    }
+};
+
+// ============================================================================
+// AUTHENTICATE Message: [5, Signature, Extra]
+// ============================================================================
+// Sent by client in response to CHALLENGE
+struct AuthenticateMessage {
+    static constexpr MessageType TYPE = MessageType::AUTHENTICATE;
+
+    std::string signature;  // Signature/response to challenge
+    std::map<std::string, std::string> extra;  // Optional extra data
+
+    AuthenticateMessage(std::string sig, std::map<std::string, std::string> extra_data)
+        : signature(std::move(sig))
+        , extra(std::move(extra_data))
+    {}
+
+    explicit AuthenticateMessage(std::string sig)
+        : signature(std::move(sig))
+        , extra{}
+    {}
 };
 
 // ============================================================================

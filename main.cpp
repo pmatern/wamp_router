@@ -1,3 +1,18 @@
+// Copyright 2026 Patrick Matern
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
 #include "include/wamp_server.hpp"
 #include "include/config.hpp"
 #include "include/procedure_handler.hpp"
@@ -9,9 +24,9 @@ int main(int argc, char* argv[]) {
     try {
         std::filesystem::path config_path = "config.toml";
         if (argc > 1) {
-            if (std::string(argv[1]) == "--config" && argc > 2) {
+            if (std::string{argv[1]} == "--config" && argc > 2) {
                 config_path = argv[2];
-            } else if (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") {
+            } else if (std::string{argv[1]} == "--help" || std::string{argv[1]} == "-h") {
                 fmt::print("Usage: {} [--config <path>]\n", argv[0]);
                 fmt::print("  Default config: config.toml\n");
                 fmt::print("  --config <path>  Specify custom configuration file\n");
@@ -57,12 +72,14 @@ int main(int argc, char* argv[]) {
             config.max_pending_invocations);
         fmt::print("  Log Level: {}\n",
             spdlog::level::to_string_view(config.log_level));
+        fmt::print("  Authentication Keys: {}\n",
+            config.auth_keys.size());
         fmt::print("\n");
         fmt::print("Press Ctrl+C to stop\n\n");
 
         boost::asio::io_context io_context;
 
-        wamp::WampTlsServer server(io_context, config.port, config.tls);
+        wamp::WampTlsServer server{io_context, config};
         server.start();
 
         io_context.run();

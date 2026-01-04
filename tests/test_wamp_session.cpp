@@ -1,3 +1,18 @@
+// Copyright 2026 Patrick Matern
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
 #include <catch2/catch_test_macros.hpp>
 #include "include/wamp_session.hpp"
 #include "include/wamp_serializer.hpp"
@@ -6,9 +21,22 @@
 
 using namespace wamp;
 
+// Helper function to create test ServerConfig for unit tests
+static ServerConfig create_test_config() {
+    ServerConfig config;
+    config.port = 8080;
+    config.tls.cert_path = "test_certs/cert.pem";
+    config.tls.key_path = "test_certs/key.pem";
+    config.max_pending_invocations = 1000;
+    config.log_level = spdlog::level::debug;
+    // No auth keys - allow unauthenticated connections for basic tests
+    return config;
+}
+
 TEST_CASE("WampSession initialization", "[wamp_session]") {
     boost::asio::io_context io;
-    WampSession session{io};
+    auto config = create_test_config();
+    WampSession session{io, config};
 
     SECTION("Session starts with ID 0") {
         REQUIRE(session.session_id() == 0);
@@ -29,7 +57,8 @@ TEST_CASE("WampSession initialization", "[wamp_session]") {
 
 TEST_CASE("WampSession RawSocket handshake", "[wamp_session]") {
     boost::asio::io_context io;
-    WampSession session{io};
+    auto config = create_test_config();
+    WampSession session{io, config};
 
     session.on_connect();
 
@@ -81,7 +110,8 @@ TEST_CASE("WampSession RawSocket handshake", "[wamp_session]") {
 
 TEST_CASE("WampSession HELLO/WELCOME exchange", "[wamp_session]") {
     boost::asio::io_context io;
-    WampSession session{io};
+    auto config = create_test_config();
+    WampSession session{io, config};
 
     session.on_connect();
 
@@ -140,7 +170,8 @@ TEST_CASE("WampSession HELLO/WELCOME exchange", "[wamp_session]") {
 
 TEST_CASE("WampSession GOODBYE handling", "[wamp_session]") {
     boost::asio::io_context io;
-    WampSession session{io};
+    auto config = create_test_config();
+    WampSession session{io, config};
 
     // Complete handshake and HELLO
     session.on_connect();
@@ -177,7 +208,8 @@ TEST_CASE("WampSession GOODBYE handling", "[wamp_session]") {
 
 TEST_CASE("WampSession PING/PONG handling", "[wamp_session]") {
     boost::asio::io_context io;
-    WampSession session{io};
+    auto config = create_test_config();
+    WampSession session{io, config};
 
     session.on_connect();
 
@@ -216,7 +248,8 @@ TEST_CASE("WampSession PING/PONG handling", "[wamp_session]") {
 
 TEST_CASE("WampSession error handling", "[wamp_session]") {
     boost::asio::io_context io;
-    WampSession session{io};
+    auto config = create_test_config();
+    WampSession session{io, config};
 
     session.on_connect();
 
@@ -254,7 +287,8 @@ TEST_CASE("WampSession error handling", "[wamp_session]") {
 
 TEST_CASE("WampSession buffering behavior", "[wamp_session]") {
     boost::asio::io_context io;
-    WampSession session{io};
+    auto config = create_test_config();
+    WampSession session{io, config};
 
     session.on_connect();
 

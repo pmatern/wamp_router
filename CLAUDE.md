@@ -12,7 +12,32 @@ This is a C++23 WAMP (Web Application Messaging Protocol) router implementation 
 
 This project is self-contained and supports two build environments:
 
-### 1. Docker Container Build (Recommended)
+**Development Workflow:** Use **local builds** for task-by-task development. Docker container builds can be used periodically to test that everything works in the standardized environment.
+
+### 1. Local Build (Recommended for Development)
+Requires local installation of:
+- Clang 18+ or compatible C++23 compiler
+- CMake 3.25+
+- Ninja
+- vcpkg (with `VCPKG_ROOT` environment variable set)
+
+**Local build commands:**
+```bash
+# Configure using CMake presets
+cmake --preset local-debug    # or local-release
+
+# Build (with parallel compilation)
+cmake --build build-local --parallel 8
+
+# Run
+./build-local/wamp_router
+./build-local/wamp_tests
+
+# Run specific tests
+./build-local/wamp_tests "[test name]"
+```
+
+### 2. Docker Container Build (For CI/Testing)
 Uses a custom Docker image with Clang 18 and libc++ for full C++23 support. Both GCC 14 and Clang 18 are available in the container.
 
 **First-time setup:**
@@ -27,27 +52,7 @@ Uses a custom Docker image with Clang 18 and libc++ for full C++23 support. Both
 - vcpkg dependencies automatically built with libc++
 - GCC 14 also available if needed
 
-**Daily development:** Use `./scripts/cmake-build.sh` and `./scripts/run.sh`
-
-### 2. Local Build
-Requires local installation of:
-- Clang 18+ or compatible C++23 compiler
-- CMake 3.25+
-- Ninja
-- vcpkg (with `VCPKG_ROOT` environment variable set)
-
-**Local build commands:**
-```bash
-# Configure using CMake presets
-cmake --preset local-debug    # or local-release
-
-# Build
-cmake --build build-local
-
-# Run
-./build-local/wamp_router
-./build-local/wamp_tests
-```
+**Docker build commands:** Use `./scripts/cmake-build.sh` and `./scripts/run.sh`
 
 ### Configuration Files
 - **.version**: Docker image version (used by `./scripts/build.sh`)
@@ -163,6 +168,47 @@ openssl s_client -connect localhost:8080 -tls1_3
 # Expected output should show: Protocol: TLSv1.3
 ```
 
+#### Authentication Setup (Optional)
+
+The router supports WAMP-Cryptosign authentication with Ed25519 signatures. Authentication is **optional** - if no authentication keys are configured, the router allows unauthenticated connections (legacy behavior).
+
+**Key Generation:**
+```bash
+# Generate Ed25519 key pair for testing
+./scripts/gen-test-keypair.sh
+
+# This creates:
+#   test_auth/private.pem  (keep secret - client uses this)
+#   test_auth/public.pem   (extract hex for config.toml)
+```
+
+**Configuration:**
+Add authentication keys to config.toml:
+```toml
+[auth.keys]
+# Map authid → Ed25519 public key (hex-encoded, 64 chars = 32 bytes)
+"user1" = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+"admin" = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+```
+
+**Authentication Protocol Flow:**
+1. Client sends `HELLO` with `authid="user1"` and `authmethods=["cryptosign"]`
+2. Router sends `CHALLENGE` with random 32-byte nonce (hex-encoded)
+3. Client signs: `challenge_hex + "|0|" + authid + "|user"` with private key
+4. Client sends `AUTHENTICATE` with Ed25519 signature (hex-encoded)
+5. Router verifies signature with public key from config
+   - Success: Sends `WELCOME` with authid, authrole, authmethod
+   - Failure: Sends `ABORT` with `wamp.error.not_authorized`
+
+**Security Notes:**
+- Public keys are stored in config.toml (not secret)
+- Private keys never touch the server (client-side only)
+- Challenge is cryptographically random (32 bytes from OpenSSL RAND_bytes)
+- Signature verification uses constant-time comparison (EVP_DigestVerify)
+
+**Disabling Authentication:**
+Simply omit the `[auth.keys]` section from config.toml, or leave it empty. The router will accept all connections without authentication.
+
 ### Development Workflow
 ```bash
 # Enter container shell for interactive development
@@ -200,15 +246,20 @@ wamp_router/
 │   ├── shell.sh              # Interactive container shell
 │   ├── debug.sh              # Debug with GDB in container
 │   ├── ci-build.sh           # CI/CD build script
-│   └── gen-test-certs.sh     # Generate self-signed certificates for testing
+│   ├── gen-test-certs.sh     # Generate self-signed TLS certificates for testing
+│   └── gen-test-keypair.sh   # Generate Ed25519 key pair for authentication
 ├── test_certs/                # Generated test certificates (not in git)
 │   ├── cert.pem              # Self-signed certificate
 │   └── key.pem               # Private key
+├── test_auth/                 # Generated authentication keys (not in git)
+│   ├── private.pem           # Ed25519 private key (client-side)
+│   └── public.pem            # Ed25519 public key
 ├── include/                   # Header-only implementation
-│   ├── config.hpp            # TOML configuration loader and parser
+│   ├── config.hpp            # TOML configuration loader with auth keys support
+│   ├── crypto_utils.hpp      # Ed25519 signature verification, challenge generation
 │   ├── wamp_server.hpp       # WampServer (plain TCP for tests), WampTlsServer (TLS 1.3)
-│   ├── wamp_session.hpp      # Protocol state machine, buffering
-│   ├── wamp_messages.hpp     # WAMP message types, error codes
+│   ├── wamp_session.hpp      # Protocol state machine, buffering, authentication
+│   ├── wamp_messages.hpp     # WAMP message types (HELLO, CHALLENGE, AUTHENTICATE, etc.)
 │   ├── wamp_serializer.hpp   # CBOR serialization/deserialization
 │   ├── raw_socket.hpp        # RawSocket framing (4-byte header)
 │   ├── wamp_id.hpp           # ID generators (global, router-scoped)

@@ -26,3 +26,9 @@ max_pending_invocations = 1000
 # Log level: trace, debug, info, warn, error, critical
 # Use debug for development
 level = "debug"
+
+[auth.keys]
+# Test authentication keys - DO NOT use in production
+# These are placeholder keys for testing
+"testuser" = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+"testadmin" = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"

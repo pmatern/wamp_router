@@ -1,3 +1,18 @@
+// Copyright 2026 Patrick Matern
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
 #pragma once
 
 #include <cstdint>
@@ -227,17 +242,17 @@ inline std::expected<HandshakeRequest, std::error_code> decode_handshake_request
     std::span<const uint8_t> data
 ) {
     if (data.size() < HANDSHAKE_SIZE) {
-        return std::unexpected(make_error_code(RawSocketError::INSUFFICIENT_DATA));
+        return std::unexpected{make_error_code(RawSocketError::INSUFFICIENT_DATA)};
     }
 
     // Validate magic byte
     if (data[0] != MAGIC_BYTE) {
-        return std::unexpected(make_error_code(RawSocketError::INVALID_MAGIC_BYTE));
+        return std::unexpected{make_error_code(RawSocketError::INVALID_MAGIC_BYTE)};
     }
 
     // Validate reserved octets
     if (data[2] != 0x00 || data[3] != 0x00) {
-        return std::unexpected(make_error_code(RawSocketError::RESERVED_BITS_SET));
+        return std::unexpected{make_error_code(RawSocketError::RESERVED_BITS_SET)};
     }
 
     // Extract length and serializer
@@ -247,11 +262,11 @@ inline std::expected<HandshakeRequest, std::error_code> decode_handshake_request
 
     // Validate values
     if (!is_valid_max_length_code(length_code)) {
-        return std::unexpected(make_error_code(RawSocketError::INVALID_LENGTH_CODE));
+        return std::unexpected{make_error_code(RawSocketError::INVALID_LENGTH_CODE)};
     }
 
     if (!is_valid_serializer(serializer)) {
-        return std::unexpected(make_error_code(RawSocketError::INVALID_SERIALIZER));
+        return std::unexpected{make_error_code(RawSocketError::INVALID_SERIALIZER)};
     }
 
     return HandshakeRequest{
@@ -273,16 +288,16 @@ inline std::expected<HandshakeError, std::error_code> decode_handshake_error(
     std::span<const uint8_t> data
 ) {
     if (data.size() < HANDSHAKE_SIZE) {
-        return std::unexpected(make_error_code(RawSocketError::INSUFFICIENT_DATA));
+        return std::unexpected{make_error_code(RawSocketError::INSUFFICIENT_DATA)};
     }
 
     if (data[0] != MAGIC_BYTE) {
-        return std::unexpected(make_error_code(RawSocketError::INVALID_MAGIC_BYTE));
+        return std::unexpected{make_error_code(RawSocketError::INVALID_MAGIC_BYTE)};
     }
 
     uint8_t error_code = (data[1] >> 4) & 0x0F;
     if (error_code == 0 || error_code > 4) {
-        return std::unexpected(make_error_code(RawSocketError::HANDSHAKE_FAILED));
+        return std::unexpected{make_error_code(RawSocketError::HANDSHAKE_FAILED)};
     }
 
     return static_cast<HandshakeError>(error_code);
@@ -316,18 +331,18 @@ inline std::expected<FrameHeader, std::error_code> decode_frame_header(
     std::span<const uint8_t> data
 ) {
     if (data.size() < FRAME_HEADER_SIZE) {
-        return std::unexpected(make_error_code(RawSocketError::INSUFFICIENT_DATA));
+        return std::unexpected{make_error_code(RawSocketError::INSUFFICIENT_DATA)};
     }
 
     // Check reserved bits (upper 5 bits must be zero)
     if ((data[0] & 0xF8) != 0) {
-        return std::unexpected(make_error_code(RawSocketError::RESERVED_BITS_SET));
+        return std::unexpected{make_error_code(RawSocketError::RESERVED_BITS_SET)};
     }
 
     // Extract frame type (lower 3 bits)
     uint8_t type_value = data[0] & 0x07;
     if (type_value > 2) {  // Only 0, 1, 2 are valid (REGULAR, PING, PONG)
-        return std::unexpected(make_error_code(RawSocketError::INVALID_FRAME_TYPE));
+        return std::unexpected{make_error_code(RawSocketError::INVALID_FRAME_TYPE)};
     }
 
     // Extract 24-bit length from big-endian bytes

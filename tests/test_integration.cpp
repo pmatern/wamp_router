@@ -1,3 +1,18 @@
+// Copyright 2026 Patrick Matern
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
 #include <catch2/catch_test_macros.hpp>
 #include "include/wamp_server.hpp"
 #include "include/wamp_serializer.hpp"
@@ -15,15 +30,27 @@ using namespace std::chrono_literals;
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
 
+// Helper function to create test ServerConfig for integration tests
+static ServerConfig create_test_config() {
+    ServerConfig config;
+    config.port = 0;  // Let OS assign port
+    config.tls.cert_path = "test_certs/cert.pem";
+    config.tls.key_path = "test_certs/key.pem";
+    config.max_pending_invocations = 1000;
+    config.log_level = spdlog::level::warn;  // Less verbose for tests
+    // No auth keys - allow unauthenticated connections for basic tests
+    return config;
+}
+
 // ============================================================================
 // WampTestClient - Synchronous blocking client for integration tests
 // ============================================================================
 class WampTestClient {
 public:
-    explicit WampTestClient(asio::io_context& io)
+    explicit WampTestClient(asio::io_context& io, const ServerConfig& config)
         : io_(io)
         , socket_(io)
-        , session_(io)
+        , session_(io, config)
         , session_id_(0)
         , receive_buffer_(8192)
         , stopped_(false)
@@ -346,7 +373,8 @@ private:
                 server_io_ = &server_io;
 
                 // Create server with port 0 to get OS-assigned port
-                WampServer server(server_io, 0);
+                auto config = create_test_config();
+                WampServer server(server_io, 0, config);
 
                 // Get actual bound port and signal to main thread
                 unsigned short bound_port = server.port();
@@ -434,7 +462,8 @@ private:
 
 TEST_CASE("Integration: Client connects and establishes session", "[integration]") {
     WampServerFixture fixture;
-    WampTestClient client(fixture.io_context());
+    auto config = create_test_config();
+    WampTestClient client(fixture.io_context(), config);
 
     bool connected = client.connect(fixture.port(), 2s);
     REQUIRE(connected);
@@ -445,7 +474,8 @@ TEST_CASE("Integration: Pub/Sub - Single subscriber receives event", "[integrati
     WampServerFixture fixture;
 
     // Create subscriber
-    WampTestClient subscriber(fixture.io_context());
+    auto config = create_test_config();
+    WampTestClient subscriber(fixture.io_context(), config);
     REQUIRE(subscriber.connect(fixture.port()));
 
     // Subscribe to topic
@@ -453,7 +483,7 @@ TEST_CASE("Integration: Pub/Sub - Single subscriber receives event", "[integrati
     REQUIRE(sub_id.has_value());
 
     // Create publisher
-    WampTestClient publisher(fixture.io_context());
+    WampTestClient publisher(fixture.io_context(), config);
     REQUIRE(publisher.connect(fixture.port()));
 
     // Publish event
@@ -470,9 +500,10 @@ TEST_CASE("Integration: Pub/Sub - Multiple subscribers receive event", "[integra
     WampServerFixture fixture;
 
     // Create multiple subscribers
-    WampTestClient sub1(fixture.io_context());
-    WampTestClient sub2(fixture.io_context());
-    WampTestClient sub3(fixture.io_context());
+    auto config = create_test_config();
+    WampTestClient sub1(fixture.io_context(), config);
+    WampTestClient sub2(fixture.io_context(), config);
+    WampTestClient sub3(fixture.io_context(), config);
 
     REQUIRE(sub1.connect(fixture.port()));
     REQUIRE(sub2.connect(fixture.port()));
@@ -488,7 +519,7 @@ TEST_CASE("Integration: Pub/Sub - Multiple subscribers receive event", "[integra
     REQUIRE(sub_id3.has_value());
 
     // Publisher sends event
-    WampTestClient publisher(fixture.io_context());
+    WampTestClient publisher(fixture.io_context(), config);
     REQUIRE(publisher.connect(fixture.port()));
     REQUIRE(publisher.publish("com.example.broadcast"));
 
@@ -506,14 +537,15 @@ TEST_CASE("Integration: RPC - Call and result flow", "[integration]") {
     WampServerFixture fixture;
 
     // Callee registers procedure
-    WampTestClient callee(fixture.io_context());
+    auto config = create_test_config();
+    WampTestClient callee(fixture.io_context(), config);
     REQUIRE(callee.connect(fixture.port()));
 
     auto reg_id = callee.register_procedure("com.example.add");
     REQUIRE(reg_id.has_value());
 
     // Caller invokes procedure
-    WampTestClient caller(fixture.io_context());
+    WampTestClient caller(fixture.io_context(), config);
     REQUIRE(caller.connect(fixture.port()));
 
     auto call_req_id = caller.call_procedure("com.example.add");
@@ -536,7 +568,8 @@ TEST_CASE("Integration: RPC - Call and result flow", "[integration]") {
 TEST_CASE("Integration: RPC - Call to unregistered procedure returns error", "[integration]") {
     WampServerFixture fixture;
 
-    WampTestClient caller(fixture.io_context());
+    auto config = create_test_config();
+    WampTestClient caller(fixture.io_context(), config);
     REQUIRE(caller.connect(fixture.port()));
 
     auto call_req_id = caller.call_procedure("com.example.nonexistent");
@@ -551,15 +584,16 @@ TEST_CASE("Integration: RPC - Call to unregistered procedure returns error", "[i
 
 TEST_CASE("Integration: RPC - Duplicate registration returns error", "[integration]") {
     WampServerFixture fixture;
+    auto config = create_test_config();
 
     // First client registers
-    WampTestClient callee1(fixture.io_context());
+    WampTestClient callee1(fixture.io_context(), config);
     REQUIRE(callee1.connect(fixture.port()));
     auto reg_id1 = callee1.register_procedure("com.example.exclusive");
     REQUIRE(reg_id1.has_value());
 
     // Second client tries to register same procedure
-    WampTestClient callee2(fixture.io_context());
+    WampTestClient callee2(fixture.io_context(), config);
     REQUIRE(callee2.connect(fixture.port()));
 
     // Send REGISTER
@@ -576,9 +610,10 @@ TEST_CASE("Integration: RPC - Duplicate registration returns error", "[integrati
 
 TEST_CASE("Integration: Multiple clients with mixed operations", "[integration]") {
     WampServerFixture fixture;
+    auto config = create_test_config();
 
     // Client 1: Subscriber and Callee
-    WampTestClient client1(fixture.io_context());
+    WampTestClient client1(fixture.io_context(), config);
     REQUIRE(client1.connect(fixture.port()));
     auto sub_id = client1.subscribe("com.example.events");
     auto reg_id = client1.register_procedure("com.example.compute");
@@ -586,7 +621,7 @@ TEST_CASE("Integration: Multiple clients with mixed operations", "[integration]"
     REQUIRE(reg_id.has_value());
 
     // Client 2: Publisher and Caller
-    WampTestClient client2(fixture.io_context());
+    WampTestClient client2(fixture.io_context(), config);
     REQUIRE(client2.connect(fixture.port()));
 
     // Test pub/sub

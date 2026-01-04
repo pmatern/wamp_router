@@ -1,3 +1,18 @@
+// Copyright 2026 Patrick Matern
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
 #pragma once
 
 #include "wamp_messages.hpp"
@@ -180,6 +195,48 @@ inline std::vector<uint8_t> serialize_abort(const AbortMessage& msg) {
     return json::to_cbor(j);
 }
 
+// Serialize CHALLENGE message to CBOR
+// Format: [4, authmethod, extra]
+inline std::vector<uint8_t> serialize_challenge(const ChallengeMessage& msg) {
+    json j = json::array();
+
+    // Message type
+    j.push_back(static_cast<int>(MessageType::CHALLENGE));
+
+    // AuthMethod (string)
+    j.push_back(msg.authmethod);
+
+    // Extra (dictionary)
+    json extra = json::object();
+    for (const auto& [key, value] : msg.extra) {
+        extra[key] = value;
+    }
+    j.push_back(extra);
+
+    return json::to_cbor(j);
+}
+
+// Serialize AUTHENTICATE message to CBOR
+// Format: [5, signature, extra]
+inline std::vector<uint8_t> serialize_authenticate(const AuthenticateMessage& msg) {
+    json j = json::array();
+
+    // Message type
+    j.push_back(static_cast<int>(MessageType::AUTHENTICATE));
+
+    // Signature (string)
+    j.push_back(msg.signature);
+
+    // Extra (dictionary)
+    json extra = json::object();
+    for (const auto& [key, value] : msg.extra) {
+        extra[key] = value;
+    }
+    j.push_back(extra);
+
+    return json::to_cbor(j);
+}
+
 // ============================================================================
 // CBOR Deserialization Functions
 // ============================================================================
@@ -199,7 +256,7 @@ get_message_type_from_cbor(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("CBOR decode error: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -256,7 +313,7 @@ deserialize_hello(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize HELLO: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -281,7 +338,7 @@ deserialize_welcome(const std::vector<uint8_t>& cbor_data) {
         uint64_t session_id = j[1].get<uint64_t>();
 
         // Create message (realm is in details, but we'll use a placeholder)
-        WelcomeMessage msg(session_id, "");
+        WelcomeMessage msg{session_id, ""};
 
         // Parse details
         if (j[2].is_object()) {
@@ -310,7 +367,7 @@ deserialize_welcome(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize WELCOME: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -337,11 +394,11 @@ deserialize_goodbye(const std::vector<uint8_t>& cbor_data) {
         // Extract reason
         std::string reason = j[2].get<std::string>();
 
-        return GoodbyeMessage(details, reason);
+        return GoodbyeMessage{details, reason};
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize GOODBYE: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -368,11 +425,87 @@ deserialize_abort(const std::vector<uint8_t>& cbor_data) {
         // Extract reason
         std::string reason = j[2].get<std::string>();
 
-        return AbortMessage(details, reason);
+        return AbortMessage{details, reason};
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize ABORT: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
+    }
+}
+
+// Deserialize CHALLENGE message from CBOR
+// Format: [4, authmethod, extra]
+inline std::expected<ChallengeMessage, std::error_code>
+deserialize_challenge(const std::vector<uint8_t>& cbor_data) {
+    try {
+        json j = json::from_cbor(cbor_data);
+
+        if (!j.is_array() || j.size() != 3) {
+            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
+        }
+
+        // Verify message type
+        int type = j[0].get<int>();
+        if (type != static_cast<int>(MessageType::CHALLENGE)) {
+            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
+        }
+
+        // Extract authmethod
+        std::string authmethod = j[1].get<std::string>();
+
+        // Extract extra dictionary
+        std::map<std::string, std::string> extra;
+        if (j[2].is_object()) {
+            for (auto it = j[2].begin(); it != j[2].end(); ++it) {
+                if (it.value().is_string()) {
+                    extra[it.key()] = it.value().get<std::string>();
+                }
+            }
+        }
+
+        return ChallengeMessage{authmethod, extra};
+
+    } catch (const json::exception& e) {
+        spdlog::error("Failed to deserialize CHALLENGE: {}", e.what());
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
+    }
+}
+
+// Deserialize AUTHENTICATE message from CBOR
+// Format: [5, signature, extra]
+inline std::expected<AuthenticateMessage, std::error_code>
+deserialize_authenticate(const std::vector<uint8_t>& cbor_data) {
+    try {
+        json j = json::from_cbor(cbor_data);
+
+        if (!j.is_array() || j.size() != 3) {
+            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
+        }
+
+        // Verify message type
+        int type = j[0].get<int>();
+        if (type != static_cast<int>(MessageType::AUTHENTICATE)) {
+            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
+        }
+
+        // Extract signature
+        std::string signature = j[1].get<std::string>();
+
+        // Extract extra dictionary
+        std::map<std::string, std::string> extra;
+        if (j[2].is_object()) {
+            for (auto it = j[2].begin(); it != j[2].end(); ++it) {
+                if (it.value().is_string()) {
+                    extra[it.key()] = it.value().get<std::string>();
+                }
+            }
+        }
+
+        return AuthenticateMessage{signature, extra};
+
+    } catch (const json::exception& e) {
+        spdlog::error("Failed to deserialize AUTHENTICATE: {}", e.what());
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -443,7 +576,7 @@ deserialize_subscribe(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize SUBSCRIBE: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -525,7 +658,7 @@ deserialize_publish(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize PUBLISH: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -597,7 +730,7 @@ deserialize_register(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize REGISTER: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -657,7 +790,7 @@ deserialize_call(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize CALL: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -710,7 +843,7 @@ deserialize_yield(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize YIELD: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -810,7 +943,7 @@ deserialize_subscribed(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize SUBSCRIBED: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -837,7 +970,7 @@ deserialize_published(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize PUBLISHED: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -865,7 +998,7 @@ deserialize_event(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize EVENT: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -892,7 +1025,7 @@ deserialize_registered(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize REGISTERED: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -920,7 +1053,7 @@ deserialize_invocation(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize INVOCATION: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -947,7 +1080,7 @@ deserialize_result(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize RESULT: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 
@@ -976,7 +1109,7 @@ deserialize_error(const std::vector<uint8_t>& cbor_data) {
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize ERROR: {}", e.what());
-        return std::unexpected(make_error_code(SerializationError::CBOR_DECODE_ERROR));
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
 }
 

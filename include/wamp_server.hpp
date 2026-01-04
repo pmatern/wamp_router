@@ -1,3 +1,18 @@
+// Copyright 2026 Patrick Matern
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
 #pragma once
 
 #include "wamp_session.hpp"
@@ -60,13 +75,13 @@ handle_socket_read_completion(
     if (ec_read == boost::asio::error::eof) {
         spdlog::info("Client {} disconnected", remote_address);
         protocol.on_disconnect();
-        co_return std::unexpected(ec_read);
+        co_return std::unexpected{ec_read};
     }
 
     if (ec_read) {
         spdlog::error("Read error from {}: {}", remote_address, ec_read.message());
         protocol.on_disconnect();
-        co_return std::unexpected(ec_read);
+        co_return std::unexpected{ec_read};
     }
 
     spdlog::debug("Received {} bytes from {}", bytes_read, remote_address);
@@ -76,7 +91,7 @@ handle_socket_read_completion(
     if (!result) {
         spdlog::error("Protocol error from {}: {}", remote_address, result.error().message());
         protocol.on_disconnect();
-        co_return std::unexpected(result.error());
+        co_return std::unexpected{result.error()};
     }
 
     if (!result->empty()) {
@@ -89,7 +104,7 @@ handle_socket_read_completion(
         if (ec_write) {
             spdlog::error("Write error to {}: {}", remote_address, ec_write.message());
             protocol.on_disconnect();
-            co_return std::unexpected(ec_write);
+            co_return std::unexpected{ec_write};
         }
 
         spdlog::debug("Sent {} bytes to {}", bytes_written, remote_address);
@@ -100,7 +115,7 @@ handle_socket_read_completion(
 
 template<typename SocketType>
 inline boost::asio::awaitable<std::expected<void, std::error_code>>
-handle_wamp_session(SocketType socket, boost::asio::io_context& io) {
+handle_wamp_session(SocketType socket, boost::asio::io_context& io, const ServerConfig& config) {
     std::array<uint8_t, 8192> buffer{};
 
     auto remote_endpoint = get_remote_endpoint(socket);
@@ -117,7 +132,7 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io) {
         if (ec_handshake) {
             spdlog::error("TLS handshake failed from {}: {} (Client may not support TLS 1.3)",
                 remote_address, ec_handshake.message());
-            co_return std::unexpected(ec_handshake);
+            co_return std::unexpected{ec_handshake};
         }
 
         spdlog::info("TLS handshake complete with {}", remote_address);
@@ -125,7 +140,7 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io) {
 
     spdlog::info("WAMP session started with {}", remote_address);
 
-    WampSession protocol{io};
+    WampSession protocol{io, config};
     protocol.on_connect();
 
     std::shared_ptr<EventChannel> event_channel;
@@ -158,7 +173,7 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io) {
                     socket, buffer, protocol, remote_address, ec_read, bytes_read
                 );
                 if (!result) {
-                    co_return std::unexpected(result.error());
+                    co_return std::unexpected{result.error()};
                 }
 
             } else {
@@ -182,7 +197,7 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io) {
                     spdlog::error("Write error sending event to {}: {}",
                         remote_address, ec_write.message());
                     protocol.on_disconnect();
-                    co_return std::unexpected(ec_write);
+                    co_return std::unexpected{ec_write};
                 }
 
                 spdlog::debug("Sent event: {} bytes to {}",
@@ -200,7 +215,7 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io) {
                 socket, buffer, protocol, remote_address, ec_read, bytes_read
             );
             if (!result) {
-                co_return std::unexpected(result.error());
+                co_return std::unexpected{result.error()};
             }
         }
     }
@@ -208,10 +223,11 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io) {
 
 class WampServer {
 public:
-    WampServer(boost::asio::io_context& io_context, unsigned short port)
+    WampServer(boost::asio::io_context& io_context, unsigned short port, const ServerConfig& config)
         : io_context_(io_context)
         , acceptor_(io_context, tcp::endpoint(tcp::v4(), port))
         , bound_port_(acceptor_.local_endpoint().port())
+        , config_(config)
     {
     }
 
@@ -249,7 +265,7 @@ private:
 
             boost::asio::co_spawn(
                 acceptor_.get_executor(),
-                handle_wamp_session<tcp::socket>(std::move(socket), io_context_),
+                handle_wamp_session<tcp::socket>(std::move(socket), io_context_, config_),
                 boost::asio::detached
             );
         }
@@ -258,6 +274,7 @@ private:
     boost::asio::io_context& io_context_;
     tcp::acceptor acceptor_;
     unsigned short bound_port_;
+    const ServerConfig& config_;
 };
 
 // ============================================================================
@@ -267,15 +284,15 @@ class WampTlsServer {
 public:
     WampTlsServer(
         boost::asio::io_context& io_context,
-        unsigned short port,
-        const TlsConfig& tls_config
+        const ServerConfig& config
     )
         : io_context_(io_context)
         , ssl_context_(ssl::context::tlsv13)
-        , acceptor_(io_context, tcp::endpoint(tcp::v4(), port))
+        , acceptor_(io_context, tcp::endpoint(tcp::v4(), config.port))
         , bound_port_(acceptor_.local_endpoint().port())
+        , config_(config)
     {
-        setup_ssl_context(tls_config);
+        setup_ssl_context(config.tls);
     }
 
     void start() {
@@ -355,13 +372,13 @@ private:
                 remote_endpoint.address().to_string());
 
             // Wrap plain socket in SSL stream
-            ssl_socket tls_socket(std::move(plain_socket), ssl_context_);
+            ssl_socket tls_socket{std::move(plain_socket), ssl_context_};
 
             set_socket_options(tls_socket);
 
             boost::asio::co_spawn(
                 acceptor_.get_executor(),
-                handle_wamp_session<ssl_socket>(std::move(tls_socket), io_context_),
+                handle_wamp_session<ssl_socket>(std::move(tls_socket), io_context_, config_),
                 boost::asio::detached
             );
         }
@@ -371,6 +388,7 @@ private:
     ssl::context ssl_context_;
     tcp::acceptor acceptor_;
     unsigned short bound_port_;
+    const ServerConfig& config_;
 };
 
 } // namespace wamp
