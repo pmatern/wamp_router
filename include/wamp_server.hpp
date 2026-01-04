@@ -2,7 +2,9 @@
 
 #include "wamp_session.hpp"
 #include "event_channel.hpp"
+#include "config.hpp"
 #include <boost/asio.hpp>
+#include <boost/asio/ssl.hpp>
 #include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
 #include <spdlog/spdlog.h>
@@ -10,43 +12,69 @@
 #include <system_error>
 #include <span>
 #include <memory>
+#include <openssl/ssl.h>
 
 namespace wamp {
 
 using boost::asio::ip::tcp;
+namespace ssl = boost::asio::ssl;
 
-// Helper function to handle socket read completion
+// ============================================================================
+// Socket Helper Functions - Work with both plain TCP and TLS sockets
+// ============================================================================
+
+template<typename SocketType>
+inline auto get_remote_endpoint(SocketType& socket) {
+    if constexpr (requires { socket.lowest_layer(); }) {
+        // SSL socket - use lowest_layer()
+        return socket.lowest_layer().remote_endpoint();
+    } else {
+        // Plain socket
+        return socket.remote_endpoint();
+    }
+}
+
+// Set socket options (works for both plain and SSL sockets)
+template<typename SocketType>
+inline void set_socket_options(SocketType& socket) {
+    if constexpr (requires { socket.lowest_layer(); }) {
+        // SSL socket
+        socket.lowest_layer().set_option(tcp::no_delay(true));
+    } else {
+        // Plain socket
+        socket.set_option(tcp::no_delay(true));
+    }
+}
+
+template<typename SocketType>
 inline boost::asio::awaitable<std::expected<bool, std::error_code>>
 handle_socket_read_completion(
-    tcp::socket& socket,
+    SocketType& socket,
     const std::array<uint8_t, 8192>& buffer,
     WampSession& protocol,
-    const tcp::endpoint& remote_endpoint,
+    const std::string& remote_address,
     boost::system::error_code ec_read,
     std::size_t bytes_read
 ) {
     // Check for EOF (client disconnected gracefully)
     if (ec_read == boost::asio::error::eof) {
-        spdlog::info("Client {} disconnected", remote_endpoint.address().to_string());
+        spdlog::info("Client {} disconnected", remote_address);
         protocol.on_disconnect();
         co_return std::unexpected(ec_read);
     }
 
     if (ec_read) {
-        spdlog::error("Read error from {}: {}",
-            remote_endpoint.address().to_string(), ec_read.message());
+        spdlog::error("Read error from {}: {}", remote_address, ec_read.message());
         protocol.on_disconnect();
         co_return std::unexpected(ec_read);
     }
 
-    spdlog::debug("Received {} bytes from {}",
-        bytes_read, remote_endpoint.address().to_string());
+    spdlog::debug("Received {} bytes from {}", bytes_read, remote_address);
 
     auto result = protocol.process(std::span<const uint8_t>(buffer.data(), bytes_read));
 
     if (!result) {
-        spdlog::error("Protocol error from {}: {}",
-            remote_endpoint.address().to_string(), result.error().message());
+        spdlog::error("Protocol error from {}: {}", remote_address, result.error().message());
         protocol.on_disconnect();
         co_return std::unexpected(result.error());
     }
@@ -59,40 +87,54 @@ handle_socket_read_completion(
         );
 
         if (ec_write) {
-            spdlog::error("Write error to {}: {}",
-                remote_endpoint.address().to_string(), ec_write.message());
+            spdlog::error("Write error to {}: {}", remote_address, ec_write.message());
             protocol.on_disconnect();
             co_return std::unexpected(ec_write);
         }
 
-        spdlog::debug("Sent {} bytes to {}",
-            bytes_written, remote_endpoint.address().to_string());
+        spdlog::debug("Sent {} bytes to {}", bytes_written, remote_address);
     }
 
     co_return true;  // Continue processing
 }
 
+template<typename SocketType>
 inline boost::asio::awaitable<std::expected<void, std::error_code>>
-handle_wamp_session(tcp::socket socket, boost::asio::io_context& io) {
+handle_wamp_session(SocketType socket, boost::asio::io_context& io) {
     std::array<uint8_t, 8192> buffer{};
 
-    auto remote_endpoint = socket.remote_endpoint();
-    spdlog::info("WAMP session started with {}", remote_endpoint.address().to_string());
+    auto remote_endpoint = get_remote_endpoint(socket);
+    std::string remote_address = remote_endpoint.address().to_string();
+
+    // Perform TLS handshake if this is an SSL socket
+    if constexpr (requires { socket.async_handshake(ssl::stream_base::server, boost::asio::use_awaitable); }) {
+        spdlog::debug("Starting TLS handshake with {}", remote_address);
+        auto [ec_handshake] = co_await socket.async_handshake(
+            ssl::stream_base::server,
+            boost::asio::as_tuple(boost::asio::use_awaitable)
+        );
+
+        if (ec_handshake) {
+            spdlog::error("TLS handshake failed from {}: {} (Client may not support TLS 1.3)",
+                remote_address, ec_handshake.message());
+            co_return std::unexpected(ec_handshake);
+        }
+
+        spdlog::info("TLS handshake complete with {}", remote_address);
+    }
+
+    spdlog::info("WAMP session started with {}", remote_address);
 
     WampSession protocol{io};
     protocol.on_connect();
 
     std::shared_ptr<EventChannel> event_channel;
-    uint64_t last_session_id = 0;
 
     while (true) {
-        // Check if session was established and we need to get the event channel
-        uint64_t current_session_id = protocol.session_id();
-        if (current_session_id != 0 && last_session_id == 0) {
-            // Session just established, get the event channel
-            event_channel = EventChannelRegistry::get_or_create(current_session_id, io);
-            spdlog::debug("Event channel acquired for session {}", current_session_id);
-            last_session_id = current_session_id;
+        // Get event channel once session is established
+        if (!event_channel && protocol.is_established()) {
+            event_channel = EventChannelRegistry::get_or_create(protocol.session_id(), io);
+            spdlog::debug("Event channel acquired for session {}", protocol.session_id());
         }
 
         if (event_channel) {
@@ -113,7 +155,7 @@ handle_wamp_session(tcp::socket socket, boost::asio::io_context& io) {
             if (order[0] == 0) {
                 // Socket read completed
                 auto result = co_await handle_socket_read_completion(
-                    socket, buffer, protocol, remote_endpoint, ec_read, bytes_read
+                    socket, buffer, protocol, remote_address, ec_read, bytes_read
                 );
                 if (!result) {
                     co_return std::unexpected(result.error());
@@ -138,13 +180,13 @@ handle_wamp_session(tcp::socket socket, boost::asio::io_context& io) {
 
                 if (ec_write) {
                     spdlog::error("Write error sending event to {}: {}",
-                        remote_endpoint.address().to_string(), ec_write.message());
+                        remote_address, ec_write.message());
                     protocol.on_disconnect();
                     co_return std::unexpected(ec_write);
                 }
 
                 spdlog::debug("Sent event: {} bytes to {}",
-                    bytes_written, remote_endpoint.address().to_string());
+                    bytes_written, remote_address);
             }
 
         } else {
@@ -155,7 +197,7 @@ handle_wamp_session(tcp::socket socket, boost::asio::io_context& io) {
             );
 
             auto result = co_await handle_socket_read_completion(
-                socket, buffer, protocol, remote_endpoint, ec_read, bytes_read
+                socket, buffer, protocol, remote_address, ec_read, bytes_read
             );
             if (!result) {
                 co_return std::unexpected(result.error());
@@ -203,17 +245,130 @@ private:
             spdlog::info("Accepted connection from {}",
                 remote_endpoint.address().to_string());
 
-            socket.set_option(tcp::no_delay(true));
+            set_socket_options(socket);
 
             boost::asio::co_spawn(
                 acceptor_.get_executor(),
-                handle_wamp_session(std::move(socket), io_context_),
+                handle_wamp_session<tcp::socket>(std::move(socket), io_context_),
                 boost::asio::detached
             );
         }
     }
 
     boost::asio::io_context& io_context_;
+    tcp::acceptor acceptor_;
+    unsigned short bound_port_;
+};
+
+// ============================================================================
+// WampTlsServer - WAMP Server with TLS 1.3 support
+// ============================================================================
+class WampTlsServer {
+public:
+    WampTlsServer(
+        boost::asio::io_context& io_context,
+        unsigned short port,
+        const TlsConfig& tls_config
+    )
+        : io_context_(io_context)
+        , ssl_context_(ssl::context::tlsv13)
+        , acceptor_(io_context, tcp::endpoint(tcp::v4(), port))
+        , bound_port_(acceptor_.local_endpoint().port())
+    {
+        setup_ssl_context(tls_config);
+    }
+
+    void start() {
+        boost::asio::co_spawn(
+            io_context_,
+            accept_loop(),
+            boost::asio::detached
+        );
+    }
+
+    [[nodiscard]] unsigned short port() const {
+        return bound_port_;
+    }
+
+private:
+    void setup_ssl_context(const TlsConfig& tls_config) {
+        // Set TLS 1.3 only (reject TLS 1.2 and earlier)
+        SSL_CTX_set_min_proto_version(
+            ssl_context_.native_handle(), TLS1_3_VERSION);
+        SSL_CTX_set_max_proto_version(
+            ssl_context_.native_handle(), TLS1_3_VERSION);
+
+        // Load certificate and private key
+        ssl_context_.use_certificate_chain_file(tls_config.cert_path.string());
+        ssl_context_.use_private_key_file(
+            tls_config.key_path.string(),
+            ssl::context::pem
+        );
+
+        // Optional: Load CA certificate for client verification
+        if (tls_config.ca_path) {
+            ssl_context_.load_verify_file(tls_config.ca_path->string());
+        }
+
+        // Optional: Require client certificates
+        if (tls_config.require_client_cert) {
+            ssl_context_.set_verify_mode(
+                ssl::verify_peer | ssl::verify_fail_if_no_peer_cert);
+        } else {
+            ssl_context_.set_verify_mode(ssl::verify_none);
+        }
+
+        // Set cipher suite preferences (TLS 1.3 ciphers)
+        SSL_CTX_set_ciphersuites(
+            ssl_context_.native_handle(),
+            "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+        );
+
+        spdlog::info("TLS context configured (TLS 1.3 only)");
+        spdlog::info("  Certificate: {}", tls_config.cert_path.string());
+        spdlog::info("  Private key: {}", tls_config.key_path.string());
+        if (tls_config.ca_path) {
+            spdlog::info("  CA cert: {}", tls_config.ca_path->string());
+        }
+        if (tls_config.require_client_cert) {
+            spdlog::info("  Client cert required: yes");
+        }
+    }
+
+    boost::asio::awaitable<void> accept_loop() {
+        using ssl_socket = ssl::stream<tcp::socket>;
+
+        spdlog::info("WAMP Server listening on port {}", bound_port_);
+
+        while (true) {
+            auto [ec, plain_socket] = co_await acceptor_.async_accept(
+                boost::asio::as_tuple(boost::asio::use_awaitable)
+            );
+
+            if (ec) {
+                spdlog::error("Accept error: {}", ec.message());
+                continue;
+            }
+
+            auto remote_endpoint = plain_socket.remote_endpoint();
+            spdlog::info("Accepted TLS connection from {}",
+                remote_endpoint.address().to_string());
+
+            // Wrap plain socket in SSL stream
+            ssl_socket tls_socket(std::move(plain_socket), ssl_context_);
+
+            set_socket_options(tls_socket);
+
+            boost::asio::co_spawn(
+                acceptor_.get_executor(),
+                handle_wamp_session<ssl_socket>(std::move(tls_socket), io_context_),
+                boost::asio::detached
+            );
+        }
+    }
+
+    boost::asio::io_context& io_context_;
+    ssl::context ssl_context_;
     tcp::acceptor acceptor_;
     unsigned short bound_port_;
 };

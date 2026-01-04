@@ -6,6 +6,8 @@
     "fmt",
     "spdlog",
     "nlohmann-json",
-    "catch2"
+    "catch2",
+    "toml11",
+    "openssl"
   ]
 }

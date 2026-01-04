@@ -91,12 +91,76 @@ cmake --build build-local
 ```
 
 ### Running the Router
-```bash
-# Run on default port 8080
-./scripts/run.sh -p 8080:8080 ./build/wamp_router
 
-# Run on custom port 9000
-./scripts/run.sh -p 9000:9000 ./build/wamp_router 9000
+**IMPORTANT**: The router now requires TLS 1.3 and a configuration file.
+
+#### Quick Start (Development)
+```bash
+# 1. Generate test certificates (one-time)
+./scripts/gen-test-certs.sh
+
+# 2. Run with test configuration
+./scripts/run.sh -p 8080:8080 ./build/wamp_router --config test_config.toml
+
+# Local build:
+./build-local/wamp_router --config test_config.toml
+```
+
+#### Configuration
+
+The router requires a TOML configuration file (default: `config.toml`).
+
+**Example configuration:**
+```toml
+[server]
+port = 8080
+
+[server.tls]
+cert = "test_certs/cert.pem"
+key = "test_certs/key.pem"
+# Optional: ca = "ca.pem"
+# Optional: require_client_cert = false
+
+[server.rpc]
+max_pending_invocations = 10000
+
+[logging]
+level = "info"  # trace, debug, info, warn, error, critical
+```
+
+**Command-line options:**
+```bash
+# Use default config.toml
+./build-local/wamp_router
+
+# Use custom config file
+./build-local/wamp_router --config /path/to/config.toml
+
+# Show help
+./build-local/wamp_router --help
+```
+
+#### TLS Certificate Setup
+
+**Development (self-signed certificates):**
+```bash
+# Generate test certificates
+./scripts/gen-test-certs.sh
+
+# Output: test_certs/cert.pem and test_certs/key.pem
+```
+
+**Production (real certificates):**
+- Use certificates from Let's Encrypt, your CA, or certificate provider
+- Update config.toml with paths to your certificate and private key
+- Ensure files are readable by the router process
+
+**Testing TLS connection:**
+```bash
+# Verify TLS 1.3 with openssl s_client
+openssl s_client -connect localhost:8080 -tls1_3
+
+# Expected output should show: Protocol: TLSv1.3
 ```
 
 ### Development Workflow
@@ -116,7 +180,9 @@ vcpkg search [package]
 
 ```
 wamp_router/
-├── main.cpp                    # Entry point, starts WampServer
+├── main.cpp                    # Entry point, loads config, starts WampTlsServer
+├── config.toml                # Example configuration file
+├── test_config.toml           # Development configuration with test certificates
 ├── CMakeLists.txt             # Build config (C++23, Catch2 tests)
 ├── CMakePresets.json          # CMake presets for local and container builds
 ├── vcpkg.json                 # Dependencies manifest
@@ -127,15 +193,20 @@ wamp_router/
 ├── config/                    # Configuration templates
 │   ├── clang-format          # Clang-format template
 │   └── vcpkg-baseline.json   # vcpkg version pinning
-├── scripts/                   # Docker wrapper scripts
+├── scripts/                   # Docker wrapper scripts and utilities
 │   ├── build.sh              # Build Docker image
 │   ├── cmake-build.sh        # Configure and build project
 │   ├── run.sh                # Run commands in container
 │   ├── shell.sh              # Interactive container shell
 │   ├── debug.sh              # Debug with GDB in container
-│   └── ci-build.sh           # CI/CD build script
+│   ├── ci-build.sh           # CI/CD build script
+│   └── gen-test-certs.sh     # Generate self-signed certificates for testing
+├── test_certs/                # Generated test certificates (not in git)
+│   ├── cert.pem              # Self-signed certificate
+│   └── key.pem               # Private key
 ├── include/                   # Header-only implementation
-│   ├── wamp_server.hpp       # Server, acceptor, session handler
+│   ├── config.hpp            # TOML configuration loader and parser
+│   ├── wamp_server.hpp       # WampServer (plain TCP for tests), WampTlsServer (TLS 1.3)
 │   ├── wamp_session.hpp      # Protocol state machine, buffering
 │   ├── wamp_messages.hpp     # WAMP message types, error codes
 │   ├── wamp_serializer.hpp   # CBOR serialization/deserialization
@@ -166,10 +237,36 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 
 ### Core Components
 
+#### Configuration (config.hpp)
+- **Config::load()**: Loads and validates TOML configuration from file
+- **ServerConfig**: Holds port, TLS paths, RPC limits, logging level
+- **TlsConfig**: Certificate paths, CA path, client cert requirements
+- Validates certificate files exist at startup (fail-fast on misconfiguration)
+- Uses `std::expected` for error handling with detailed error codes
+
+#### WampTlsServer (wamp_server.hpp)
+- **Production TLS server** - Only accepts TLS 1.3 connections
+- Owns `ssl::context` configured for TLS 1.3 only (rejects TLS ≤ 1.2)
+- Loads certificates from TlsConfig (cert.pem, key.pem)
+- `setup_ssl_context()`: Configures TLS 1.3, cipher suites, client cert requirements
+- `accept_loop()`: Accepts connections, wraps in `ssl::stream<tcp::socket>`, spawns `handle_wamp_session`
+- TLS handshake occurs in `handle_wamp_session` before WAMP protocol handshake
+
 #### WampServer (wamp_server.hpp)
+- **Plain TCP server** - Used for testing only (not in production)
 - Owns the `tcp::acceptor` and spawns coroutines for each accepted connection
 - `accept_loop()`: Infinite coroutine accepting connections, spawning `handle_wamp_session` for each
 - Uses `co_spawn` to launch detached coroutines
+
+#### handle_wamp_session() (wamp_server.hpp)
+- **Templated function** - Works with both `tcp::socket` (tests) and `ssl::stream<tcp::socket>` (production)
+- Coroutine managing a single client connection's lifetime
+- For TLS sockets: Performs `async_handshake` before entering main loop
+- Uses `parallel_group` with `wait_for_one()` to concurrently wait on:
+  - Socket reads (client → router messages)
+  - Event channel receives (router → client events/invocations)
+- Continues until EOF or error, then calls `protocol.on_disconnect()` for cleanup
+- Socket abstraction via template enables zero-overhead polymorphism
 
 #### WampSession (wamp_session.hpp)
 - Protocol state machine with buffering: `AWAITING_RAWSOCKET_HANDSHAKE` → `AWAITING_FRAME_HEADER` → `AWAITING_FRAME_PAYLOAD`
@@ -257,6 +354,9 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 
 ### Dependencies
 - **Boost.Asio**: Asynchronous networking, coroutines (`io_context`, `tcp::acceptor`, `awaitable`, `experimental::channel`)
+- **Boost.Asio.SSL**: TLS 1.3 support (`ssl::context`, `ssl::stream<tcp::socket>`)
+- **OpenSSL**: TLS implementation (required by Boost.Asio.SSL)
+- **toml11**: TOML configuration file parsing
 - **fmt**: String formatting
 - **spdlog**: Structured logging
 - **nlohmann-json**: Used only for CBOR serialization (nlohmann-json's CBOR support)

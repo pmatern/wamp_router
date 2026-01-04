@@ -52,6 +52,11 @@ public:
         return session_id_;
     }
 
+    // Check if WAMP session is established (HELLO/WELCOME handshake complete)
+    [[nodiscard]] bool is_established() const {
+        return wamp_session_established_;
+    }
+
     // Called when TCP connection is established
     void on_connect() {
         // Connection state is managed internally

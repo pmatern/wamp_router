@@ -31,6 +31,7 @@
       "displayName": "Local Release",
       "description": "Local optimized release build",
       "inherits": "local-debug",
+      "binaryDir": "${sourceDir}/build-local-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }

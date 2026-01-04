@@ -11,6 +11,8 @@ find_package(fmt CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(Catch2 3 CONFIG REQUIRED)
+find_package(toml11 CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED)
 
 # Create executable
 add_executable(wamp_router main.cpp)
@@ -25,6 +27,9 @@ target_link_libraries(wamp_router PRIVATE
     fmt::fmt
     spdlog::spdlog
     nlohmann_json::nlohmann_json
+    toml11::toml11
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # Compiler flags
@@ -52,6 +57,7 @@ add_executable(wamp_tests
     tests/test_wamp_session.cpp
     tests/test_procedure_handler.cpp
     tests/test_integration.cpp
+    tests/test_config.cpp
 )
 
 # Add include directory for tests
@@ -65,6 +71,9 @@ target_link_libraries(wamp_tests PRIVATE
     spdlog::spdlog
     nlohmann_json::nlohmann_json
     Catch2::Catch2WithMain
+    toml11::toml11
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # Compiler flags for tests

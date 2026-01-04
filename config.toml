@@ -1,0 +1,27 @@
+# WAMP Router Configuration
+
+[server]
+# Port to listen on for TLS connections
+port = 8080
+
+[server.tls]
+# Path to TLS certificate (PEM format)
+cert = "/path/to/cert.pem"
+
+# Path to TLS private key (PEM format)
+key = "/path/to/key.pem"
+
+# Optional: CA certificate for client verification (mutual TLS)
+# ca = "/path/to/ca.pem"
+
+# Optional: Require client certificates (mutual TLS)
+# require_client_cert = false
+
+[server.rpc]
+# Maximum pending RPC invocations (LRU cache size)
+# Controls how many concurrent CALL operations can be in flight
+max_pending_invocations = 10000
+
+[logging]
+# Log level: trace, debug, info, warn, error, critical
+level = "info"
