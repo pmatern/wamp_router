@@ -232,7 +232,7 @@ wamp_router/
 ├── CMakeLists.txt             # Build config (C++23, Catch2 tests)
 ├── CMakePresets.json          # CMake presets for local and container builds
 ├── vcpkg.json                 # Dependencies manifest
-├── VERSION                    # Docker image version
+├── .version                   # Docker image version
 ├── Dockerfile                 # Build container definition
 ├── .clang-format              # Code formatting configuration
 ├── .dockerignore              # Docker build context exclusions
@@ -325,13 +325,6 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 - State transitions occur as data arrives, extracting complete WAMP messages for handling
 - Calls into PubSubHandler and ProcedureHandler for message dispatch
 - Manages session ID (generated on HELLO, sent in WELCOME)
-
-#### handle_wamp_session() (wamp_server.hpp)
-- Coroutine managing a single client connection's lifetime
-- Uses `parallel_group` with `wait_for_one()` to concurrently wait on:
-  - Socket reads (client → router messages)
-  - Event channel receives (router → client events/invocations)
-- Continues until EOF or error, then calls `protocol.on_disconnect()` for cleanup
 
 #### PubSubHandler (pubsub_handler.hpp)
 - Handles SUBSCRIBE/PUBLISH messages
@@ -453,8 +446,10 @@ gdb ./build/wamp_router
 ```
 
 ### Configuration
-The router currently has minimal configuration (port only). Future configuration points (see main.cpp:11-13):
-- `ProcedureHandler::set_max_pending_invocations(20000)` - limits pending RPC calls
+The router uses TOML configuration files (config.toml or test_config.toml) for all settings:
+- Server port, TLS certificate paths, logging level
+- `max_pending_invocations` - limits pending RPC calls (set via `ProcedureHandler::set_max_pending_invocations()`)
+- Optional authentication keys for WAMP-Cryptosign
 
 ### Performance Considerations
 - **Single-threaded**: Currently runs on single io_context thread. For multi-threading, create thread pool calling `io_context.run()`
