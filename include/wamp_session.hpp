@@ -18,7 +18,6 @@
 /*
  * TODO -
  * - implement auth with cwt
- * - implement tls
  * - register local roles and associated functions, subscriptions, etc
  */
 namespace wamp {
