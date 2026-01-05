@@ -1,4 +1,4 @@
-// Copyright 2026 Patrick Matern
+// Copyright 2026 Pete Matern
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -375,7 +375,7 @@ private:
 
         // Require cryptosign authentication
         if (!hello.authmethods.has_value() ||
-            std::find(hello.authmethods->begin(), hello.authmethods->end(), "cryptosign") ==
+            std::ranges::find(hello.authmethods->begin(), hello.authmethods->end(), "cryptosign") ==
                 hello.authmethods->end()) {
             spdlog::warn("Client does not support cryptosign authentication");
             auto abort = AbortMessage::create_not_authorized(
@@ -395,7 +395,7 @@ private:
         }
 
         // Verify authid exists in configuration
-        if (config_.auth_keys.find(*hello.authid) == config_.auth_keys.end()) {
+        if (config_.auth_keys.contains(*hello.authid)) {
             spdlog::warn("Unknown authid: {}", *hello.authid);
             auto abort = AbortMessage::create_not_authorized("Unknown authid");
             auto abort_cbor = serialize_abort(abort);

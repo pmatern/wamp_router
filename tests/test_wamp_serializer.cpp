@@ -1,4 +1,4 @@
-// Copyright 2026 Patrick Matern
+// Copyright 2026 Pete Matern
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -332,7 +332,7 @@ TEST_CASE("YIELD/RESULT message serialization", "[wamp_serializer][rpc]") {
         // Verify structure
         auto json_result = nlohmann::json::from_cbor(cbor);
         REQUIRE(json_result.is_array());
-        REQUIRE(json_result.size() == 3);
+        REQUIRE(json_result.size() == 4);
         REQUIRE(json_result[0] == static_cast<int>(MessageType::RESULT));
         REQUIRE(json_result[1] == 123);  // request_id
     }

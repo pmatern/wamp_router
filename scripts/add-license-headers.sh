@@ -3,7 +3,7 @@
 
 set -e
 
-LICENSE_HEADER="// Copyright 2026 Patrick Matern
+LICENSE_HEADER="// Copyright 2026 Pete Matern
 //
 // Licensed under the Apache License, Version 2.0 (the \"License\");
 // you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ find . -name "*.cpp" -o -name "*.hpp" | \
   grep -v "/cmake-build" | \
 while read -r file; do
   # Check if file already has Apache license header
-  if ! head -n 1 "$file" | grep -q "Copyright.*Patrick Matern"; then
+  if ! head -n 1 "$file" | grep -q "Copyright.*Pete Matern"; then
     echo "Adding license header to: $file"
     # Create temp file with header + original content
     echo "$LICENSE_HEADER" > "$file.tmp"

@@ -58,6 +58,7 @@ add_executable(wamp_tests
     tests/test_procedure_handler.cpp
     tests/test_integration.cpp
     tests/test_config.cpp
+    tests/test_wamp_client.cpp
 )
 
 # Add include directory for tests

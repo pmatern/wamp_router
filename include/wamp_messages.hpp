@@ -1,4 +1,4 @@
-// Copyright 2026 Patrick Matern
+// Copyright 2026 Pete Matern
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -286,8 +286,8 @@ struct AbortMessage {
 struct ChallengeMessage {
     static constexpr MessageType TYPE = MessageType::CHALLENGE;
 
-    std::string authmethod;  // e.g., "cryptosign"
-    std::map<std::string, std::string> extra;  // Challenge data
+    std::string authmethod{};  // e.g., "cryptosign"
+    std::map<std::string, std::string> extra{};  // Challenge data
 
     ChallengeMessage(std::string auth_method, std::map<std::string, std::string> extra_data)
         : authmethod(std::move(auth_method))
@@ -487,10 +487,14 @@ struct YieldMessage {
 
     uint64_t invocation_id{};  // Request ID from the INVOCATION message
     WampDict options{};
+    WampList arguments{};       // Positional result arguments (optional)
+    WampDict arguments_kw{};    // Keyword result arguments (optional)
 
-    YieldMessage(uint64_t inv_id, WampDict opts)
+    YieldMessage(uint64_t inv_id, WampDict opts, WampList args = {}, WampDict args_kw = {})
         : invocation_id(inv_id)
         , options(std::move(opts))
+        , arguments(std::move(args))
+        , arguments_kw(std::move(args_kw))
     {}
 };
 
@@ -503,10 +507,14 @@ struct ResultMessage {
 
     uint64_t request_id{};  // Request ID from the original CALL message
     WampDict details{};
+    WampList arguments{};       // Positional result arguments (optional)
+    WampDict arguments_kw{};    // Keyword result arguments (optional)
 
-    ResultMessage(uint64_t req_id, WampDict details_dict)
+    ResultMessage(uint64_t req_id, WampDict details_dict, WampList args = {}, WampDict args_kw = {})
         : request_id(req_id)
         , details(std::move(details_dict))
+        , arguments(std::move(args))
+        , arguments_kw(std::move(args_kw))
     {}
 };
 

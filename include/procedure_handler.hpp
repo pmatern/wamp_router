@@ -1,4 +1,4 @@
-// Copyright 2026 Patrick Matern
+// Copyright 2026 Pete Matern
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -216,7 +216,8 @@ public:
         spdlog::debug("Routing YIELD to caller session {} with original request_id={}",
                      caller_session_id, call_request_id);
 
-        auto result = ResultMessage{call_request_id, {}};
+        // Forward arguments from YIELD to RESULT
+        auto result = ResultMessage{call_request_id, {}, yield_msg.arguments, yield_msg.arguments_kw};
         auto result_cbor = serialize_result(result);
         auto result_frame = rawsocket::create_wamp_message(result_cbor);
 

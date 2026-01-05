@@ -1,4 +1,4 @@
-// Copyright 2026 Patrick Matern
+// Copyright 2026 Pete Matern
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -30,11 +30,11 @@ namespace wamp {
 // ============================================================================
 
 inline std::string bytes_to_hex(const std::vector<uint8_t>& bytes) {
-    static const char hex_chars[] = "0123456789abcdef";
     std::string result;
     result.reserve(bytes.size() * 2);
 
     for (uint8_t byte : bytes) {
+        constexpr char hex_chars[] = "0123456789abcdef";
         result.push_back(hex_chars[byte >> 4]);
         result.push_back(hex_chars[byte & 0x0F]);
     }

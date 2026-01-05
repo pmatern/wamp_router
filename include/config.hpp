@@ -1,4 +1,4 @@
-// Copyright 2026 Patrick Matern
+// Copyright 2026 Pete Matern
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -97,10 +97,10 @@ struct TlsConfig {
 // ServerConfig - Complete server configuration
 // ============================================================================
 struct ServerConfig {
-    unsigned short port;
-    TlsConfig tls;
-    size_t max_pending_invocations;
-    spdlog::level::level_enum log_level;
+    unsigned short port{};
+    TlsConfig tls{};
+    size_t max_pending_invocations{};
+    spdlog::level::level_enum log_level{};
 
     // Authentication: authid → Ed25519 public key (hex-encoded, 64 chars = 32 bytes)
     std::unordered_map<std::string, std::string> auth_keys;
@@ -239,7 +239,5 @@ private:
 
 } // namespace wamp
 
-namespace std {
-    template<>
-    struct is_error_code_enum<wamp::ConfigError> : true_type {};
-}
+template<>
+struct std::is_error_code_enum<wamp::ConfigError> : true_type {};

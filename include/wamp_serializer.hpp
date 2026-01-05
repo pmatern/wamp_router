@@ -1,4 +1,4 @@
-// Copyright 2026 Patrick Matern
+// Copyright 2026 Pete Matern
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -81,6 +81,90 @@ using json = nlohmann::json;
 // ============================================================================
 // CBOR Serialization Functions
 // ============================================================================
+inline json serialize_value(const std::variant<std::string, int64_t, bool>& v)
+{
+    if (auto* str = std::get_if<std::string>(&v)) {
+        return json{*str};
+    } else if (auto* num = std::get_if<int64_t>(&v)) {
+        return json{*num};
+    } else if (auto* b = std::get_if<bool>(&v)) {
+        return json{*b};
+    } else
+    {
+        return json{};
+    }
+}
+
+inline json serialize_list(const WampList& list)
+{
+    auto l = json::array();
+    for (const auto& item : list)
+    {
+        if (auto* str = std::get_if<std::string>(&item)) {
+            l.push_back(*str);
+        } else if (auto* num = std::get_if<int64_t>(&item)) {
+            l.push_back(*num);
+        } else if (auto* b = std::get_if<bool>(&item)) {
+            l.push_back(*b);
+        }
+    }
+    return l;
+}
+
+inline json serialize_dict(const WampDict& dict)
+{
+    auto details = json::object();
+    for (const auto& [key, value] : dict) {
+        if (auto* str = std::get_if<std::string>(&value)) {
+            details[key] = *str;
+        } else if (auto* num = std::get_if<int64_t>(&value)) {
+            details[key] = *num;
+        } else if (auto* b = std::get_if<bool>(&value)) {
+            details[key] = *b;
+        }
+    }
+
+    return details;
+}
+
+inline WampList deserialize_list(const json::array_t& j)
+{
+    auto l = WampList{};
+    for (auto& item : j)
+    {
+        if (item.is_number())
+        {
+            l.emplace_back(item.get<int64_t>());
+        } else if (item.is_boolean())
+        {
+            l.emplace_back(item.get<bool>());
+        } else if (item.is_string())
+        {
+            l.emplace_back(item.get<std::string>());
+        }
+    }
+    return l;
+}
+
+inline WampDict deserialize_dict(const json::object_t& j)
+{
+    auto d = WampDict{};
+    for (const auto& [key, value] : j)
+    {
+        if (value.is_number())
+        {
+            d[key] = value.get<int64_t>();
+        } else if (value.is_boolean())
+        {
+            d[key] = value.get<bool>();
+        } else if (value.is_string())
+        {
+            d[key] = value.get<std::string>();
+        }
+    }
+    return d;
+}
+
 
 // Serialize HELLO message to CBOR
 // Format: [1, realm, details]
@@ -751,7 +835,7 @@ inline std::vector<uint8_t> serialize_invocation(const InvocationMessage& msg) {
     // Details (empty object for now)
     j.push_back(json::object());
 
-    // Note: Could add Arguments|list and ArgumentsKw|dict but we ignore for now
+    // TODO: Add Arguments|list and ArgumentsKw|dict but we ignore for now
 
     return json::to_cbor(j);
 }
@@ -808,7 +892,20 @@ inline std::vector<uint8_t> serialize_result(const ResultMessage& msg) {
     // Details (empty object for now)
     j.push_back(json::object());
 
-    // Note: Can optionally include Arguments|list and ArgumentsKw|dict but we ignore for now
+    // Arguments (positional)
+    if (!msg.arguments.empty()) {
+        auto l = serialize_list(msg.arguments);
+        j.push_back(l);
+    } else {
+        j.push_back(json::array());
+    }
+
+    // ArgumentsKw (keyword)
+    if (!msg.arguments_kw.empty()) {
+        auto d = serialize_dict(msg.arguments_kw);
+        j.push_back(d);
+    }
+
     return json::to_cbor(j);
 }
 
@@ -837,9 +934,19 @@ deserialize_yield(const std::vector<uint8_t>& cbor_data) {
         WampDict options{};
         // Could parse options from j[2] if needed
 
-        // Note: j[3] and j[4] may contain Arguments and ArgumentsKw but we ignore for now
+        // Parse optional Arguments (positional)
+        WampList arguments;
+        if (j.size() >= 4 && j[3].is_array()) {
+            arguments = deserialize_list(j[3]);
+        }
 
-        return YieldMessage{invocation_id, options};
+        // Parse optional ArgumentsKw (keyword)
+        WampDict arguments_kw;
+        if (j.size() >= 5 && j[4].is_object()) {
+            arguments_kw = deserialize_dict(j[4]);
+        }
+
+        return YieldMessage{invocation_id, options, arguments, arguments_kw};
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize YIELD: {}", e.what());
@@ -862,16 +969,7 @@ inline std::vector<uint8_t> serialize_error(const ErrorMessage& msg) {
     j.push_back(msg.request_id);
 
     // Details dictionary
-    json details = json::object();
-    for (const auto& [key, value] : msg.details) {
-        if (auto* str = std::get_if<std::string>(&value)) {
-            details[key] = *str;
-        } else if (auto* num = std::get_if<int64_t>(&value)) {
-            details[key] = *num;
-        } else if (auto* b = std::get_if<bool>(&value)) {
-            details[key] = *b;
-        }
-    }
+    json details = serialize_dict(msg.details);
     j.push_back(details);
 
     // Error URI
@@ -913,10 +1011,25 @@ inline std::vector<uint8_t> serialize_call(const CallMessage& msg) {
 // Serialize YIELD message to CBOR
 // Format: [70, INVOCATION.Request|id, Options|dict]
 inline std::vector<uint8_t> serialize_yield(const YieldMessage& msg) {
-    json j = json::array();
+    auto j = json::array();
     j.push_back(static_cast<int>(MessageType::YIELD));
     j.push_back(msg.invocation_id);
     j.push_back(json::object());  // options (empty for now)
+
+    // Arguments (positional)
+    if (!msg.arguments.empty()) {
+        const auto l = serialize_list(msg.arguments);
+        j.push_back(l);
+    } else {
+        j.push_back(json::array());
+    }
+
+    // ArgumentsKw (keyword)
+    if (!msg.arguments_kw.empty()) {
+        const auto d = serialize_dict(msg.arguments_kw);
+        j.push_back(d);
+    }
+
     return json::to_cbor(j);
 }
 
@@ -1058,7 +1171,7 @@ deserialize_invocation(const std::vector<uint8_t>& cbor_data) {
 }
 
 // Deserialize RESULT message from CBOR
-// Format: [50, CALL.Request|id, Details|dict]
+// Format: [50, CALL.Request|id, Details|dict, YIELD.Arguments|list, YIELD.ArgumentsKw|dict]
 inline std::expected<ResultMessage, std::error_code>
 deserialize_result(const std::vector<uint8_t>& cbor_data) {
     try {
@@ -1076,7 +1189,19 @@ deserialize_result(const std::vector<uint8_t>& cbor_data) {
         uint64_t request_id = j[1].get<uint64_t>();
         WampDict details{};  // Simplified - not parsing details for now
 
-        return ResultMessage{request_id, details};
+        // Parse optional Arguments (positional)
+        WampList arguments;
+        if (j.size() >= 4 && j[3].is_array()) {
+            arguments = deserialize_list(j[3]);
+        }
+
+        // Parse optional ArgumentsKw (keyword)
+        WampDict arguments_kw;
+        if (j.size() >= 5 && j[4].is_object()) {
+            arguments_kw = deserialize_dict(j[4]);
+        }
+
+        return ResultMessage{request_id, details, arguments, arguments_kw};
 
     } catch (const json::exception& e) {
         spdlog::error("Failed to deserialize RESULT: {}", e.what());
