@@ -18,12 +18,27 @@
 #include <expected>
 #include <string>
 #include <vector>
+#include <fstream>
+#include <sstream>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/err.h>
+#include <openssl/pem.h>
 #include <spdlog/spdlog.h>
 
 namespace wamp {
+
+// ============================================================================
+// RAII Deleters for OpenSSL Types
+// ============================================================================
+
+struct PKEYDeleter {
+    void operator()(EVP_PKEY* p) const { if (p) EVP_PKEY_free(p); }
+};
+
+struct MDCTXDeleter {
+    void operator()(EVP_MD_CTX* ctx) const { if (ctx) EVP_MD_CTX_free(ctx); }
+};
 
 // ============================================================================
 // Hex Encoding/Decoding Utilities
@@ -139,10 +154,6 @@ inline bool verify_ed25519_signature(
         return false;
     }
 
-    // RAII wrapper for EVP_PKEY
-    struct PKEYDeleter {
-        void operator()(EVP_PKEY* p) const { if (p) EVP_PKEY_free(p); }
-    };
     std::unique_ptr<EVP_PKEY, PKEYDeleter> pkey_guard(pkey);
 
     // Create message digest context
@@ -153,10 +164,6 @@ inline bool verify_ed25519_signature(
         return false;
     }
 
-    // RAII wrapper for EVP_MD_CTX
-    struct MDCTXDeleter {
-        void operator()(EVP_MD_CTX* ctx) const { if (ctx) EVP_MD_CTX_free(ctx); }
-    };
     std::unique_ptr<EVP_MD_CTX, MDCTXDeleter> md_ctx_guard(md_ctx);
 
     // Initialize verification context
@@ -185,6 +192,136 @@ inline bool verify_ed25519_signature(
             ERR_error_string(ERR_get_error(), nullptr));
         return false;
     }
+}
+
+// ============================================================================
+// Ed25519 Private Key Loading
+// ============================================================================
+
+inline std::expected<std::unique_ptr<EVP_PKEY, PKEYDeleter>, std::string>
+load_ed25519_private_key_pem(const std::string& pem_path) {
+    // Open and read PEM file
+    std::ifstream file(pem_path);
+    if (!file.is_open()) {
+        return std::unexpected{"Failed to open private key file: " + pem_path};
+    }
+
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    std::string pem_content = buffer.str();
+    file.close();
+
+    // Create BIO from PEM content
+    BIO* bio = BIO_new_mem_buf(pem_content.data(), static_cast<int>(pem_content.size()));
+    if (!bio) {
+        return std::unexpected{"Failed to create BIO for PEM parsing"};
+    }
+
+    // RAII wrapper for BIO
+    struct BIODeleter {
+        void operator()(BIO* b) const { if (b) BIO_free(b); }
+    };
+    std::unique_ptr<BIO, BIODeleter> bio_guard(bio);
+
+    // Read private key from PEM
+    EVP_PKEY* pkey = PEM_read_bio_PrivateKey(bio, nullptr, nullptr, nullptr);
+    if (!pkey) {
+        return std::unexpected{"Failed to parse PEM private key: " +
+            std::string(ERR_error_string(ERR_get_error(), nullptr))};
+    }
+
+    // Verify it's an Ed25519 key
+    if (EVP_PKEY_id(pkey) != EVP_PKEY_ED25519) {
+        EVP_PKEY_free(pkey);
+        return std::unexpected{"Key is not Ed25519 type"};
+    }
+
+    return std::unique_ptr<EVP_PKEY, PKEYDeleter>(pkey);
+}
+
+// ============================================================================
+// Ed25519 Signing
+// ============================================================================
+
+inline std::expected<std::string, std::string> sign_ed25519(
+    const std::string& message,
+    EVP_PKEY* private_key
+) {
+    if (!private_key) {
+        return std::unexpected{"Private key is null"};
+    }
+
+    // Verify it's an Ed25519 key
+    if (EVP_PKEY_id(private_key) != EVP_PKEY_ED25519) {
+        return std::unexpected{"Key is not Ed25519 type"};
+    }
+
+    // Create message digest context
+    EVP_MD_CTX* md_ctx = EVP_MD_CTX_new();
+    if (!md_ctx) {
+        return std::unexpected{"Failed to create EVP_MD_CTX: " +
+            std::string(ERR_error_string(ERR_get_error(), nullptr))};
+    }
+
+    std::unique_ptr<EVP_MD_CTX, MDCTXDeleter> md_ctx_guard(md_ctx);
+
+    // Initialize signing context (Ed25519 doesn't use a digest, pass nullptr)
+    if (EVP_DigestSignInit(md_ctx, nullptr, nullptr, nullptr, private_key) != 1) {
+        return std::unexpected{"EVP_DigestSignInit failed: " +
+            std::string(ERR_error_string(ERR_get_error(), nullptr))};
+    }
+
+    // Get signature length
+    size_t sig_len = 0;
+    if (EVP_DigestSign(md_ctx,
+                       nullptr, &sig_len,
+                       reinterpret_cast<const unsigned char*>(message.data()),
+                       message.size()) != 1) {
+        return std::unexpected{"EVP_DigestSign (get length) failed: " +
+            std::string(ERR_error_string(ERR_get_error(), nullptr))};
+    }
+
+    // Ed25519 signatures are always 64 bytes
+    if (sig_len != 64) {
+        return std::unexpected{"Unexpected Ed25519 signature length: " + std::to_string(sig_len)};
+    }
+
+    // Sign the message
+    std::vector<uint8_t> signature(sig_len);
+    if (EVP_DigestSign(md_ctx,
+                       signature.data(), &sig_len,
+                       reinterpret_cast<const unsigned char*>(message.data()),
+                       message.size()) != 1) {
+        return std::unexpected{"EVP_DigestSign failed: " +
+            std::string(ERR_error_string(ERR_get_error(), nullptr))};
+    }
+
+    // Return hex-encoded signature
+    return bytes_to_hex(signature);
+}
+
+// ============================================================================
+// Extract Raw Public Key from EVP_PKEY (for getting hex representation)
+// ============================================================================
+
+inline std::expected<std::string, std::string> get_ed25519_public_key_hex(EVP_PKEY* pkey) {
+    if (!pkey) {
+        return std::unexpected{"Key is null"};
+    }
+
+    if (EVP_PKEY_id(pkey) != EVP_PKEY_ED25519) {
+        return std::unexpected{"Key is not Ed25519 type"};
+    }
+
+    size_t pub_len = 32;
+    std::vector<uint8_t> pub_key(pub_len);
+
+    if (EVP_PKEY_get_raw_public_key(pkey, pub_key.data(), &pub_len) != 1) {
+        return std::unexpected{"Failed to get raw public key: " +
+            std::string(ERR_error_string(ERR_get_error(), nullptr))};
+    }
+
+    return bytes_to_hex(pub_key);
 }
 
 } // namespace wamp

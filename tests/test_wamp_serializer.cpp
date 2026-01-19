@@ -407,6 +407,106 @@ TEST_CASE("ERROR message serialization", "[wamp_serializer][rpc]") {
     }
 }
 
+TEST_CASE("CHALLENGE message serialization", "[wamp_serializer]") {
+    SECTION("Serialize and deserialize CHALLENGE with cryptosign") {
+        auto challenge = ChallengeMessage::create_cryptosign("deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567");
+
+        auto cbor = serialize_challenge(challenge);
+        REQUIRE(!cbor.empty());
+
+        auto deserialized = deserialize_challenge(cbor);
+        REQUIRE(deserialized.has_value());
+        REQUIRE(deserialized->authmethod == "cryptosign");
+        REQUIRE(deserialized->extra.contains("challenge"));
+        REQUIRE(deserialized->extra.at("challenge") == "deadbeef0123456789abcdef0123456789abcdef0123456789abcdef01234567");
+    }
+
+    SECTION("CHALLENGE message structure") {
+        ChallengeMessage challenge{"cryptosign", {{"challenge", "abc123"}}};
+
+        auto cbor = serialize_challenge(challenge);
+
+        // Verify structure
+        auto json_result = nlohmann::json::from_cbor(cbor);
+        REQUIRE(json_result.is_array());
+        REQUIRE(json_result.size() == 3);
+        REQUIRE(json_result[0] == static_cast<int>(MessageType::CHALLENGE));
+        REQUIRE(json_result[1] == "cryptosign");
+        REQUIRE(json_result[2].is_object());
+        REQUIRE(json_result[2]["challenge"] == "abc123");
+    }
+
+    SECTION("CHALLENGE with multiple extra fields") {
+        std::map<std::string, std::string> extra;
+        extra["challenge"] = "nonce123";
+        extra["channel_binding"] = "tls-unique";
+        ChallengeMessage challenge{"cryptosign", extra};
+
+        auto cbor = serialize_challenge(challenge);
+        auto deserialized = deserialize_challenge(cbor);
+
+        REQUIRE(deserialized.has_value());
+        REQUIRE(deserialized->extra.size() == 2);
+        REQUIRE(deserialized->extra.at("challenge") == "nonce123");
+        REQUIRE(deserialized->extra.at("channel_binding") == "tls-unique");
+    }
+}
+
+TEST_CASE("AUTHENTICATE message serialization", "[wamp_serializer]") {
+    SECTION("Serialize and deserialize AUTHENTICATE") {
+        AuthenticateMessage auth{"signature_hex_string_here"};
+
+        auto cbor = serialize_authenticate(auth);
+        REQUIRE(!cbor.empty());
+
+        auto deserialized = deserialize_authenticate(cbor);
+        REQUIRE(deserialized.has_value());
+        REQUIRE(deserialized->signature == "signature_hex_string_here");
+        REQUIRE(deserialized->extra.empty());
+    }
+
+    SECTION("AUTHENTICATE message structure") {
+        AuthenticateMessage auth{"abc123def456"};
+
+        auto cbor = serialize_authenticate(auth);
+
+        // Verify structure
+        auto json_result = nlohmann::json::from_cbor(cbor);
+        REQUIRE(json_result.is_array());
+        REQUIRE(json_result.size() == 3);
+        REQUIRE(json_result[0] == static_cast<int>(MessageType::AUTHENTICATE));
+        REQUIRE(json_result[1] == "abc123def456");
+        REQUIRE(json_result[2].is_object());
+    }
+
+    SECTION("AUTHENTICATE with extra fields") {
+        std::map<std::string, std::string> extra;
+        extra["channel_binding"] = "tls-unique";
+        AuthenticateMessage auth{"signature", extra};
+
+        auto cbor = serialize_authenticate(auth);
+        auto deserialized = deserialize_authenticate(cbor);
+
+        REQUIRE(deserialized.has_value());
+        REQUIRE(deserialized->signature == "signature");
+        REQUIRE(deserialized->extra.size() == 1);
+        REQUIRE(deserialized->extra.at("channel_binding") == "tls-unique");
+    }
+
+    SECTION("AUTHENTICATE with long signature (64-byte Ed25519 = 128 hex chars)") {
+        // Real Ed25519 signature is 64 bytes = 128 hex characters
+        std::string long_sig(128, 'a');
+        AuthenticateMessage auth{long_sig};
+
+        auto cbor = serialize_authenticate(auth);
+        auto deserialized = deserialize_authenticate(cbor);
+
+        REQUIRE(deserialized.has_value());
+        REQUIRE(deserialized->signature == long_sig);
+        REQUIRE(deserialized->signature.length() == 128);
+    }
+}
+
 TEST_CASE("Message type detection from CBOR", "[wamp_serializer]") {
     SECTION("Detect HELLO message type") {
         HelloMessage hello{"com.example.realm"};

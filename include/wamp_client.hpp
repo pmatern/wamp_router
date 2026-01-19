@@ -18,6 +18,7 @@
 #include "wamp_messages.hpp"
 #include "wamp_serializer.hpp"
 #include "raw_socket.hpp"
+#include "crypto_utils.hpp"
 #include <boost/asio.hpp>
 #include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
@@ -28,6 +29,7 @@
 #include <string>
 #include <optional>
 #include <expected>
+#include <memory>
 
 namespace wamp {
 
@@ -56,6 +58,7 @@ public:
         , read_loop_running_(false)
         , welcome_channel_(io, 1)
         , goodbye_channel_(io, 1)
+        , challenge_channel_(io, 1)
     {
         spdlog::debug("WampClient created");
     }
@@ -74,13 +77,36 @@ public:
     // Connection Management
     // ========================================================================
 
-    // Connect to WAMP router
+    // Connect to WAMP router (unauthenticated)
     awaitable<void> connect(std::string host, uint16_t port, std::string realm) {
+        co_await connect_with_auth(std::move(host), port, std::move(realm), std::nullopt, std::nullopt);
+    }
+
+    // Connect to WAMP router with authentication
+    awaitable<void> connect_with_auth(
+        std::string host,
+        uint16_t port,
+        std::string realm,
+        std::optional<std::string> authid,
+        std::optional<std::string> private_key_pem_path
+    ) {
         if (state_ != State::DISCONNECTED) {
             throw std::runtime_error("Client already connected or connecting");
         }
 
-        spdlog::info("Connecting to {}:{} for realm '{}'", host, port, realm);
+        // Load private key if authentication is requested
+        if (authid.has_value() && private_key_pem_path.has_value()) {
+            authid_ = *authid;
+            auto key_result = load_ed25519_private_key_pem(*private_key_pem_path);
+            if (!key_result.has_value()) {
+                throw std::runtime_error("Failed to load private key: " + key_result.error());
+            }
+            private_key_ = std::move(*key_result);
+            spdlog::info("Connecting to {}:{} for realm '{}' with authid='{}'", host, port, realm, *authid);
+        } else {
+            spdlog::info("Connecting to {}:{} for realm '{}'", host, port, realm);
+        }
+
         realm_ = realm;
         state_ = State::CONNECTING;
 
@@ -95,6 +121,19 @@ public:
         co_spawn(io_, read_loop(), detached);
 
         co_await send_hello();
+
+        // If authenticating, we expect CHALLENGE then WELCOME
+        // If not authenticating, we expect WELCOME directly
+        if (authid_.has_value()) {
+            // Wait for CHALLENGE
+            auto challenge_opt = co_await challenge_channel_.async_receive(use_awaitable);
+            if (!challenge_opt.has_value()) {
+                throw std::runtime_error("Failed to receive CHALLENGE");
+            }
+
+            // Handle the challenge and send AUTHENTICATE
+            co_await handle_challenge_and_authenticate(*challenge_opt);
+        }
 
         auto welcome_opt = co_await welcome_channel_.async_receive(use_awaitable);
         if (!welcome_opt.has_value()) {
@@ -481,10 +520,18 @@ private:
         welcome_channel_.try_send(boost::system::error_code(), std::make_optional(*welcome_result));
     }
 
-    void handle_challenge(const std::vector<uint8_t>& /* cbor_payload */) {
-        // TODO: Implement authentication flow
-        spdlog::error("CHALLENGE received but authentication not yet implemented");
-        socket_.close();
+    void handle_challenge(const std::vector<uint8_t>& cbor_payload) {
+        auto challenge_result = deserialize_challenge(cbor_payload);
+        if (!challenge_result.has_value()) {
+            spdlog::error("Failed to deserialize CHALLENGE");
+            socket_.close();
+            return;
+        }
+
+        spdlog::info("Received CHALLENGE: authmethod={}", challenge_result->authmethod);
+
+        // Send challenge to channel for connect_with_auth() to process
+        challenge_channel_.try_send(boost::system::error_code(), std::make_optional(*challenge_result));
     }
 
     void handle_subscribed(const std::vector<uint8_t>& cbor_payload) {
@@ -733,9 +780,19 @@ private:
 
     awaitable<void> send_hello() {
         spdlog::info("send_hello() called, preparing HELLO message");
-        state_ = State::AWAITING_WELCOME;
 
         HelloMessage hello = HelloMessage::create_client(realm_);
+
+        // Add authentication info if provided
+        if (authid_.has_value()) {
+            hello.authid = *authid_;
+            hello.authmethods = std::vector<std::string>{"cryptosign"};
+            state_ = State::AWAITING_CHALLENGE;
+            spdlog::info("HELLO will include authid='{}', authmethods=['cryptosign']", *authid_);
+        } else {
+            state_ = State::AWAITING_WELCOME;
+        }
+
         auto hello_cbor = serialize_hello(hello);
         auto hello_frame = rawsocket::create_wamp_message(hello_cbor);
 
@@ -748,6 +805,51 @@ private:
         );
 
         spdlog::info("Sent HELLO for realm '{}'", realm_);
+    }
+
+    awaitable<void> handle_challenge_and_authenticate(const ChallengeMessage& challenge) {
+        spdlog::info("Handling CHALLENGE with authmethod='{}'", challenge.authmethod);
+
+        if (challenge.authmethod != "cryptosign") {
+            throw std::runtime_error("Unsupported auth method: " + challenge.authmethod);
+        }
+
+        // Extract challenge nonce from extra
+        auto it = challenge.extra.find("challenge");
+        if (it == challenge.extra.end()) {
+            throw std::runtime_error("CHALLENGE missing 'challenge' field in extra");
+        }
+        const std::string& challenge_nonce = it->second;
+
+        spdlog::debug("Challenge nonce: {}", challenge_nonce);
+
+        // Build message to sign: challenge|0|authid|user
+        std::string message_to_sign = challenge_nonce + "|0|" + *authid_ + "|user";
+
+        spdlog::debug("Message to sign: {}", message_to_sign);
+
+        // Sign the message
+        auto signature_result = sign_ed25519(message_to_sign, private_key_.get());
+        if (!signature_result.has_value()) {
+            throw std::runtime_error("Failed to sign challenge: " + signature_result.error());
+        }
+
+        spdlog::debug("Signature: {}", *signature_result);
+
+        // Send AUTHENTICATE message
+        state_ = State::AWAITING_WELCOME;
+
+        AuthenticateMessage auth{*signature_result};
+        auto auth_cbor = serialize_authenticate(auth);
+        auto auth_frame = rawsocket::create_wamp_message(auth_cbor);
+
+        co_await boost::asio::async_write(
+            socket_,
+            boost::asio::buffer(auth_frame),
+            use_awaitable
+        );
+
+        spdlog::info("Sent AUTHENTICATE message");
     }
 
     template<typename MessageType>
@@ -794,6 +896,7 @@ private:
         CONNECTING,
         AWAITING_RAWSOCKET_RESPONSE,
         AWAITING_WELCOME,
+        AWAITING_CHALLENGE,
         AWAITING_AUTHENTICATE,
         ESTABLISHED,
         CLOSING,
@@ -833,6 +936,12 @@ private:
     // Disconnection
     using GoodbyeChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<GoodbyeMessage>)>;
     GoodbyeChannel goodbye_channel_;
+
+    // Authentication
+    using ChallengeChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<ChallengeMessage>)>;
+    ChallengeChannel challenge_channel_;
+    std::optional<std::string> authid_;
+    std::unique_ptr<EVP_PKEY, PKEYDeleter> private_key_;
 
     // Pending requests (using channels for async awaiting with optional for default-constructibility)
     using SubscribedChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<SubscribedMessage>)>;

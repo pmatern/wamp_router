@@ -32,7 +32,7 @@
 #include <system_error>
 #include <cstdint>
 
-// TODO - finish client support (challenge/auth), tidy up serialization, in process client support, fix names.
+// TODO - in process client support, fix names.
 
 namespace wamp {
 
@@ -227,7 +227,13 @@ private:
         buffer_.erase(buffer_.begin(), buffer_.begin() + rawsocket::FRAME_HEADER_SIZE);
 
         expected_payload_length_ = current_frame_header_.payload_length;
-        state_ = SessionProtocolState::AWAITING_FRAME_PAYLOAD;
+
+        // If we're expecting an AUTHENTICATE message (after CHALLENGE), go to that state
+        if (expect_authenticate_) {
+            state_ = SessionProtocolState::AWAITING_AUTHENTICATE;
+        } else {
+            state_ = SessionProtocolState::AWAITING_FRAME_PAYLOAD;
+        }
 
         // Continue processing if payload is already in buffer
         return std::span<const uint8_t>{};
@@ -296,6 +302,7 @@ private:
         }
 
         // Handle AUTHENTICATE message
+        expect_authenticate_ = false;  // Reset the flag
         auto result = handle_authenticate_message(payload);
 
         // Note: state transition happens in handle_authenticate_message()
@@ -395,7 +402,7 @@ private:
         }
 
         // Verify authid exists in configuration
-        if (config_.auth_keys.contains(*hello.authid)) {
+        if (!config_.auth_keys.contains(*hello.authid)) {
             spdlog::warn("Unknown authid: {}", *hello.authid);
             auto abort = AbortMessage::create_not_authorized("Unknown authid");
             auto abort_cbor = serialize_abort(abort);
@@ -421,7 +428,9 @@ private:
         auto challenge_cbor = serialize_challenge(challenge);
         response_buffer_ = rawsocket::create_wamp_message(challenge_cbor);
 
-        state_ = SessionProtocolState::AWAITING_AUTHENTICATE;
+        // Go to frame header state, and flag that we expect AUTHENTICATE
+        expect_authenticate_ = true;
+        state_ = SessionProtocolState::AWAITING_FRAME_HEADER;
 
         return std::span<const uint8_t>(response_buffer_);
     }
@@ -688,6 +697,7 @@ private:
     // Authentication state
     std::string pending_authid_;      // authid from HELLO message (during auth)
     std::string pending_challenge_;   // Challenge sent to client (hex-encoded)
+    bool expect_authenticate_{false}; // True when expecting AUTHENTICATE message
 };
 
 } // namespace wamp

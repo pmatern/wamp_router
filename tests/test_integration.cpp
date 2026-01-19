@@ -17,6 +17,7 @@
 #include "include/wamp_server.hpp"
 #include "include/wamp_serializer.hpp"
 #include "include/raw_socket.hpp"
+#include "include/crypto_utils.hpp"
 #include <boost/asio.hpp>
 #include <thread>
 #include <chrono>
@@ -24,6 +25,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <future>
+#include <fstream>
 
 using namespace wamp;
 using namespace std::chrono_literals;
@@ -640,4 +642,321 @@ TEST_CASE("Integration: Multiple clients with mixed operations", "[integration]"
 
     auto result = client2.wait_for_result(2s);
     REQUIRE(result.has_value());
+}
+
+// ============================================================================
+// Authentication Integration Tests
+// ============================================================================
+
+// Helper to create Ed25519 key pair for auth tests
+static std::pair<std::string, std::string> create_integration_test_keypair() {
+    EVP_PKEY* pkey = nullptr;
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
+
+    if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0 || EVP_PKEY_keygen(ctx, &pkey) <= 0) {
+        if (ctx) EVP_PKEY_CTX_free(ctx);
+        throw std::runtime_error("Failed to generate test key pair");
+    }
+    EVP_PKEY_CTX_free(ctx);
+
+    // Extract public key hex
+    size_t pub_len = 32;
+    std::vector<uint8_t> pub_key(pub_len);
+    EVP_PKEY_get_raw_public_key(pkey, pub_key.data(), &pub_len);
+    std::string public_key_hex = bytes_to_hex(pub_key);
+
+    // Write private key to temp file
+    std::string priv_path = "/tmp/wamp_integration_test_key.pem";
+    FILE* priv_file = fopen(priv_path.c_str(), "w");
+    if (!priv_file) {
+        EVP_PKEY_free(pkey);
+        throw std::runtime_error("Failed to create temp private key file");
+    }
+
+    PEM_write_PrivateKey(priv_file, pkey, nullptr, nullptr, 0, nullptr, nullptr);
+    fclose(priv_file);
+    EVP_PKEY_free(pkey);
+
+    return {priv_path, public_key_hex};
+}
+
+// Helper to create auth-enabled ServerConfig
+static ServerConfig create_auth_server_config(const std::string& authid, const std::string& public_key_hex) {
+    ServerConfig config;
+    config.port = 0;  // Let OS assign port
+    config.tls.cert_path = "test_certs/cert.pem";
+    config.tls.key_path = "test_certs/key.pem";
+    config.max_pending_invocations = 1000;
+    config.log_level = spdlog::level::warn;
+    config.auth_keys[authid] = public_key_hex;
+    return config;
+}
+
+// Server fixture that supports authentication
+class WampAuthServerFixture {
+public:
+    WampAuthServerFixture(const std::string& authid, const std::string& public_key_hex)
+        : port_(0)
+        , server_running_(false)
+        , server_io_(nullptr)
+    {
+        start_server(authid, public_key_hex);
+        start_client_io();
+    }
+
+    ~WampAuthServerFixture() {
+        stop_client_io();
+        stop_server();
+    }
+
+    unsigned short port() const { return port_; }
+    asio::io_context& io_context() { return client_io_; }
+
+private:
+    void start_server(const std::string& authid, const std::string& public_key_hex) {
+        std::promise<unsigned short> port_promise;
+        auto port_future = port_promise.get_future();
+
+        server_thread_ = std::thread([this, authid, public_key_hex, port_promise = std::move(port_promise)]() mutable {
+            try {
+                asio::io_context server_io;
+                server_io_ = &server_io;
+
+                auto config = create_auth_server_config(authid, public_key_hex);
+                WampServer server(server_io, 0, config);
+
+                unsigned short bound_port = server.port();
+                port_promise.set_value(bound_port);
+
+                server.start();
+                server_running_ = true;
+                spdlog::info("Auth test server started on port {}", bound_port);
+
+                server_io.run();
+            } catch (const std::exception& e) {
+                spdlog::error("Server error: {}", e.what());
+                try {
+                    port_promise.set_exception(std::current_exception());
+                } catch (...) {}
+            }
+        });
+
+        port_ = port_future.get();
+        std::this_thread::sleep_for(50ms);
+    }
+
+    void stop_server() {
+        server_running_ = false;
+        if (server_io_) {
+            server_io_->stop();
+        }
+        if (server_thread_.joinable()) {
+            server_thread_.join();
+        }
+    }
+
+    void start_client_io() {
+        client_thread_ = std::thread([this]() {
+            client_io_.run();
+        });
+        std::this_thread::sleep_for(10ms);
+    }
+
+    void stop_client_io() {
+        client_io_.stop();
+        if (client_thread_.joinable()) {
+            client_thread_.join();
+        }
+    }
+
+    std::thread server_thread_;
+    std::thread client_thread_;
+    unsigned short port_;
+    std::atomic<bool> server_running_;
+    asio::io_context* server_io_;
+    asio::io_context client_io_;
+};
+
+// Auth-aware test client that can perform cryptosign authentication
+class WampAuthTestClient {
+public:
+    WampAuthTestClient(asio::io_context& io, const std::string& priv_key_path, const std::string& authid)
+        : io_(io)
+        , socket_(io)
+        , priv_key_path_(priv_key_path)
+        , authid_(authid)
+        , session_id_(0)
+        , stopped_(false)
+    {}
+
+    ~WampAuthTestClient() {
+        disconnect();
+    }
+
+    bool connect(unsigned short port, std::chrono::milliseconds timeout = 5s) {
+        try {
+            // Connect TCP socket
+            tcp::resolver resolver(io_);
+            auto endpoints = resolver.resolve("127.0.0.1", std::to_string(port));
+
+            boost::system::error_code ec;
+            asio::connect(socket_, endpoints, ec);
+            if (ec) return false;
+
+            // RawSocket handshake
+            auto handshake = rawsocket::encode_handshake_request({
+                .max_length = rawsocket::MaxLengthCode::BYTES_16K,
+                .serializer = rawsocket::Serializer::CBOR
+            });
+            asio::write(socket_, asio::buffer(handshake));
+
+            std::vector<uint8_t> handshake_response(4);
+            asio::read(socket_, asio::buffer(handshake_response));
+
+            // Send HELLO with auth info
+            HelloMessage hello = HelloMessage::create_client("com.example.realm");
+            hello.authid = authid_;
+            hello.authmethods = std::vector<std::string>{"cryptosign"};
+
+            auto hello_cbor = serialize_hello(hello);
+            auto hello_frame = rawsocket::create_wamp_message(hello_cbor);
+            asio::write(socket_, asio::buffer(hello_frame));
+
+            // Wait for CHALLENGE
+            auto challenge_msg = read_wamp_message(timeout);
+            if (!challenge_msg.has_value()) return false;
+
+            auto msg_type = get_message_type_from_cbor(*challenge_msg);
+            if (!msg_type.has_value() || *msg_type != MessageType::CHALLENGE) {
+                // Check if it's an ABORT
+                if (msg_type.has_value() && *msg_type == MessageType::ABORT) {
+                    spdlog::warn("Received ABORT instead of CHALLENGE");
+                    return false;
+                }
+                return false;
+            }
+
+            auto challenge = deserialize_challenge(*challenge_msg);
+            if (!challenge.has_value()) return false;
+
+            // Load private key and sign
+            auto key_result = load_ed25519_private_key_pem(priv_key_path_);
+            if (!key_result.has_value()) return false;
+
+            std::string challenge_nonce = challenge->extra.at("challenge");
+            std::string message_to_sign = challenge_nonce + "|0|" + authid_ + "|user";
+
+            auto sig_result = sign_ed25519(message_to_sign, key_result->get());
+            if (!sig_result.has_value()) return false;
+
+            // Send AUTHENTICATE
+            AuthenticateMessage auth{*sig_result};
+            auto auth_cbor = serialize_authenticate(auth);
+            auto auth_frame = rawsocket::create_wamp_message(auth_cbor);
+            asio::write(socket_, asio::buffer(auth_frame));
+
+            // Wait for WELCOME
+            auto welcome_msg = read_wamp_message(timeout);
+            if (!welcome_msg.has_value()) return false;
+
+            auto welcome_type = get_message_type_from_cbor(*welcome_msg);
+            if (!welcome_type.has_value() || *welcome_type != MessageType::WELCOME) {
+                return false;
+            }
+
+            auto welcome = deserialize_welcome(*welcome_msg);
+            if (!welcome.has_value()) return false;
+
+            session_id_ = welcome->session_id;
+            return true;
+
+        } catch (const std::exception& e) {
+            spdlog::error("Auth client connect failed: {}", e.what());
+            return false;
+        }
+    }
+
+    void disconnect() {
+        stopped_ = true;
+        if (socket_.is_open()) {
+            boost::system::error_code ec;
+            socket_.close(ec);
+        }
+    }
+
+    uint64_t session_id() const { return session_id_; }
+
+private:
+    std::optional<std::vector<uint8_t>> read_wamp_message(std::chrono::milliseconds timeout) {
+        (void)timeout;  // For now, we use blocking reads
+
+        try {
+            // Read frame header
+            std::vector<uint8_t> header_buf(4);
+            boost::system::error_code ec;
+            asio::read(socket_, asio::buffer(header_buf), ec);
+            if (ec) return std::nullopt;
+
+            auto header = rawsocket::decode_frame_header(header_buf);
+            if (!header.has_value()) return std::nullopt;
+
+            // Read payload
+            std::vector<uint8_t> payload(header->payload_length);
+            asio::read(socket_, asio::buffer(payload), ec);
+            if (ec) return std::nullopt;
+
+            return payload;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    asio::io_context& io_;
+    tcp::socket socket_;
+    std::string priv_key_path_;
+    std::string authid_;
+    uint64_t session_id_;
+    std::atomic<bool> stopped_;
+};
+
+TEST_CASE("Integration: Authenticated client connects successfully", "[integration][auth]") {
+    auto [priv_path, public_key_hex] = create_integration_test_keypair();
+
+    WampAuthServerFixture fixture("testuser", public_key_hex);
+    WampAuthTestClient client(fixture.io_context(), priv_path, "testuser");
+
+    bool connected = client.connect(fixture.port(), 5s);
+    REQUIRE(connected);
+    REQUIRE(client.session_id() > 0);
+
+    std::remove(priv_path.c_str());
+}
+
+TEST_CASE("Integration: Unknown authid rejected", "[integration][auth]") {
+    auto [priv_path, public_key_hex] = create_integration_test_keypair();
+
+    // Server configured for "validuser" but client uses "wronguser"
+    WampAuthServerFixture fixture("validuser", public_key_hex);
+    WampAuthTestClient client(fixture.io_context(), priv_path, "wronguser");
+
+    bool connected = client.connect(fixture.port(), 5s);
+    REQUIRE(!connected);
+
+    std::remove(priv_path.c_str());
+}
+
+TEST_CASE("Integration: Invalid signature rejected", "[integration][auth]") {
+    // Create two different key pairs
+    auto [priv_path1, public_key_hex1] = create_integration_test_keypair();
+    auto [priv_path2, public_key_hex2] = create_integration_test_keypair();
+
+    // Server expects public_key_hex1, but client uses private key from pair 2
+    WampAuthServerFixture fixture("testuser", public_key_hex1);
+    WampAuthTestClient client(fixture.io_context(), priv_path2, "testuser");
+
+    bool connected = client.connect(fixture.port(), 5s);
+    REQUIRE(!connected);
+
+    std::remove(priv_path1.c_str());
+    std::remove(priv_path2.c_str());
 }

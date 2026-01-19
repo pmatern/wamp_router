@@ -17,7 +17,9 @@
 #include "include/wamp_session.hpp"
 #include "include/wamp_serializer.hpp"
 #include "include/raw_socket.hpp"
+#include "include/crypto_utils.hpp"
 #include <boost/asio/io_context.hpp>
+#include <fstream>
 
 using namespace wamp;
 
@@ -310,4 +312,351 @@ TEST_CASE("WampSession buffering behavior", "[wamp_session]") {
         REQUIRE(result.has_value());
         REQUIRE(!result->empty());  // Should return handshake response
     }
+}
+
+// ============================================================================
+// Authentication Tests
+// ============================================================================
+
+// Helper to create a test key pair and return (priv_path, public_key_hex)
+static std::pair<std::string, std::string> create_auth_test_keypair() {
+    EVP_PKEY* pkey = nullptr;
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
+
+    if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0 || EVP_PKEY_keygen(ctx, &pkey) <= 0) {
+        if (ctx) EVP_PKEY_CTX_free(ctx);
+        throw std::runtime_error("Failed to generate test key pair");
+    }
+    EVP_PKEY_CTX_free(ctx);
+
+    // Extract public key hex
+    size_t pub_len = 32;
+    std::vector<uint8_t> pub_key(pub_len);
+    EVP_PKEY_get_raw_public_key(pkey, pub_key.data(), &pub_len);
+    std::string public_key_hex = bytes_to_hex(pub_key);
+
+    // Write private key to temp file
+    std::string priv_path = "/tmp/wamp_test_auth_key.pem";
+    FILE* priv_file = fopen(priv_path.c_str(), "w");
+    if (!priv_file) {
+        EVP_PKEY_free(pkey);
+        throw std::runtime_error("Failed to create temp private key file");
+    }
+
+    PEM_write_PrivateKey(priv_file, pkey, nullptr, nullptr, 0, nullptr, nullptr);
+    fclose(priv_file);
+    EVP_PKEY_free(pkey);
+
+    return {priv_path, public_key_hex};
+}
+
+// Helper function to create auth-enabled ServerConfig
+static ServerConfig create_auth_test_config(const std::string& authid, const std::string& public_key_hex) {
+    ServerConfig config;
+    config.port = 8080;
+    config.tls.cert_path = "test_certs/cert.pem";
+    config.tls.key_path = "test_certs/key.pem";
+    config.max_pending_invocations = 1000;
+    config.log_level = spdlog::level::debug;
+    config.auth_keys[authid] = public_key_hex;
+    return config;
+}
+
+TEST_CASE("WampSession authentication - unknown authid rejected", "[wamp_session][auth]") {
+    auto [priv_path, public_key_hex] = create_auth_test_keypair();
+
+    boost::asio::io_context io;
+    // Configure with auth key for "validuser"
+    auto config = create_auth_test_config("validuser", public_key_hex);
+    WampSession session{io, config};
+
+    session.on_connect();
+
+    // Complete RawSocket handshake
+    auto handshake = rawsocket::encode_handshake_request({
+        .max_length = rawsocket::MaxLengthCode::BYTES_16M,
+        .serializer = rawsocket::Serializer::CBOR
+    });
+    session.process(std::span{handshake.data(), handshake.size()});
+
+    // Send HELLO with unknown authid
+    HelloMessage hello{"com.example.realm"};
+    hello.authid = "unknownuser";  // Not in auth_keys
+    hello.authmethods = std::vector<std::string>{"cryptosign"};
+
+    auto hello_cbor = serialize_hello(hello);
+    auto hello_frame = rawsocket::create_wamp_message(hello_cbor);
+
+    auto result = session.process(std::span{hello_frame.data(), hello_frame.size()});
+
+    REQUIRE(result.has_value());
+    REQUIRE(!result->empty());
+
+    // Should receive ABORT message
+    std::span response_payload{result->data() + 4, result->size() - 4};
+    std::vector<uint8_t> payload_vec{response_payload.begin(), response_payload.end()};
+
+    auto msg_type = get_message_type_from_cbor(payload_vec);
+    REQUIRE(msg_type.has_value());
+    REQUIRE(*msg_type == MessageType::ABORT);
+
+    auto abort = deserialize_abort(payload_vec);
+    REQUIRE(abort.has_value());
+    REQUIRE(abort->reason == "wamp.error.not_authorized");
+
+    std::remove(priv_path.c_str());
+}
+
+TEST_CASE("WampSession authentication - missing authid rejected", "[wamp_session][auth]") {
+    auto [priv_path, public_key_hex] = create_auth_test_keypair();
+
+    boost::asio::io_context io;
+    auto config = create_auth_test_config("testuser", public_key_hex);
+    WampSession session{io, config};
+
+    session.on_connect();
+
+    // Complete RawSocket handshake
+    auto handshake = rawsocket::encode_handshake_request({
+        .max_length = rawsocket::MaxLengthCode::BYTES_16M,
+        .serializer = rawsocket::Serializer::CBOR
+    });
+    session.process(std::span{handshake.data(), handshake.size()});
+
+    // Send HELLO with cryptosign but no authid
+    HelloMessage hello{"com.example.realm"};
+    hello.authmethods = std::vector<std::string>{"cryptosign"};
+    // Note: authid is not set
+
+    auto hello_cbor = serialize_hello(hello);
+    auto hello_frame = rawsocket::create_wamp_message(hello_cbor);
+
+    auto result = session.process(std::span{hello_frame.data(), hello_frame.size()});
+
+    REQUIRE(result.has_value());
+    REQUIRE(!result->empty());
+
+    // Should receive ABORT message
+    std::span response_payload{result->data() + 4, result->size() - 4};
+    std::vector<uint8_t> payload_vec{response_payload.begin(), response_payload.end()};
+
+    auto msg_type = get_message_type_from_cbor(payload_vec);
+    REQUIRE(msg_type.has_value());
+    REQUIRE(*msg_type == MessageType::ABORT);
+
+    std::remove(priv_path.c_str());
+}
+
+TEST_CASE("WampSession authentication - sends CHALLENGE for valid authid", "[wamp_session][auth]") {
+    auto [priv_path, public_key_hex] = create_auth_test_keypair();
+
+    boost::asio::io_context io;
+    auto config = create_auth_test_config("testuser", public_key_hex);
+    WampSession session{io, config};
+
+    session.on_connect();
+
+    // Complete RawSocket handshake
+    auto handshake = rawsocket::encode_handshake_request({
+        .max_length = rawsocket::MaxLengthCode::BYTES_16M,
+        .serializer = rawsocket::Serializer::CBOR
+    });
+    session.process(std::span{handshake.data(), handshake.size()});
+
+    // Send HELLO with valid authid
+    HelloMessage hello{"com.example.realm"};
+    hello.authid = "testuser";
+    hello.authmethods = std::vector<std::string>{"cryptosign"};
+
+    auto hello_cbor = serialize_hello(hello);
+    auto hello_frame = rawsocket::create_wamp_message(hello_cbor);
+
+    auto result = session.process(std::span{hello_frame.data(), hello_frame.size()});
+
+    REQUIRE(result.has_value());
+    REQUIRE(!result->empty());
+
+    // Should receive CHALLENGE message
+    std::span response_payload{result->data() + 4, result->size() - 4};
+    std::vector<uint8_t> payload_vec{response_payload.begin(), response_payload.end()};
+
+    auto msg_type = get_message_type_from_cbor(payload_vec);
+    REQUIRE(msg_type.has_value());
+    REQUIRE(*msg_type == MessageType::CHALLENGE);
+
+    auto challenge = deserialize_challenge(payload_vec);
+    REQUIRE(challenge.has_value());
+    REQUIRE(challenge->authmethod == "cryptosign");
+    REQUIRE(challenge->extra.contains("challenge"));
+    REQUIRE(challenge->extra.at("challenge").length() == 64);  // 32 bytes hex
+
+    std::remove(priv_path.c_str());
+}
+
+TEST_CASE("WampSession authentication - full flow success", "[wamp_session][auth]") {
+    auto [priv_path, public_key_hex] = create_auth_test_keypair();
+
+    boost::asio::io_context io;
+    auto config = create_auth_test_config("testuser", public_key_hex);
+    WampSession session{io, config};
+
+    session.on_connect();
+
+    // Complete RawSocket handshake
+    auto handshake = rawsocket::encode_handshake_request({
+        .max_length = rawsocket::MaxLengthCode::BYTES_16M,
+        .serializer = rawsocket::Serializer::CBOR
+    });
+    session.process(std::span{handshake.data(), handshake.size()});
+
+    // Send HELLO with valid authid
+    HelloMessage hello{"com.example.realm"};
+    hello.authid = "testuser";
+    hello.authmethods = std::vector<std::string>{"cryptosign"};
+
+    auto hello_cbor = serialize_hello(hello);
+    auto hello_frame = rawsocket::create_wamp_message(hello_cbor);
+
+    auto hello_result = session.process(std::span{hello_frame.data(), hello_frame.size()});
+
+    REQUIRE(hello_result.has_value());
+    REQUIRE(!hello_result->empty());
+
+    // Extract CHALLENGE
+    std::span challenge_payload{hello_result->data() + 4, hello_result->size() - 4};
+    std::vector<uint8_t> challenge_vec{challenge_payload.begin(), challenge_payload.end()};
+
+    auto challenge = deserialize_challenge(challenge_vec);
+    REQUIRE(challenge.has_value());
+
+    // Load private key and sign challenge
+    auto key_result = load_ed25519_private_key_pem(priv_path);
+    REQUIRE(key_result.has_value());
+
+    std::string challenge_nonce = challenge->extra.at("challenge");
+    std::string message_to_sign = challenge_nonce + "|0|testuser|user";
+
+    auto sig_result = sign_ed25519(message_to_sign, key_result->get());
+    REQUIRE(sig_result.has_value());
+
+    // Send AUTHENTICATE
+    AuthenticateMessage auth{*sig_result};
+    auto auth_cbor = serialize_authenticate(auth);
+    auto auth_frame = rawsocket::create_wamp_message(auth_cbor);
+
+    auto auth_result = session.process(std::span{auth_frame.data(), auth_frame.size()});
+
+    REQUIRE(auth_result.has_value());
+    REQUIRE(!auth_result->empty());
+
+    // Should receive WELCOME
+    std::span welcome_payload{auth_result->data() + 4, auth_result->size() - 4};
+    std::vector<uint8_t> welcome_vec{welcome_payload.begin(), welcome_payload.end()};
+
+    auto msg_type = get_message_type_from_cbor(welcome_vec);
+    REQUIRE(msg_type.has_value());
+    REQUIRE(*msg_type == MessageType::WELCOME);
+
+    auto welcome = deserialize_welcome(welcome_vec);
+    REQUIRE(welcome.has_value());
+    REQUIRE(welcome->session_id != 0);
+    REQUIRE(welcome->authid == "testuser");
+    REQUIRE(welcome->authmethod == "cryptosign");
+
+    // Session should be established
+    REQUIRE(session.is_established());
+    REQUIRE(session.session_id() != 0);
+
+    std::remove(priv_path.c_str());
+}
+
+TEST_CASE("WampSession authentication - invalid signature rejected", "[wamp_session][auth]") {
+    auto [priv_path, public_key_hex] = create_auth_test_keypair();
+
+    boost::asio::io_context io;
+    auto config = create_auth_test_config("testuser", public_key_hex);
+    WampSession session{io, config};
+
+    session.on_connect();
+
+    // Complete RawSocket handshake
+    auto handshake = rawsocket::encode_handshake_request({
+        .max_length = rawsocket::MaxLengthCode::BYTES_16M,
+        .serializer = rawsocket::Serializer::CBOR
+    });
+    session.process(std::span{handshake.data(), handshake.size()});
+
+    // Send HELLO
+    HelloMessage hello{"com.example.realm"};
+    hello.authid = "testuser";
+    hello.authmethods = std::vector<std::string>{"cryptosign"};
+
+    auto hello_cbor = serialize_hello(hello);
+    auto hello_frame = rawsocket::create_wamp_message(hello_cbor);
+
+    auto hello_result = session.process(std::span{hello_frame.data(), hello_frame.size()});
+
+    REQUIRE(hello_result.has_value());
+
+    // Send AUTHENTICATE with invalid signature (all zeros)
+    std::string fake_sig(128, '0');  // 64 bytes of zeros in hex
+    AuthenticateMessage auth{fake_sig};
+    auto auth_cbor = serialize_authenticate(auth);
+    auto auth_frame = rawsocket::create_wamp_message(auth_cbor);
+
+    auto auth_result = session.process(std::span{auth_frame.data(), auth_frame.size()});
+
+    REQUIRE(auth_result.has_value());
+    REQUIRE(!auth_result->empty());
+
+    // Should receive ABORT
+    std::span abort_payload{auth_result->data() + 4, auth_result->size() - 4};
+    std::vector<uint8_t> abort_vec{abort_payload.begin(), abort_payload.end()};
+
+    auto msg_type = get_message_type_from_cbor(abort_vec);
+    REQUIRE(msg_type.has_value());
+    REQUIRE(*msg_type == MessageType::ABORT);
+
+    auto abort = deserialize_abort(abort_vec);
+    REQUIRE(abort.has_value());
+    REQUIRE(abort->reason == "wamp.error.not_authorized");
+
+    std::remove(priv_path.c_str());
+}
+
+TEST_CASE("WampSession authentication - no auth required when auth_keys empty", "[wamp_session][auth]") {
+    boost::asio::io_context io;
+    auto config = create_test_config();  // No auth_keys configured
+    WampSession session{io, config};
+
+    session.on_connect();
+
+    // Complete RawSocket handshake
+    auto handshake = rawsocket::encode_handshake_request({
+        .max_length = rawsocket::MaxLengthCode::BYTES_16M,
+        .serializer = rawsocket::Serializer::CBOR
+    });
+    session.process(std::span{handshake.data(), handshake.size()});
+
+    // Send HELLO without any auth info
+    HelloMessage hello{"com.example.realm"};
+    hello.roles.push_back(Role{"subscriber", {}});
+
+    auto hello_cbor = serialize_hello(hello);
+    auto hello_frame = rawsocket::create_wamp_message(hello_cbor);
+
+    auto result = session.process(std::span{hello_frame.data(), hello_frame.size()});
+
+    REQUIRE(result.has_value());
+    REQUIRE(!result->empty());
+
+    // Should receive WELCOME directly (no CHALLENGE)
+    std::span response_payload{result->data() + 4, result->size() - 4};
+    std::vector<uint8_t> payload_vec{response_payload.begin(), response_payload.end()};
+
+    auto msg_type = get_message_type_from_cbor(payload_vec);
+    REQUIRE(msg_type.has_value());
+    REQUIRE(*msg_type == MessageType::WELCOME);
+
+    REQUIRE(session.is_established());
 }
