@@ -88,10 +88,10 @@ inline json variant_to_json(const std::variant<std::string, int64_t, bool>& v) {
 }
 
 // Convert WampDict element variant to JSON (includes nested dict support)
-inline json variant_to_json(const typename WampDict::mapped_type& v) {
+inline json variant_to_json(const WampDict::mapped_type& v) {
     return std::visit(
-        [](const auto& val) -> json {
-            using T = std::decay_t<decltype(val)>;
+        []<typename T0>(const T0& val) -> json {
+            using T = std::decay_t<T0>;
             if constexpr (std::is_same_v<T, std::unordered_map<std::string, std::string>>) {
                 return json(val);
             } else {
@@ -114,7 +114,7 @@ inline std::optional<std::variant<std::string, int64_t, bool>> json_to_list_vari
 }
 
 // Convert JSON to WampDict element variant
-inline std::optional<typename WampDict::mapped_type> json_to_dict_variant(const json& j) {
+inline std::optional<WampDict::mapped_type> json_to_dict_variant(const json& j) {
     if (j.is_string()) {
         return j.get<std::string>();
     } else if (j.is_boolean()) {
@@ -131,6 +131,39 @@ inline std::optional<typename WampDict::mapped_type> json_to_dict_variant(const 
         return nested;
     }
     return std::nullopt;
+}
+
+// ============================================================================
+// Deserialization Helper
+// ============================================================================
+
+// Helper template to reduce boilerplate in deserialize_* functions.
+// Handles CBOR decoding, array validation, message type checking, and error handling.
+// The extractor lambda receives the parsed JSON array and returns the message struct.
+template<typename T, typename Extractor>
+std::expected<T, std::error_code>
+deserialize_message(const std::vector<uint8_t>& cbor_data,
+                    size_t min_size,
+                    MessageType expected_type,
+                    std::string_view msg_name,
+                    Extractor&& extract) {
+    try {
+        json j = json::from_cbor(cbor_data);
+
+        if (!j.is_array() || j.size() < min_size) {
+            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
+        }
+
+        int type = j[0].get<int>();
+        if (type != static_cast<int>(expected_type)) {
+            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
+        }
+
+        return extract(j);
+    } catch (const json::exception& e) {
+        spdlog::error("Failed to deserialize {}: {}", msg_name, e.what());
+        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
+    }
 }
 
 // ============================================================================
@@ -356,249 +389,129 @@ get_message_type_from_cbor(const std::vector<uint8_t>& cbor_data) {
 // Format: [1, realm, details]
 inline std::expected<HelloMessage, std::error_code>
 deserialize_hello(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
+    return deserialize_message<HelloMessage>(
+        cbor_data, 3, MessageType::HELLO, "HELLO",
+        [](const json& j) {
+            HelloMessage msg{j[1].get<std::string>()};
 
-        if (!j.is_array() || j.size() != 3) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
+            if (j[2].is_object()) {
+                const auto& details = j[2];
 
-        // Verify message type
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::HELLO)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        std::string realm = j[1].get<std::string>();
-        HelloMessage msg{realm};
-
-        if (j[2].is_object()) {
-            const auto& details = j[2];
-
-            // Extract roles
-            if (details.contains("roles") && details["roles"].is_object()) {
-                for (const auto& [role_name, features] : details["roles"].items()) {
-                    msg.roles.push_back(Role{role_name, {}});
-                }
-            }
-
-            // Extract authmethods
-            if (details.contains("authmethods") && details["authmethods"].is_array()) {
-                std::vector<std::string> methods;
-                for (const auto& method : details["authmethods"]) {
-                    if (method.is_string()) {
-                        methods.push_back(method.get<std::string>());
+                if (details.contains("roles") && details["roles"].is_object()) {
+                    for (const auto& [role_name, features] : details["roles"].items()) {
+                        msg.roles.push_back(Role{role_name, {}});
                     }
                 }
-                if (!methods.empty()) {
-                    msg.authmethods = methods;
+
+                if (details.contains("authmethods") && details["authmethods"].is_array()) {
+                    std::vector<std::string> methods;
+                    for (const auto& method : details["authmethods"]) {
+                        if (method.is_string()) {
+                            methods.push_back(method.get<std::string>());
+                        }
+                    }
+                    if (!methods.empty()) {
+                        msg.authmethods = methods;
+                    }
+                }
+
+                if (details.contains("authid") && details["authid"].is_string()) {
+                    msg.authid = details["authid"].get<std::string>();
                 }
             }
 
-            // Extract authid
-            if (details.contains("authid") && details["authid"].is_string()) {
-                msg.authid = details["authid"].get<std::string>();
-            }
-        }
-
-        return msg;
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize HELLO: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+            return msg;
+        });
 }
 
 // Deserialize WELCOME message from CBOR
 // Format: [2, session_id, details]
 inline std::expected<WelcomeMessage, std::error_code>
 deserialize_welcome(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
+    return deserialize_message<WelcomeMessage>(
+        cbor_data, 3, MessageType::WELCOME, "WELCOME",
+        [](const json& j) {
+            WelcomeMessage msg{j[1].get<uint64_t>(), ""};
 
-        if (!j.is_array() || j.size() != 3) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
+            if (j[2].is_object()) {
+                const auto& details = j[2];
 
-        // Verify message type
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::WELCOME)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
+                if (details.contains("roles") && details["roles"].is_object()) {
+                    for (const auto& [role_name, features] : details["roles"].items()) {
+                        msg.roles.push_back(Role{role_name, {}});
+                    }
+                }
 
-        // Extract session ID
-        uint64_t session_id = j[1].get<uint64_t>();
-
-        // Create message (realm is in details, but we'll use a placeholder)
-        WelcomeMessage msg{session_id, ""};
-
-        // Parse details
-        if (j[2].is_object()) {
-            const auto& details = j[2];
-
-            // Extract roles
-            if (details.contains("roles") && details["roles"].is_object()) {
-                for (const auto& [role_name, features] : details["roles"].items()) {
-                    msg.roles.push_back(Role{role_name, {}});
+                if (details.contains("authid") && details["authid"].is_string()) {
+                    msg.authid = details["authid"].get<std::string>();
+                }
+                if (details.contains("authrole") && details["authrole"].is_string()) {
+                    msg.authrole = details["authrole"].get<std::string>();
+                }
+                if (details.contains("authmethod") && details["authmethod"].is_string()) {
+                    msg.authmethod = details["authmethod"].get<std::string>();
                 }
             }
 
-            // Extract optional fields
-            if (details.contains("authid") && details["authid"].is_string()) {
-                msg.authid = details["authid"].get<std::string>();
-            }
-            if (details.contains("authrole") && details["authrole"].is_string()) {
-                msg.authrole = details["authrole"].get<std::string>();
-            }
-            if (details.contains("authmethod") && details["authmethod"].is_string()) {
-                msg.authmethod = details["authmethod"].get<std::string>();
-            }
-        }
-
-        return msg;
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize WELCOME: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+            return msg;
+        });
 }
 
 // Deserialize GOODBYE message from CBOR
 // Format: [6, details, reason]
 inline std::expected<GoodbyeMessage, std::error_code>
 deserialize_goodbye(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() != 3) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        // Verify message type
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::GOODBYE)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        // Extract details (currently ignored)
-        WampDict details;
-
-        // Extract reason
-        std::string reason = j[2].get<std::string>();
-
-        return GoodbyeMessage{details, reason};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize GOODBYE: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<GoodbyeMessage>(
+        cbor_data, 3, MessageType::GOODBYE, "GOODBYE",
+        [](const json& j) {
+            return GoodbyeMessage{WampDict{}, j[2].get<std::string>()};
+        });
 }
 
 // Deserialize ABORT message from CBOR
 // Format: [3, details, reason]
 inline std::expected<AbortMessage, std::error_code>
 deserialize_abort(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
+    return deserialize_message<AbortMessage>(
+        cbor_data, 3, MessageType::ABORT, "ABORT",
+        [](const json& j) {
+            return AbortMessage{WampDict{}, j[2].get<std::string>()};
+        });
+}
 
-        if (!j.is_array() || j.size() != 3) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
+// Helper to extract string map from JSON object
+inline std::map<std::string, std::string> extract_string_map(const json& obj) {
+    std::map<std::string, std::string> result;
+    if (obj.is_object()) {
+        for (auto it = obj.begin(); it != obj.end(); ++it) {
+            if (it.value().is_string()) {
+                result[it.key()] = it.value().get<std::string>();
+            }
         }
-
-        // Verify message type
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::ABORT)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        // Extract details (currently simplified)
-        WampDict details;
-
-        // Extract reason
-        std::string reason = j[2].get<std::string>();
-
-        return AbortMessage{details, reason};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize ABORT: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
     }
+    return result;
 }
 
 // Deserialize CHALLENGE message from CBOR
 // Format: [4, authmethod, extra]
 inline std::expected<ChallengeMessage, std::error_code>
 deserialize_challenge(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() != 3) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        // Verify message type
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::CHALLENGE)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        // Extract authmethod
-        std::string authmethod = j[1].get<std::string>();
-
-        // Extract extra dictionary
-        std::map<std::string, std::string> extra;
-        if (j[2].is_object()) {
-            for (auto it = j[2].begin(); it != j[2].end(); ++it) {
-                if (it.value().is_string()) {
-                    extra[it.key()] = it.value().get<std::string>();
-                }
-            }
-        }
-
-        return ChallengeMessage{authmethod, extra};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize CHALLENGE: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<ChallengeMessage>(
+        cbor_data, 3, MessageType::CHALLENGE, "CHALLENGE",
+        [](const json& j) {
+            return ChallengeMessage{j[1].get<std::string>(), extract_string_map(j[2])};
+        });
 }
 
 // Deserialize AUTHENTICATE message from CBOR
 // Format: [5, signature, extra]
 inline std::expected<AuthenticateMessage, std::error_code>
 deserialize_authenticate(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() != 3) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        // Verify message type
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::AUTHENTICATE)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        // Extract signature
-        std::string signature = j[1].get<std::string>();
-
-        // Extract extra dictionary
-        std::map<std::string, std::string> extra;
-        if (j[2].is_object()) {
-            for (auto it = j[2].begin(); it != j[2].end(); ++it) {
-                if (it.value().is_string()) {
-                    extra[it.key()] = it.value().get<std::string>();
-                }
-            }
-        }
-
-        return AuthenticateMessage{signature, extra};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize AUTHENTICATE: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<AuthenticateMessage>(
+        cbor_data, 3, MessageType::AUTHENTICATE, "AUTHENTICATE",
+        [](const json& j) {
+            return AuthenticateMessage{j[1].get<std::string>(), extract_string_map(j[2])};
+        });
 }
 
 // Serialize SUBSCRIBE message to CBOR
@@ -642,34 +555,11 @@ inline std::vector<uint8_t> serialize_subscribed(const SubscribedMessage& msg) {
 // Format: [32, Request|id, Options|dict, Topic|uri]
 inline std::expected<SubscribeMessage, std::error_code>
 deserialize_subscribe(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() != 4) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        // Verify message type
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::SUBSCRIBE)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        // Extract request ID
-        uint64_t request_id = j[1].get<uint64_t>();
-
-        // Extract options (simplified - just store as empty dict for now)
-        WampDict options{};
-
-        // Extract topic URI
-        std::string topic = j[3].get<std::string>();
-
-        return SubscribeMessage{request_id, options, topic};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize SUBSCRIBE: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<SubscribeMessage>(
+        cbor_data, 4, MessageType::SUBSCRIBE, "SUBSCRIBE",
+        [](const json& j) {
+            return SubscribeMessage{j[1].get<uint64_t>(), WampDict{}, j[3].get<std::string>()};
+        });
 }
 
 // Serialize PUBLISHED message to CBOR
@@ -715,43 +605,15 @@ inline std::vector<uint8_t> serialize_event(const EventMessage& msg) {
 // Note: Can optionally have Arguments|list and ArgumentsKw|dict but we ignore those for now
 inline std::expected<PublishMessage, std::error_code>
 deserialize_publish(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < 4) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        // Verify message type
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::PUBLISH)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        // Extract request ID
-        uint64_t request_id = j[1].get<uint64_t>();
-
-        // Extract options
-        WampDict options{};
-        if (j[2].is_object()) {
-            // Parse acknowledge option if present
-            if (j[2].contains("acknowledge") && j[2]["acknowledge"].is_boolean()) {
+    return deserialize_message<PublishMessage>(
+        cbor_data, 4, MessageType::PUBLISH, "PUBLISH",
+        [](const json& j) {
+            WampDict options{};
+            if (j[2].is_object() && j[2].contains("acknowledge") && j[2]["acknowledge"].is_boolean()) {
                 options["acknowledge"] = j[2]["acknowledge"].get<bool>();
             }
-            // Can add other options here as needed
-        }
-
-        // Extract topic URI
-        std::string topic = j[3].get<std::string>();
-
-        // Note: j[4] and j[5] may contain Arguments and ArgumentsKw but we ignore for now
-
-        return PublishMessage{request_id, options, topic};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize PUBLISH: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+            return PublishMessage{j[1].get<uint64_t>(), options, j[3].get<std::string>()};
+        });
 }
 
 // Serialize REGISTER message to CBOR
@@ -795,35 +657,11 @@ inline std::vector<uint8_t> serialize_registered(const RegisteredMessage& msg) {
 // Format: [64, Request|id, Options|dict, Procedure|uri]
 inline std::expected<RegisterMessage, std::error_code>
 deserialize_register(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < 4) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        // Verify message type
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::REGISTER)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        // Extract request ID
-        uint64_t request_id = j[1].get<uint64_t>();
-
-        // Extract options (empty dict for now)
-        WampDict options{};
-        // Could parse options from j[2] if needed
-
-        // Extract procedure URI
-        std::string procedure = j[3].get<std::string>();
-
-        return RegisterMessage{request_id, options, procedure};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize REGISTER: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<RegisterMessage>(
+        cbor_data, 4, MessageType::REGISTER, "REGISTER",
+        [](const json& j) {
+            return RegisterMessage{j[1].get<uint64_t>(), WampDict{}, j[3].get<std::string>()};
+        });
 }
 
 // Serialize INVOCATION message to CBOR
@@ -853,37 +691,11 @@ inline std::vector<uint8_t> serialize_invocation(const InvocationMessage& msg) {
 // Note: Can optionally have Arguments|list and ArgumentsKw|dict but we ignore those for now
 inline std::expected<CallMessage, std::error_code>
 deserialize_call(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < 4) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        // Verify message type
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::CALL)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        // Extract request ID
-        uint64_t request_id = j[1].get<uint64_t>();
-
-        // Extract options (empty dict for now)
-        WampDict options{};
-        // Could parse options from j[2] if needed
-
-        // Extract procedure URI
-        std::string procedure = j[3].get<std::string>();
-
-        // Note: j[4] and j[5] may contain Arguments and ArgumentsKw but we ignore for now
-
-        return CallMessage{request_id, options, procedure};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize CALL: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<CallMessage>(
+        cbor_data, 4, MessageType::CALL, "CALL",
+        [](const json& j) {
+            return CallMessage{j[1].get<uint64_t>(), WampDict{}, j[3].get<std::string>()};
+        });
 }
 
 // Serialize RESULT message to CBOR
@@ -919,47 +731,22 @@ inline std::vector<uint8_t> serialize_result(const ResultMessage& msg) {
 
 // Deserialize YIELD message from CBOR
 // Format: [70, INVOCATION.Request|id, Options|dict]
-// Note: Can optionally have Arguments|list and ArgumentsKw|dict but we ignore those for now
+// Note: Can optionally have Arguments|list and ArgumentsKw|dict
 inline std::expected<YieldMessage, std::error_code>
 deserialize_yield(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < 3) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        // Verify message type
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::YIELD)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        // Extract invocation ID (from INVOCATION message)
-        uint64_t invocation_id = j[1].get<uint64_t>();
-
-        // Extract options (empty dict for now)
-        WampDict options{};
-        // Could parse options from j[2] if needed
-
-        // Parse optional Arguments (positional)
-        WampList arguments;
-        if (j.size() >= 4 && j[3].is_array()) {
-            arguments = deserialize_list(j[3]);
-        }
-
-        // Parse optional ArgumentsKw (keyword)
-        WampDict arguments_kw;
-        if (j.size() >= 5 && j[4].is_object()) {
-            arguments_kw = deserialize_dict(j[4]);
-        }
-
-        return YieldMessage{invocation_id, options, arguments, arguments_kw};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize YIELD: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<YieldMessage>(
+        cbor_data, 3, MessageType::YIELD, "YIELD",
+        [](const json& j) {
+            WampList arguments;
+            WampDict arguments_kw;
+            if (j.size() >= 4 && j[3].is_array()) {
+                arguments = deserialize_list(j[3]);
+            }
+            if (j.size() >= 5 && j[4].is_object()) {
+                arguments_kw = deserialize_dict(j[4]);
+            }
+            return YieldMessage{j[1].get<uint64_t>(), WampDict{}, arguments, arguments_kw};
+        });
 }
 
 // Serialize ERROR message to CBOR
@@ -1038,205 +825,90 @@ inline std::vector<uint8_t> serialize_yield(const YieldMessage& msg) {
 // Format: [33, SUBSCRIBE.Request|id, Subscription|id]
 inline std::expected<SubscribedMessage, std::error_code>
 deserialize_subscribed(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < 3) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::SUBSCRIBED)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        uint64_t request_id = j[1].get<uint64_t>();
-        uint64_t subscription_id = j[2].get<uint64_t>();
-
-        return SubscribedMessage{request_id, subscription_id};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize SUBSCRIBED: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<SubscribedMessage>(
+        cbor_data, 3, MessageType::SUBSCRIBED, "SUBSCRIBED",
+        [](const json& j) {
+            return SubscribedMessage{j[1].get<uint64_t>(), j[2].get<uint64_t>()};
+        });
 }
 
 // Deserialize PUBLISHED message from CBOR
 // Format: [17, PUBLISH.Request|id, Publication|id]
 inline std::expected<PublishedMessage, std::error_code>
 deserialize_published(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < 3) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::PUBLISHED)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        uint64_t request_id = j[1].get<uint64_t>();
-        uint64_t publication_id = j[2].get<uint64_t>();
-
-        return PublishedMessage{request_id, publication_id};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize PUBLISHED: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<PublishedMessage>(
+        cbor_data, 3, MessageType::PUBLISHED, "PUBLISHED",
+        [](const json& j) {
+            return PublishedMessage{j[1].get<uint64_t>(), j[2].get<uint64_t>()};
+        });
 }
 
 // Deserialize EVENT message from CBOR
 // Format: [36, SUBSCRIBED.Subscription|id, PUBLISHED.Publication|id, Details|dict]
 inline std::expected<EventMessage, std::error_code>
 deserialize_event(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < 4) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::EVENT)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        uint64_t subscription_id = j[1].get<uint64_t>();
-        uint64_t publication_id = j[2].get<uint64_t>();
-        WampDict details{};  // Simplified - not parsing details for now
-
-        return EventMessage{subscription_id, publication_id, details};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize EVENT: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<EventMessage>(
+        cbor_data, 4, MessageType::EVENT, "EVENT",
+        [](const json& j) {
+            return EventMessage{j[1].get<uint64_t>(), j[2].get<uint64_t>(), WampDict{}};
+        });
 }
 
 // Deserialize REGISTERED message from CBOR
 // Format: [65, REGISTER.Request|id, Registration|id]
 inline std::expected<RegisteredMessage, std::error_code>
 deserialize_registered(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < 3) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::REGISTERED)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        uint64_t request_id = j[1].get<uint64_t>();
-        uint64_t registration_id = j[2].get<uint64_t>();
-
-        return RegisteredMessage{request_id, registration_id};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize REGISTERED: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<RegisteredMessage>(
+        cbor_data, 3, MessageType::REGISTERED, "REGISTERED",
+        [](const json& j) {
+            return RegisteredMessage{j[1].get<uint64_t>(), j[2].get<uint64_t>()};
+        });
 }
 
 // Deserialize INVOCATION message from CBOR
 // Format: [68, Request|id, REGISTERED.Registration|id, Details|dict]
 inline std::expected<InvocationMessage, std::error_code>
 deserialize_invocation(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < 4) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::INVOCATION)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        uint64_t request_id = j[1].get<uint64_t>();
-        uint64_t registration_id = j[2].get<uint64_t>();
-        WampDict details{};  // Simplified - not parsing details for now
-
-        return InvocationMessage{request_id, registration_id, details};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize INVOCATION: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<InvocationMessage>(
+        cbor_data, 4, MessageType::INVOCATION, "INVOCATION",
+        [](const json& j) {
+            return InvocationMessage{j[1].get<uint64_t>(), j[2].get<uint64_t>(), WampDict{}};
+        });
 }
 
 // Deserialize RESULT message from CBOR
 // Format: [50, CALL.Request|id, Details|dict, YIELD.Arguments|list, YIELD.ArgumentsKw|dict]
 inline std::expected<ResultMessage, std::error_code>
 deserialize_result(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < 3) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::RESULT)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        uint64_t request_id = j[1].get<uint64_t>();
-        WampDict details{};  // Simplified - not parsing details for now
-
-        // Parse optional Arguments (positional)
-        WampList arguments;
-        if (j.size() >= 4 && j[3].is_array()) {
-            arguments = deserialize_list(j[3]);
-        }
-
-        // Parse optional ArgumentsKw (keyword)
-        WampDict arguments_kw;
-        if (j.size() >= 5 && j[4].is_object()) {
-            arguments_kw = deserialize_dict(j[4]);
-        }
-
-        return ResultMessage{request_id, details, arguments, arguments_kw};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize RESULT: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<ResultMessage>(
+        cbor_data, 3, MessageType::RESULT, "RESULT",
+        [](const json& j) {
+            WampList arguments;
+            WampDict arguments_kw;
+            if (j.size() >= 4 && j[3].is_array()) {
+                arguments = deserialize_list(j[3]);
+            }
+            if (j.size() >= 5 && j[4].is_object()) {
+                arguments_kw = deserialize_dict(j[4]);
+            }
+            return ResultMessage{j[1].get<uint64_t>(), WampDict{}, arguments, arguments_kw};
+        });
 }
 
 // Deserialize ERROR message from CBOR
 // Format: [8, REQUEST.Type|int, REQUEST.Request|id, Details|dict, Error|uri]
 inline std::expected<ErrorMessage, std::error_code>
 deserialize_error(const std::vector<uint8_t>& cbor_data) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < 5) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(MessageType::ERROR)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        auto request_type = static_cast<MessageType>(j[1].get<int>());
-        uint64_t request_id = j[2].get<uint64_t>();
-        WampDict details{};  // Simplified - not parsing details for now
-        std::string error_uri = j[4].get<std::string>();
-
-        return ErrorMessage{request_type, request_id, details, error_uri};
-
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize ERROR: {}", e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
+    return deserialize_message<ErrorMessage>(
+        cbor_data, 5, MessageType::ERROR, "ERROR",
+        [](const json& j) {
+            return ErrorMessage{
+                static_cast<MessageType>(j[1].get<int>()),
+                j[2].get<uint64_t>(),
+                WampDict{},
+                j[4].get<std::string>()
+            };
+        });
 }
 
 } // namespace wamp
