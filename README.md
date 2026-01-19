@@ -1,6 +1,6 @@
 # WAMP Router
 
-A high-performance C++23 implementation of a [WAMP](https://wamp-proto.org/) (Web Application Messaging Protocol) router using RawSocket transport with CBOR serialization.
+A header only C++23 implementation of a [WAMP](https://wamp-proto.org/) (Web Application Messaging Protocol) router using RawSocket transport with CBOR serialization.
 
 ## What is WAMP?
 
