@@ -289,7 +289,7 @@ public:
         } else if (!result.arguments.empty()) {
             // If single positional argument, unwrap it; otherwise return array
             if (result.arguments.size() == 1) {
-                co_return serialize_value(result.arguments[0]);
+                co_return variant_to_json(result.arguments[0]);
             } else {
                 co_return serialize_list(result.arguments);
             }

@@ -32,7 +32,7 @@
 #include <system_error>
 #include <cstdint>
 
-// TODO - register local roles and associated functions, subscriptions, etc
+// TODO - finish client support (challenge/auth), tidy up serialization, in process client support, fix names.
 
 namespace wamp {
 

@@ -79,90 +79,98 @@ namespace wamp {
 using json = nlohmann::json;
 
 // ============================================================================
+// Variant-JSON Conversion Helpers
+// ============================================================================
+
+// Convert WampList element variant to JSON
+inline json variant_to_json(const std::variant<std::string, int64_t, bool>& v) {
+    return std::visit([](const auto& val) -> json { return val; }, v);
+}
+
+// Convert WampDict element variant to JSON (includes nested dict support)
+inline json variant_to_json(const typename WampDict::mapped_type& v) {
+    return std::visit(
+        [](const auto& val) -> json {
+            using T = std::decay_t<decltype(val)>;
+            if constexpr (std::is_same_v<T, std::unordered_map<std::string, std::string>>) {
+                return json(val);
+            } else {
+                return val;
+            }
+        },
+        v);
+}
+
+// Convert JSON to WampList element variant
+inline std::optional<std::variant<std::string, int64_t, bool>> json_to_list_variant(const json& j) {
+    if (j.is_string()) {
+        return j.get<std::string>();
+    } else if (j.is_boolean()) {
+        return j.get<bool>();
+    } else if (j.is_number()) {
+        return j.get<int64_t>();
+    }
+    return std::nullopt;
+}
+
+// Convert JSON to WampDict element variant
+inline std::optional<typename WampDict::mapped_type> json_to_dict_variant(const json& j) {
+    if (j.is_string()) {
+        return j.get<std::string>();
+    } else if (j.is_boolean()) {
+        return j.get<bool>();
+    } else if (j.is_number()) {
+        return j.get<int64_t>();
+    } else if (j.is_object()) {
+        std::unordered_map<std::string, std::string> nested;
+        for (const auto& [k, v] : j.items()) {
+            if (v.is_string()) {
+                nested[k] = v.get<std::string>();
+            }
+        }
+        return nested;
+    }
+    return std::nullopt;
+}
+
+// ============================================================================
 // CBOR Serialization Functions
 // ============================================================================
-inline json serialize_value(const std::variant<std::string, int64_t, bool>& v)
-{
-    if (auto* str = std::get_if<std::string>(&v)) {
-        return json{*str};
-    } else if (auto* num = std::get_if<int64_t>(&v)) {
-        return json{*num};
-    } else if (auto* b = std::get_if<bool>(&v)) {
-        return json{*b};
-    } else
-    {
-        return json{};
+
+inline json serialize_list(const WampList& list) {
+    auto arr = json::array();
+    for (const auto& item : list) {
+        arr.push_back(variant_to_json(item));
     }
+    return arr;
 }
 
-inline json serialize_list(const WampList& list)
-{
-    auto l = json::array();
-    for (const auto& item : list)
-    {
-        if (auto* str = std::get_if<std::string>(&item)) {
-            l.push_back(*str);
-        } else if (auto* num = std::get_if<int64_t>(&item)) {
-            l.push_back(*num);
-        } else if (auto* b = std::get_if<bool>(&item)) {
-            l.push_back(*b);
-        }
-    }
-    return l;
-}
-
-inline json serialize_dict(const WampDict& dict)
-{
-    auto details = json::object();
+inline json serialize_dict(const WampDict& dict) {
+    auto obj = json::object();
     for (const auto& [key, value] : dict) {
-        if (auto* str = std::get_if<std::string>(&value)) {
-            details[key] = *str;
-        } else if (auto* num = std::get_if<int64_t>(&value)) {
-            details[key] = *num;
-        } else if (auto* b = std::get_if<bool>(&value)) {
-            details[key] = *b;
-        }
+        obj[key] = variant_to_json(value);
     }
-
-    return details;
+    return obj;
 }
 
-inline WampList deserialize_list(const json::array_t& j)
-{
-    auto l = WampList{};
-    for (auto& item : j)
-    {
-        if (item.is_number())
-        {
-            l.emplace_back(item.get<int64_t>());
-        } else if (item.is_boolean())
-        {
-            l.emplace_back(item.get<bool>());
-        } else if (item.is_string())
-        {
-            l.emplace_back(item.get<std::string>());
+inline WampList deserialize_list(const json::array_t& j) {
+    WampList list;
+    for (const auto& item : j) {
+        if (auto val = json_to_list_variant(item)) {
+            list.push_back(*val);
         }
     }
-    return l;
+    return list;
 }
 
-inline WampDict deserialize_dict(const json::object_t& j)
-{
-    auto d = WampDict{};
-    for (const auto& [key, value] : j)
-    {
-        if (value.is_number())
-        {
-            d[key] = value.get<int64_t>();
-        } else if (value.is_boolean())
-        {
-            d[key] = value.get<bool>();
-        } else if (value.is_string())
-        {
-            d[key] = value.get<std::string>();
+inline WampDict deserialize_dict(const json::object_t& j) {
+    WampDict dict;
+    for (const auto& [key, value] : j) {
+        if (auto val = json_to_dict_variant(value)) {
+            dict[key] = *val;
         }
     }
-    return d;
+    return dict;
 }
 
 
@@ -985,14 +993,7 @@ inline std::vector<uint8_t> serialize_publish(const PublishMessage& msg) {
     json j = json::array();
     j.push_back(static_cast<int>(MessageType::PUBLISH));
     j.push_back(msg.request_id);
-
-    json options_obj = json::object();
-    for (const auto& [key, value] : msg.options) {
-        if (auto* b = std::get_if<bool>(&value)) {
-            options_obj[key] = *b;
-        }
-    }
-    j.push_back(options_obj);
+    j.push_back(serialize_dict(msg.options));
     j.push_back(msg.topic);
     return json::to_cbor(j);
 }

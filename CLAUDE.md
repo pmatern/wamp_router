@@ -259,6 +259,7 @@ wamp_router/
 │   ├── crypto_utils.hpp      # Ed25519 signature verification, challenge generation
 │   ├── wamp_server.hpp       # WampServer (plain TCP for tests), WampTlsServer (TLS 1.3)
 │   ├── wamp_session.hpp      # Protocol state machine, buffering, authentication
+│   ├── wamp_client.hpp       # Coroutine-based WAMP client implementation
 │   ├── wamp_messages.hpp     # WAMP message types (HELLO, CHALLENGE, AUTHENTICATE, etc.)
 │   ├── wamp_serializer.hpp   # CBOR serialization/deserialization
 │   ├── raw_socket.hpp        # RawSocket framing (4-byte header)
@@ -276,6 +277,8 @@ wamp_router/
     ├── test_subscription_manager.cpp
     ├── test_wamp_session.cpp
     ├── test_procedure_handler.cpp
+    ├── test_config.cpp
+    ├── test_wamp_client.cpp
     └── test_integration.cpp
 ```
 
@@ -308,6 +311,13 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 - Owns the `tcp::acceptor` and spawns coroutines for each accepted connection
 - `accept_loop()`: Infinite coroutine accepting connections, spawning `handle_wamp_session` for each
 - Uses `co_spawn` to launch detached coroutines
+
+#### WampClient (wamp_client.hpp)
+- **Coroutine-based WAMP client** - C++ client for connecting to WAMP routers
+- Handles RawSocket handshake, HELLO/WELCOME exchange
+- Supports SUBSCRIBE/PUBLISH for PubSub and REGISTER/CALL for RPC
+- Uses `EventCallback` and `InvocationHandler` function types for async notifications
+- Manages pending calls via internal tracking with request IDs
 
 #### handle_wamp_session() (wamp_server.hpp)
 - **Templated function** - Works with both `tcp::socket` (tests) and `ssl::stream<tcp::socket>` (production)
@@ -466,6 +476,8 @@ Tests use Catch2 framework with CTest integration:
 - **test_subscription_manager.cpp**: Subscription tracking
 - **test_wamp_session.cpp**: Protocol state machine
 - **test_procedure_handler.cpp**: RPC message handling
+- **test_config.cpp**: TOML configuration loading
+- **test_wamp_client.cpp**: WAMP client functionality
 - **test_integration.cpp**: End-to-end scenarios with mock sockets
 
 Run specific test: `./scripts/run.sh ./build/wamp_tests "[test name]"`
