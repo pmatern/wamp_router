@@ -466,7 +466,7 @@ The router uses TOML configuration files (config.toml or test_config.toml) for a
 ### Performance Considerations
 - **Single-threaded**: Currently runs on single io_context thread. For multi-threading, create thread pool calling `io_context.run()`
 - **Buffer sizes**: 8KB buffers in handle_wamp_session. Adjust for large payloads
-- **Event channels**: One channel per session. Channel capacity defaults to 0 (unlimited queue)
+- **Event channels**: One channel per session, capacity 100 (`EventChannelRegistry::get_or_create`). An event is dropped when the subscriber's queue is full; see TODO.md
 - **ID generation**: Atomic counters, lock-free
 
 ## Testing
@@ -481,6 +481,12 @@ Tests use Catch2 framework with CTest integration:
 - **test_config.cpp**: TOML configuration loading
 - **test_wamp_client.cpp**: WAMP client functionality
 - **test_integration.cpp**: End-to-end scenarios with mock sockets
+- **test_protocol_gaps.cpp**: UNSUBSCRIBE/UNREGISTER, payload forwarding, callee errors, pipelined frames
+- **test_crypto_utils.cpp**: Ed25519 signature verification and challenge generation
+
+### Benchmarks
+
+`bench/` holds `wamp_bench` (Catch2 micro-benchmarks) and `wamp_load` (end-to-end load test over `WampClient`). Both are `EXCLUDE_FROM_ALL` CMake targets; build and run them in a Release build (`cmake --build build-local-release --target wamp_bench wamp_load`). Baseline numbers are in the README.
 
 Run specific test: `./scripts/run.sh ./build/wamp_tests "[test name]"`
 
