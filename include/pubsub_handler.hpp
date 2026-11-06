@@ -69,6 +69,33 @@ public:
         return rawsocket::create_wamp_message(subscribed_cbor);
     }
 
+    // Handle UNSUBSCRIBE message
+    // Returns UNSUBSCRIBED, or ERROR if the subscription doesn't exist or belongs to another session
+    [[nodiscard]] static std::vector<uint8_t> handle_unsubscribe(
+        const UnsubscribeMessage& unsubscribe,
+        uint64_t session_id
+    ) {
+        auto& sub_manager = get_subscription_manager();
+        spdlog::debug("UNSUBSCRIBE request_id={}, subscription_id={}, session={}",
+                     unsubscribe.request_id, unsubscribe.subscription_id, session_id);
+
+        auto info = sub_manager.get_subscription(unsubscribe.subscription_id);
+        if (!info.has_value() || info->session_id != session_id) {
+            spdlog::warn("UNSUBSCRIBE for unknown subscription_id={} from session {}",
+                        unsubscribe.subscription_id, session_id);
+            return rawsocket::create_wamp_message(serialize_error(
+                ErrorMessage::create_no_such_subscription(unsubscribe.request_id)));
+        }
+
+        sub_manager.unsubscribe(unsubscribe.subscription_id);
+
+        spdlog::info("Sent UNSUBSCRIBED: request_id={}, subscription_id={}",
+                    unsubscribe.request_id, unsubscribe.subscription_id);
+
+        return rawsocket::create_wamp_message(
+            serialize_unsubscribed(UnsubscribedMessage{unsubscribe.request_id}));
+    }
+
     // Handle PUBLISH message
     // Sends events directly to subscriber channels, returns acknowledgment response if requested
     [[nodiscard]] static std::vector<uint8_t> handle_publish(
@@ -81,6 +108,14 @@ public:
 
         static GlobalIdGenerator pub_id_gen;
         uint64_t publication_id = pub_id_gen.generate();
+
+        // exclude_me defaults to true per the WAMP spec: the publisher doesn't receive its own event
+        bool exclude_me = true;
+        if (auto it = publish.options.find("exclude_me"); it != publish.options.end()) {
+            if (auto* val = std::get_if<bool>(&it->second)) {
+                exclude_me = *val;
+            }
+        }
 
         auto subscribers = sub_manager.get_subscribers(publish.topic);
         spdlog::debug("Topic '{}' has {} subscribers", publish.topic, subscribers.size());
@@ -95,7 +130,12 @@ public:
                     continue;
                 }
 
-                auto event = EventMessage{subscription_id, publication_id, {}};
+                if (exclude_me && sub_info->session_id == session_id) {
+                    continue;
+                }
+
+                auto event = EventMessage{subscription_id, publication_id, {},
+                                          publish.arguments, publish.arguments_kw};
                 auto event_cbor = serialize_event(event);
                 auto event_frame = rawsocket::create_wamp_message(event_cbor);
 

@@ -206,6 +206,35 @@ inline WampDict deserialize_dict(const json::object_t& j) {
     return dict;
 }
 
+// Append optional Arguments|list / ArgumentsKw|dict to a message array.
+// Per spec, ArgumentsKw requires an Arguments list (possibly empty) before it.
+inline void append_payload(json& j, const WampList& args, const WampDict& args_kw) {
+    if (args.empty() && args_kw.empty()) {
+        return;
+    }
+    j.push_back(serialize_list(args));
+    if (!args_kw.empty()) {
+        j.push_back(serialize_dict(args_kw));
+    }
+}
+
+// Read optional Arguments|list / ArgumentsKw|dict starting at index `pos`.
+inline void extract_payload(const json& j, size_t pos, WampList& args, WampDict& args_kw) {
+    if (j.size() > pos && j[pos].is_array()) {
+        args = deserialize_list(j[pos]);
+    }
+    if (j.size() > pos + 1 && j[pos + 1].is_object()) {
+        args_kw = deserialize_dict(j[pos + 1]);
+    }
+}
+
+// Read a Details/Options dict at index `pos` (empty if absent or not an object).
+inline WampDict extract_dict(const json& j, size_t pos) {
+    if (j.size() > pos && j[pos].is_object()) {
+        return deserialize_dict(j[pos]);
+    }
+    return {};
+}
 
 // Serialize HELLO message to CBOR
 // Format: [1, realm, details]
@@ -596,23 +625,28 @@ inline std::vector<uint8_t> serialize_event(const EventMessage& msg) {
     // Details (empty object for now)
     j.push_back(json::object());
 
-    // Note: Can optionally include Arguments|list and ArgumentsKw|dict but we ignore for now
+    append_payload(j, msg.arguments, msg.arguments_kw);
     return json::to_cbor(j);
 }
 
 // Deserialize PUBLISH message from CBOR
-// Format: [16, Request|id, Options|dict, Topic|uri]
-// Note: Can optionally have Arguments|list and ArgumentsKw|dict but we ignore those for now
+// Format: [16, Request|id, Options|dict, Topic|uri, Arguments|list, ArgumentsKw|dict]
 inline std::expected<PublishMessage, std::error_code>
 deserialize_publish(const std::vector<uint8_t>& cbor_data) {
     return deserialize_message<PublishMessage>(
         cbor_data, 4, MessageType::PUBLISH, "PUBLISH",
         [](const json& j) {
             WampDict options{};
-            if (j[2].is_object() && j[2].contains("acknowledge") && j[2]["acknowledge"].is_boolean()) {
-                options["acknowledge"] = j[2]["acknowledge"].get<bool>();
+            for (const char* key : {"acknowledge", "exclude_me"}) {
+                if (j[2].is_object() && j[2].contains(key) && j[2][key].is_boolean()) {
+                    options[key] = j[2][key].get<bool>();
+                }
             }
-            return PublishMessage{j[1].get<uint64_t>(), options, j[3].get<std::string>()};
+            WampList args;
+            WampDict args_kw;
+            extract_payload(j, 4, args, args_kw);
+            return PublishMessage{j[1].get<uint64_t>(), options, j[3].get<std::string>(),
+                                  std::move(args), std::move(args_kw)};
         });
 }
 
@@ -681,20 +715,23 @@ inline std::vector<uint8_t> serialize_invocation(const InvocationMessage& msg) {
     // Details (empty object for now)
     j.push_back(json::object());
 
-    // TODO: Add Arguments|list and ArgumentsKw|dict but we ignore for now
+    append_payload(j, msg.arguments, msg.arguments_kw);
 
     return json::to_cbor(j);
 }
 
 // Deserialize CALL message from CBOR
-// Format: [48, Request|id, Options|dict, Procedure|uri]
-// Note: Can optionally have Arguments|list and ArgumentsKw|dict but we ignore those for now
+// Format: [48, Request|id, Options|dict, Procedure|uri, Arguments|list, ArgumentsKw|dict]
 inline std::expected<CallMessage, std::error_code>
 deserialize_call(const std::vector<uint8_t>& cbor_data) {
     return deserialize_message<CallMessage>(
         cbor_data, 4, MessageType::CALL, "CALL",
         [](const json& j) {
-            return CallMessage{j[1].get<uint64_t>(), WampDict{}, j[3].get<std::string>()};
+            WampList args;
+            WampDict args_kw;
+            extract_payload(j, 4, args, args_kw);
+            return CallMessage{j[1].get<uint64_t>(), extract_dict(j, 2), j[3].get<std::string>(),
+                               std::move(args), std::move(args_kw)};
         });
 }
 
@@ -770,18 +807,19 @@ inline std::vector<uint8_t> serialize_error(const ErrorMessage& msg) {
     // Error URI
     j.push_back(msg.error_uri);
 
-    // Note: Can optionally include Arguments|list and ArgumentsKw|dict but we ignore for now
+    append_payload(j, msg.arguments, msg.arguments_kw);
     return json::to_cbor(j);
 }
 
 // Serialize PUBLISH message to CBOR
-// Format: [16, Request|id, Options|dict, Topic|uri]
+// Format: [16, Request|id, Options|dict, Topic|uri, Arguments|list, ArgumentsKw|dict]
 inline std::vector<uint8_t> serialize_publish(const PublishMessage& msg) {
     json j = json::array();
     j.push_back(static_cast<int>(MessageType::PUBLISH));
     j.push_back(msg.request_id);
     j.push_back(serialize_dict(msg.options));
     j.push_back(msg.topic);
+    append_payload(j, msg.arguments, msg.arguments_kw);
     return json::to_cbor(j);
 }
 
@@ -791,8 +829,9 @@ inline std::vector<uint8_t> serialize_call(const CallMessage& msg) {
     json j = json::array();
     j.push_back(static_cast<int>(MessageType::CALL));
     j.push_back(msg.request_id);
-    j.push_back(json::object());  // options (empty for now)
+    j.push_back(serialize_dict(msg.options));
     j.push_back(msg.procedure);
+    append_payload(j, msg.arguments, msg.arguments_kw);
     return json::to_cbor(j);
 }
 
@@ -850,7 +889,11 @@ deserialize_event(const std::vector<uint8_t>& cbor_data) {
     return deserialize_message<EventMessage>(
         cbor_data, 4, MessageType::EVENT, "EVENT",
         [](const json& j) {
-            return EventMessage{j[1].get<uint64_t>(), j[2].get<uint64_t>(), WampDict{}};
+            WampList args;
+            WampDict args_kw;
+            extract_payload(j, 4, args, args_kw);
+            return EventMessage{j[1].get<uint64_t>(), j[2].get<uint64_t>(), extract_dict(j, 3),
+                                std::move(args), std::move(args_kw)};
         });
 }
 
@@ -872,7 +915,11 @@ deserialize_invocation(const std::vector<uint8_t>& cbor_data) {
     return deserialize_message<InvocationMessage>(
         cbor_data, 4, MessageType::INVOCATION, "INVOCATION",
         [](const json& j) {
-            return InvocationMessage{j[1].get<uint64_t>(), j[2].get<uint64_t>(), WampDict{}};
+            WampList args;
+            WampDict args_kw;
+            extract_payload(j, 4, args, args_kw);
+            return InvocationMessage{j[1].get<uint64_t>(), j[2].get<uint64_t>(), extract_dict(j, 3),
+                                     std::move(args), std::move(args_kw)};
         });
 }
 
@@ -902,12 +949,81 @@ deserialize_error(const std::vector<uint8_t>& cbor_data) {
     return deserialize_message<ErrorMessage>(
         cbor_data, 5, MessageType::ERROR, "ERROR",
         [](const json& j) {
+            WampList args;
+            WampDict args_kw;
+            extract_payload(j, 5, args, args_kw);
             return ErrorMessage{
                 static_cast<MessageType>(j[1].get<int>()),
                 j[2].get<uint64_t>(),
-                WampDict{},
-                j[4].get<std::string>()
+                extract_dict(j, 3),
+                j[4].get<std::string>(),
+                std::move(args),
+                std::move(args_kw)
             };
+        });
+}
+
+// ============================================================================
+// UNSUBSCRIBE / UNSUBSCRIBED / UNREGISTER / UNREGISTERED
+// ============================================================================
+
+// Format: [34, Request|id, SUBSCRIBED.Subscription|id]
+inline std::vector<uint8_t> serialize_unsubscribe(const UnsubscribeMessage& msg) {
+    json j = json::array({static_cast<int>(MessageType::UNSUBSCRIBE), msg.request_id, msg.subscription_id});
+    return json::to_cbor(j);
+}
+
+inline std::expected<UnsubscribeMessage, std::error_code>
+deserialize_unsubscribe(const std::vector<uint8_t>& cbor_data) {
+    return deserialize_message<UnsubscribeMessage>(
+        cbor_data, 3, MessageType::UNSUBSCRIBE, "UNSUBSCRIBE",
+        [](const json& j) {
+            return UnsubscribeMessage{j[1].get<uint64_t>(), j[2].get<uint64_t>()};
+        });
+}
+
+// Format: [35, UNSUBSCRIBE.Request|id]
+inline std::vector<uint8_t> serialize_unsubscribed(const UnsubscribedMessage& msg) {
+    json j = json::array({static_cast<int>(MessageType::UNSUBSCRIBED), msg.request_id});
+    return json::to_cbor(j);
+}
+
+inline std::expected<UnsubscribedMessage, std::error_code>
+deserialize_unsubscribed(const std::vector<uint8_t>& cbor_data) {
+    return deserialize_message<UnsubscribedMessage>(
+        cbor_data, 2, MessageType::UNSUBSCRIBED, "UNSUBSCRIBED",
+        [](const json& j) {
+            return UnsubscribedMessage{j[1].get<uint64_t>()};
+        });
+}
+
+// Format: [66, Request|id, REGISTERED.Registration|id]
+inline std::vector<uint8_t> serialize_unregister(const UnregisterMessage& msg) {
+    json j = json::array({static_cast<int>(MessageType::UNREGISTER), msg.request_id, msg.registration_id});
+    return json::to_cbor(j);
+}
+
+inline std::expected<UnregisterMessage, std::error_code>
+deserialize_unregister(const std::vector<uint8_t>& cbor_data) {
+    return deserialize_message<UnregisterMessage>(
+        cbor_data, 3, MessageType::UNREGISTER, "UNREGISTER",
+        [](const json& j) {
+            return UnregisterMessage{j[1].get<uint64_t>(), j[2].get<uint64_t>()};
+        });
+}
+
+// Format: [67, UNREGISTER.Request|id]
+inline std::vector<uint8_t> serialize_unregistered(const UnregisteredMessage& msg) {
+    json j = json::array({static_cast<int>(MessageType::UNREGISTERED), msg.request_id});
+    return json::to_cbor(j);
+}
+
+inline std::expected<UnregisteredMessage, std::error_code>
+deserialize_unregistered(const std::vector<uint8_t>& cbor_data) {
+    return deserialize_message<UnregisteredMessage>(
+        cbor_data, 2, MessageType::UNREGISTERED, "UNREGISTERED",
+        [](const json& j) {
+            return UnregisteredMessage{j[1].get<uint64_t>()};
         });
 }
 

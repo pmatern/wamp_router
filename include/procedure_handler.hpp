@@ -62,6 +62,19 @@ public:
         reg_manager.unregister_session(session_id);
         invocation_tracker.remove_caller_session(session_id);
 
+        // Callers waiting on this session as callee would otherwise hang forever
+        for (const auto& pending : invocation_tracker.remove_callee_session(session_id)) {
+            auto error = ErrorMessage::create_callee_failure(
+                pending.call_request_id, "Callee session disconnected");
+            auto frame = rawsocket::create_wamp_message(serialize_error(error));
+            auto data = std::make_shared<std::vector<uint8_t>>(std::move(frame));
+            if (!EventChannelRegistry::try_send(pending.caller_session_id,
+                EventToSend{pending.caller_session_id, data})) {
+                spdlog::debug("Caller session {} gone; dropped callee_failure for request_id={}",
+                             pending.caller_session_id, pending.call_request_id);
+            }
+        }
+
         spdlog::debug("Cleaned up registrations and pending calls for session {}", session_id);
     }
 
@@ -109,6 +122,33 @@ public:
         return rawsocket::create_wamp_message(registered_cbor);
     }
 
+    // Handle UNREGISTER message
+    // Returns UNREGISTERED, or ERROR if the registration doesn't exist or belongs to another session
+    [[nodiscard]] static std::expected<std::vector<uint8_t>, std::error_code> handle_unregister(
+        const UnregisterMessage& unregister_msg,
+        uint64_t session_id
+    ) {
+        auto& reg_manager = get_registration_manager();
+        spdlog::debug("UNREGISTER request_id={}, registration_id={}, session={}",
+                     unregister_msg.request_id, unregister_msg.registration_id, session_id);
+
+        auto info = reg_manager.get_registration(unregister_msg.registration_id);
+        if (!info.has_value() || info->session_id != session_id) {
+            spdlog::warn("UNREGISTER for unknown registration_id={} from session {}",
+                        unregister_msg.registration_id, session_id);
+            return rawsocket::create_wamp_message(serialize_error(
+                ErrorMessage::create_no_such_registration(unregister_msg.request_id)));
+        }
+
+        reg_manager.unregister(unregister_msg.registration_id);
+
+        spdlog::info("Sent UNREGISTERED: request_id={}, registration_id={}",
+                    unregister_msg.request_id, unregister_msg.registration_id);
+
+        return rawsocket::create_wamp_message(
+            serialize_unregistered(UnregisteredMessage{unregister_msg.request_id}));
+    }
+
     // Handle CALL message
     // Routes call to registered callee by sending INVOCATION via event channel
     // Returns ERROR if procedure not found or callee unavailable, empty vector otherwise
@@ -146,7 +186,8 @@ public:
         static RouterScopeIdGenerator invocation_id_gen;
         uint64_t invocation_id = invocation_id_gen.generate();
 
-        auto invocation = InvocationMessage{invocation_id, registration_id, {}};
+        auto invocation = InvocationMessage{invocation_id, registration_id, {},
+                                            call.arguments, call.arguments_kw};
         auto invocation_cbor = serialize_invocation(invocation);
         auto invocation_frame = rawsocket::create_wamp_message(invocation_cbor);
 
@@ -174,7 +215,7 @@ public:
 
         // Track the invocation for routing YIELD back to caller as RESULT
         auto& invocation_tracker = get_invocation_tracker();
-        invocation_tracker.track(invocation_id, PendingCall{caller_session_id, call.request_id});
+        invocation_tracker.track(invocation_id, PendingCall{caller_session_id, call.request_id, callee_session_id});
 
         spdlog::debug("Tracking invocation_id={} -> caller_session={}, call_request_id={} ({} pending)",
                      invocation_id, caller_session_id, call.request_id,
@@ -239,6 +280,42 @@ public:
                      invocation_tracker.pending_count());
 
         // No direct response to callee - YIELD is fire-and-forget
+        return std::vector<uint8_t>{};
+    }
+
+    // Handle ERROR sent by a callee in response to an INVOCATION
+    // Routes it back to the original caller as an ERROR for their CALL
+    [[nodiscard]] static std::expected<std::vector<uint8_t>, std::error_code> handle_invocation_error(
+        const ErrorMessage& error_msg,
+        uint64_t callee_session_id
+    ) {
+        auto& invocation_tracker = get_invocation_tracker();
+        spdlog::debug("ERROR for invocation_id={}, error={}, callee_session={}",
+                     error_msg.request_id, error_msg.error_uri, callee_session_id);
+
+        auto pending_call = invocation_tracker.retrieve(error_msg.request_id);
+        if (!pending_call.has_value()) {
+            spdlog::warn("ERROR for unknown invocation_id={} from callee session {}",
+                        error_msg.request_id, callee_session_id);
+            return std::vector<uint8_t>{};
+        }
+
+        auto forwarded = ErrorMessage{MessageType::CALL, pending_call->call_request_id,
+                                      error_msg.details, error_msg.error_uri,
+                                      error_msg.arguments, error_msg.arguments_kw};
+        auto frame = rawsocket::create_wamp_message(serialize_error(forwarded));
+        auto data = std::make_shared<std::vector<uint8_t>>(std::move(frame));
+
+        if (!EventChannelRegistry::try_send(pending_call->caller_session_id,
+            EventToSend{pending_call->caller_session_id, data})) {
+            spdlog::error("Failed to send ERROR to caller session {} (channel full or closed)",
+                         pending_call->caller_session_id);
+            return std::vector<uint8_t>{};
+        }
+
+        spdlog::info("Forwarded callee ERROR to caller session {} (request_id={}, error={})",
+                    pending_call->caller_session_id, pending_call->call_request_id, error_msg.error_uri);
+
         return std::vector<uint8_t>{};
     }
 

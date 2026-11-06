@@ -576,6 +576,76 @@ private:
                 return std::span<const uint8_t>(response_buffer_);
             }
 
+            case MessageType::UNSUBSCRIBE: {
+                spdlog::info("Received UNSUBSCRIBE from client");
+
+                auto unsubscribe_result = deserialize_unsubscribe(cbor_payload);
+                if (!unsubscribe_result.has_value()) {
+                    spdlog::error("Failed to deserialize UNSUBSCRIBE");
+                    return std::span<const uint8_t>{};
+                }
+
+                response_buffer_ = PubSubHandler::handle_unsubscribe(
+                    *unsubscribe_result,
+                    session_id_
+                );
+
+                return std::span<const uint8_t>(response_buffer_);
+            }
+
+            case MessageType::UNREGISTER: {
+                spdlog::info("Received UNREGISTER from client");
+
+                auto unregister_result = deserialize_unregister(cbor_payload);
+                if (!unregister_result.has_value()) {
+                    spdlog::error("Failed to deserialize UNREGISTER");
+                    return std::span<const uint8_t>{};
+                }
+
+                auto handle_result = ProcedureHandler::handle_unregister(
+                    *unregister_result,
+                    session_id_
+                );
+
+                if (!handle_result.has_value()) {
+                    spdlog::error("Failed to handle UNREGISTER: {}", handle_result.error().message());
+                    return std::span<const uint8_t>{};
+                }
+
+                response_buffer_ = *handle_result;
+                return std::span<const uint8_t>(response_buffer_);
+            }
+
+            case MessageType::ERROR: {
+                spdlog::info("Received ERROR from callee");
+
+                auto error_result = deserialize_error(cbor_payload);
+                if (!error_result.has_value()) {
+                    spdlog::error("Failed to deserialize ERROR");
+                    return std::span<const uint8_t>{};
+                }
+
+                // Only ERROR replies to INVOCATION are meaningful for a router
+                if (error_result->request_type != MessageType::INVOCATION) {
+                    spdlog::warn("Ignoring client ERROR for request type {}",
+                                static_cast<int>(error_result->request_type));
+                    return std::span<const uint8_t>{};
+                }
+
+                auto handle_result = ProcedureHandler::handle_invocation_error(
+                    *error_result,
+                    session_id_
+                );
+
+                if (!handle_result.has_value()) {
+                    spdlog::error("Failed to handle ERROR: {}", handle_result.error().message());
+                    return std::span<const uint8_t>{};
+                }
+
+                response_buffer_ = *handle_result;
+                return std::span<const uint8_t>(response_buffer_);
+            }
+
             case MessageType::REGISTER: {
                 spdlog::info("Received REGISTER from client");
 

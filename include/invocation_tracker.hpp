@@ -20,6 +20,7 @@
 #include <unordered_map>
 #include <list>
 #include <utility>
+#include <vector>
 
 namespace wamp {
 
@@ -27,10 +28,12 @@ namespace wamp {
 struct PendingCall {
     uint64_t caller_session_id;  // Who made the CALL
     uint64_t call_request_id;     // Original request_id from CALL message
+    uint64_t callee_session_id;   // Who was sent the INVOCATION (0 if unknown)
 
-    PendingCall(uint64_t caller_id, uint64_t request_id)
+    PendingCall(uint64_t caller_id, uint64_t request_id, uint64_t callee_id = 0)
         : caller_session_id(caller_id)
         , call_request_id(request_id)
+        , callee_session_id(callee_id)
     {}
 };
 
@@ -93,6 +96,22 @@ public:
                 ++it;
             }
         }
+    }
+
+    // Remove and return all pending invocations routed to a callee (called when the callee disconnects)
+    [[nodiscard]] std::vector<PendingCall> remove_callee_session(uint64_t callee_session_id) {
+        std::vector<PendingCall> removed;
+        auto it = lru_list_.begin();
+        while (it != lru_list_.end()) {
+            if (it->second.callee_session_id == callee_session_id) {
+                removed.push_back(it->second);
+                invocation_map_.erase(it->first);
+                it = lru_list_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return removed;
     }
 
     [[nodiscard]] size_t pending_count() const {

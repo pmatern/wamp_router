@@ -367,10 +367,16 @@ struct PublishMessage {
     WampDict options{};
     std::string topic{};  // URI
 
-    PublishMessage(uint64_t req_id, WampDict opts, std::string topic_uri)
+    WampList arguments{};
+    WampDict arguments_kw{};
+
+    PublishMessage(uint64_t req_id, WampDict opts, std::string topic_uri,
+                   WampList args = {}, WampDict args_kw = {})
         : request_id(req_id)
         , options(std::move(opts))
         , topic(std::move(topic_uri))
+        , arguments(std::move(args))
+        , arguments_kw(std::move(args_kw))
     {}
 };
 
@@ -401,10 +407,16 @@ struct EventMessage {
     uint64_t publication_id{};
     WampDict details{};
 
-    EventMessage(uint64_t sub_id, uint64_t pub_id, WampDict details_dict)
+    WampList arguments{};
+    WampDict arguments_kw{};
+
+    EventMessage(uint64_t sub_id, uint64_t pub_id, WampDict details_dict,
+                 WampList args = {}, WampDict args_kw = {})
         : subscription_id(sub_id)
         , publication_id(pub_id)
         , details(std::move(details_dict))
+        , arguments(std::move(args))
+        , arguments_kw(std::move(args_kw))
     {}
 };
 
@@ -453,10 +465,16 @@ struct CallMessage {
     WampDict options{};
     std::string procedure{};  // URI
 
-    CallMessage(uint64_t req_id, WampDict opts, std::string procedure_uri)
+    WampList arguments{};
+    WampDict arguments_kw{};
+
+    CallMessage(uint64_t req_id, WampDict opts, std::string procedure_uri,
+                WampList args = {}, WampDict args_kw = {})
         : request_id(req_id)
         , options(std::move(opts))
         , procedure(std::move(procedure_uri))
+        , arguments(std::move(args))
+        , arguments_kw(std::move(args_kw))
     {}
 };
 
@@ -471,10 +489,16 @@ struct InvocationMessage {
     uint64_t registration_id{}; // Which registration to invoke
     WampDict details{};
 
-    InvocationMessage(uint64_t req_id, uint64_t reg_id, WampDict details_dict)
+    WampList arguments{};
+    WampDict arguments_kw{};
+
+    InvocationMessage(uint64_t req_id, uint64_t reg_id, WampDict details_dict,
+                      WampList args = {}, WampDict args_kw = {})
         : request_id(req_id)
         , registration_id(reg_id)
         , details(std::move(details_dict))
+        , arguments(std::move(args))
+        , arguments_kw(std::move(args_kw))
     {}
 };
 
@@ -519,6 +543,58 @@ struct ResultMessage {
 };
 
 // ============================================================================
+// UNSUBSCRIBE Message: [34, Request|id, SUBSCRIBED.Subscription|id]
+// ============================================================================
+struct UnsubscribeMessage {
+    static constexpr MessageType TYPE = MessageType::UNSUBSCRIBE;
+
+    uint64_t request_id{};
+    uint64_t subscription_id{};
+
+    UnsubscribeMessage(uint64_t req_id, uint64_t sub_id)
+        : request_id(req_id)
+        , subscription_id(sub_id)
+    {}
+};
+
+// ============================================================================
+// UNSUBSCRIBED Message: [35, UNSUBSCRIBE.Request|id]
+// ============================================================================
+struct UnsubscribedMessage {
+    static constexpr MessageType TYPE = MessageType::UNSUBSCRIBED;
+
+    uint64_t request_id{};
+
+    explicit UnsubscribedMessage(uint64_t req_id) : request_id(req_id) {}
+};
+
+// ============================================================================
+// UNREGISTER Message: [66, Request|id, REGISTERED.Registration|id]
+// ============================================================================
+struct UnregisterMessage {
+    static constexpr MessageType TYPE = MessageType::UNREGISTER;
+
+    uint64_t request_id{};
+    uint64_t registration_id{};
+
+    UnregisterMessage(uint64_t req_id, uint64_t reg_id)
+        : request_id(req_id)
+        , registration_id(reg_id)
+    {}
+};
+
+// ============================================================================
+// UNREGISTERED Message: [67, UNREGISTER.Request|id]
+// ============================================================================
+struct UnregisteredMessage {
+    static constexpr MessageType TYPE = MessageType::UNREGISTERED;
+
+    uint64_t request_id{};
+
+    explicit UnregisteredMessage(uint64_t req_id) : request_id(req_id) {}
+};
+
+// ============================================================================
 // ERROR Message: [8, REQUEST.Type|int, REQUEST.Request|id, Details|dict, Error|uri]
 // ============================================================================
 // Generic error response for failed requests
@@ -530,12 +606,30 @@ struct ErrorMessage {
     WampDict details{};
     std::string error_uri{};     // Error URI like "wamp.error.procedure_already_exists"
 
-    ErrorMessage(MessageType req_type, uint64_t req_id, WampDict details_dict, std::string error)
+    WampList arguments{};
+    WampDict arguments_kw{};
+
+    ErrorMessage(MessageType req_type, uint64_t req_id, WampDict details_dict, std::string error,
+                 WampList args = {}, WampDict args_kw = {})
         : request_type(req_type)
         , request_id(req_id)
         , details(std::move(details_dict))
         , error_uri(std::move(error))
+        , arguments(std::move(args))
+        , arguments_kw(std::move(args_kw))
     {}
+
+    static ErrorMessage create_no_such_subscription(uint64_t request_id) {
+        WampDict details;
+        details["message"] = "No such subscription";
+        return ErrorMessage{MessageType::UNSUBSCRIBE, request_id, details, "wamp.error.no_such_subscription"};
+    }
+
+    static ErrorMessage create_no_such_registration(uint64_t request_id) {
+        WampDict details;
+        details["message"] = "No such registration";
+        return ErrorMessage{MessageType::UNREGISTER, request_id, details, "wamp.error.no_such_registration"};
+    }
 
     static ErrorMessage create_procedure_already_exists(uint64_t request_id, const std::string& procedure) {
         WampDict details;
@@ -575,6 +669,10 @@ using WampMessage = std::variant<
     InvocationMessage,
     YieldMessage,
     ResultMessage,
+    UnsubscribeMessage,
+    UnsubscribedMessage,
+    UnregisterMessage,
+    UnregisteredMessage,
     ErrorMessage
 >;
 
