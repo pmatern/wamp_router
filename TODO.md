@@ -9,10 +9,10 @@ Outstanding work, as of 2026-11-05. Check items off as they land.
 - [x] PUBLISH `acknowledge` was already correct; added `exclude_me` (defaults to true per spec).
 - [x] Fail pending calls with `wamp.error.callee_failure` when the callee disconnects.
 - [ ] Call timeouts: pending invocations are only bounded by LRU eviction, so a callee that never replies leaves the caller waiting forever.
-- [ ] `WampClient` (`include/wamp_client.hpp`) lacks API for the new router features: unsubscribe, unregister, args on `call`/`publish`, args on received events/invocations, and returning an ERROR from an `InvocationHandler`.
+- [x] `WampClient` now supports unsubscribe, unregister, args on `call`/`call_result`/`publish` (plus `exclude_me`), args on received events/invocations, and `WampException` for ERROR replies and for handlers that want to return an ERROR.
 
 ## Code quality and tests
-- [ ] Flaky test: "WampClient - Register procedure and handle call" (`tests/test_wamp_client.cpp:120`) fails in roughly half of full-suite runs but never in isolation, on the baseline too. Likely cause: the router's registration manager is a process-wide static, so `com.example.add` is still registered by an earlier test and REGISTER returns `procedure_already_exists`. Needs per-test isolation or unique procedure names.
+- [x] Flaky test "WampClient - Register procedure and handle call": the integration test fixture stopped its server before it saw the client EOF, so `WampSession` never ran `on_disconnect()` and `com.example.add` stayed registered in the process-wide registry. `WampSession` now cleans up in its destructor.
 - [ ] Fix `-Wunused-result` warnings from unchecked `session.process(...)` in `tests/test_wamp_session.cpp`.
 - [ ] Log the clean-disconnect "Operation canceled" read-loop error at debug, not error.
 - [ ] Integration tests (`tests/test_integration.cpp`): graceful server shutdown instead of detach; timing-dependent tests.

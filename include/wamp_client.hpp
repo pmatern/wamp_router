@@ -30,6 +30,7 @@
 #include <optional>
 #include <expected>
 #include <memory>
+#include <stdexcept>
 
 namespace wamp {
 
@@ -38,6 +39,35 @@ using boost::asio::use_awaitable;
 using boost::asio::co_spawn;
 using boost::asio::detached;
 using boost::asio::ip::tcp;
+
+// Thrown by WampClient when the router answers a request with an ERROR, and
+// throwable from an InvocationHandler to make the router send an ERROR to the caller.
+class WampException : public std::runtime_error {
+public:
+    explicit WampException(std::string uri, WampDict details_dict = {},
+                           WampList args = {}, WampDict args_kw = {})
+        : std::runtime_error(make_what(uri, details_dict))
+        , error_uri(std::move(uri))
+        , details(std::move(details_dict))
+        , arguments(std::move(args))
+        , arguments_kw(std::move(args_kw))
+    {}
+
+    std::string error_uri;
+    WampDict details;
+    WampList arguments;
+    WampDict arguments_kw;
+
+private:
+    static std::string make_what(const std::string& uri, const WampDict& details_dict) {
+        if (auto it = details_dict.find("message"); it != details_dict.end()) {
+            if (const auto* msg = std::get_if<std::string>(&it->second)) {
+                return uri + ": " + *msg;
+            }
+        }
+        return uri;
+    }
+};
 
 // Callback types for client
 using EventCallback = std::function<void(const EventMessage&)>;
@@ -225,11 +255,7 @@ public:
 
         co_await send_wamp_message(msg);
 
-        auto subscribed_opt = co_await channel->async_receive(use_awaitable);
-        if (!subscribed_opt.has_value()) {
-            throw std::runtime_error("Failed to receive SUBSCRIBED");
-        }
-        auto& subscribed = *subscribed_opt;
+        auto subscribed = co_await await_reply<SubscribedMessage>(channel, request_id, "SUBSCRIBED");
 
         event_handlers_[subscribed.subscription_id] = std::move(callback);
         topic_to_subscription_id_[topic] = subscribed.subscription_id;
@@ -238,7 +264,32 @@ public:
         co_return subscribed.subscription_id;
     }
 
+    awaitable<void> unsubscribe(uint64_t subscription_id) {
+        if (state_ != State::ESTABLISHED) {
+            throw std::runtime_error("Not connected");
+        }
+
+        uint64_t request_id = next_request_id();
+        auto channel = std::make_shared<UnsubscribedChannel>(io_, 1);
+        pending_unsubscribes_[request_id] = channel;
+
+        co_await send_wamp_message(UnsubscribeMessage{request_id, subscription_id});
+        co_await await_reply<UnsubscribedMessage>(channel, request_id, "UNSUBSCRIBED");
+
+        event_handlers_.erase(subscription_id);
+        std::erase_if(topic_to_subscription_id_,
+                      [subscription_id](const auto& kv) { return kv.second == subscription_id; });
+
+        spdlog::debug("Unsubscribed: subscription_id={}", subscription_id);
+    }
+
     awaitable<uint64_t> publish(std::string topic, bool acknowledge = false) {
+        co_return co_await publish(std::move(topic), WampList{}, WampDict{}, acknowledge);
+    }
+
+    // Publish with payload. exclude_me=false delivers the event to this client's own subscriptions too.
+    awaitable<uint64_t> publish(std::string topic, WampList args, WampDict args_kw = {},
+                                bool acknowledge = false, bool exclude_me = true) {
         if (state_ != State::ESTABLISHED) {
             throw std::runtime_error("Not connected");
         }
@@ -248,8 +299,11 @@ public:
         if (acknowledge) {
             options["acknowledge"] = acknowledge;
         }
+        if (!exclude_me) {
+            options["exclude_me"] = exclude_me;
+        }
 
-        PublishMessage msg{request_id, options, topic};
+        PublishMessage msg{request_id, options, topic, std::move(args), std::move(args_kw)};
 
         if (acknowledge) {
             auto channel = std::make_shared<PublishedChannel>(io_, 1);
@@ -257,12 +311,9 @@ public:
 
             co_await send_wamp_message(msg);
 
-            auto published_opt = co_await channel->async_receive(use_awaitable);
-            if (!published_opt.has_value()) {
-                throw std::runtime_error("Failed to receive PUBLISHED");
-            }
-            spdlog::debug("Published to '{}': publication_id={}", topic, published_opt->publication_id);
-            co_return published_opt->publication_id;
+            auto published = co_await await_reply<PublishedMessage>(channel, request_id, "PUBLISHED");
+            spdlog::debug("Published to '{}': publication_id={}", topic, published.publication_id);
+            co_return published.publication_id;
         } else {
             // Fire and forget
             co_await send_wamp_message(msg);
@@ -288,11 +339,7 @@ public:
 
         co_await send_wamp_message(msg);
 
-        auto registered_opt = co_await channel->async_receive(use_awaitable);
-        if (!registered_opt.has_value()) {
-            throw std::runtime_error("Failed to receive REGISTERED");
-        }
-        auto& registered = *registered_opt;
+        auto registered = co_await await_reply<RegisteredMessage>(channel, request_id, "REGISTERED");
 
         invocation_handlers_[registered.registration_id] = std::move(handler);
         uri_to_registration_id_[uri] = registered.registration_id;
@@ -301,26 +348,33 @@ public:
         co_return registered.registration_id;
     }
 
-    awaitable<nlohmann::json> call(std::string procedure) {
+    awaitable<void> unregister(uint64_t registration_id) {
         if (state_ != State::ESTABLISHED) {
             throw std::runtime_error("Not connected");
         }
 
         uint64_t request_id = next_request_id();
-        CallMessage msg{request_id, {}, procedure};
+        auto channel = std::make_shared<UnregisteredChannel>(io_, 1);
+        pending_unregisters_[request_id] = channel;
 
-        auto channel = std::make_shared<ResultChannel>(io_, 1);
-        pending_calls_[request_id] = channel;
+        co_await send_wamp_message(UnregisterMessage{request_id, registration_id});
+        co_await await_reply<UnregisteredMessage>(channel, request_id, "UNREGISTERED");
 
-        co_await send_wamp_message(msg);
+        invocation_handlers_.erase(registration_id);
+        std::erase_if(uri_to_registration_id_,
+                      [registration_id](const auto& kv) { return kv.second == registration_id; });
 
-        auto result_opt = co_await channel->async_receive(use_awaitable);
-        if (!result_opt.has_value()) {
-            throw std::runtime_error("Failed to receive RESULT");
-        }
+        spdlog::debug("Unregistered: registration_id={}", registration_id);
+    }
 
-        const auto& result = *result_opt;
-        spdlog::debug("Received RESULT for call to '{}'", procedure);
+    // Call a procedure; returns the unwrapped result (see call_result for the full RESULT).
+    // Throws WampException if the router or callee answers with an ERROR.
+    awaitable<nlohmann::json> call(std::string procedure) {
+        co_return co_await call(std::move(procedure), WampList{}, WampDict{});
+    }
+
+    awaitable<nlohmann::json> call(std::string procedure, WampList args, WampDict args_kw = {}) {
+        const auto result = co_await call_result(std::move(procedure), std::move(args), std::move(args_kw));
 
         // Extract result: prefer keyword arguments, then positional arguments
         if (!result.arguments_kw.empty()) {
@@ -337,7 +391,44 @@ public:
         }
     }
 
+    // Call a procedure and return the complete RESULT message (arguments and keyword arguments).
+    awaitable<ResultMessage> call_result(std::string procedure, WampList args = {}, WampDict args_kw = {}) {
+        if (state_ != State::ESTABLISHED) {
+            throw std::runtime_error("Not connected");
+        }
+
+        uint64_t request_id = next_request_id();
+        CallMessage msg{request_id, {}, procedure, std::move(args), std::move(args_kw)};
+
+        auto channel = std::make_shared<ResultChannel>(io_, 1);
+        pending_calls_[request_id] = channel;
+
+        co_await send_wamp_message(msg);
+
+        auto result = co_await await_reply<ResultMessage>(channel, request_id, "RESULT");
+        spdlog::debug("Received RESULT for call to '{}'", procedure);
+        co_return result;
+    }
+
 private:
+    // Wait for the reply to a pending request. If the router answered with an ERROR instead,
+    // throw it as a WampException.
+    template<typename Reply, typename Channel>
+    awaitable<Reply> await_reply(std::shared_ptr<Channel> channel, uint64_t request_id, const char* what) {
+        auto [ec, reply] = co_await channel->async_receive(boost::asio::as_tuple(use_awaitable));
+        if (!ec && reply.has_value()) {
+            co_return std::move(*reply);
+        }
+
+        if (auto it = failed_requests_.find(request_id); it != failed_requests_.end()) {
+            ErrorMessage error = std::move(it->second);
+            failed_requests_.erase(it);
+            throw WampException{std::move(error.error_uri), std::move(error.details),
+                                std::move(error.arguments), std::move(error.arguments_kw)};
+        }
+        throw std::runtime_error(std::string{"Failed to receive "} + what);
+    }
+
     // ========================================================================
     // Read Loop and Message Processing
     // ========================================================================
@@ -474,6 +565,14 @@ private:
                 handle_published(cbor_payload);
                 break;
 
+            case MessageType::UNSUBSCRIBED:
+                handle_unsubscribed(cbor_payload);
+                break;
+
+            case MessageType::UNREGISTERED:
+                handle_unregistered(cbor_payload);
+                break;
+
             case MessageType::EVENT:
                 handle_event(cbor_payload);
                 break;
@@ -549,6 +648,42 @@ private:
             pending_subscribes_.erase(it);
         } else {
             spdlog::warn("Received SUBSCRIBED for unknown request_id={}", subscribed.request_id);
+        }
+    }
+
+    void handle_unsubscribed(const std::vector<uint8_t>& cbor_payload) {
+        auto unsubscribed_result = deserialize_unsubscribed(cbor_payload);
+        if (!unsubscribed_result.has_value()) {
+            spdlog::error("Failed to deserialize UNSUBSCRIBED");
+            return;
+        }
+
+        const auto& unsubscribed = *unsubscribed_result;
+
+        auto it = pending_unsubscribes_.find(unsubscribed.request_id);
+        if (it != pending_unsubscribes_.end()) {
+            it->second->try_send(boost::system::error_code(), std::make_optional(unsubscribed));
+            pending_unsubscribes_.erase(it);
+        } else {
+            spdlog::warn("Received UNSUBSCRIBED for unknown request_id={}", unsubscribed.request_id);
+        }
+    }
+
+    void handle_unregistered(const std::vector<uint8_t>& cbor_payload) {
+        auto unregistered_result = deserialize_unregistered(cbor_payload);
+        if (!unregistered_result.has_value()) {
+            spdlog::error("Failed to deserialize UNREGISTERED");
+            return;
+        }
+
+        const auto& unregistered = *unregistered_result;
+
+        auto it = pending_unregisters_.find(unregistered.request_id);
+        if (it != pending_unregisters_.end()) {
+            it->second->try_send(boost::system::error_code(), std::make_optional(unregistered));
+            pending_unregisters_.erase(it);
+        } else {
+            spdlog::warn("Received UNREGISTERED for unknown request_id={}", unregistered.request_id);
         }
     }
 
@@ -629,19 +764,24 @@ private:
     }
 
     awaitable<void> handle_invocation_async(InvocationHandler handler, InvocationMessage invocation) {
-        std::optional<std::string> error_message;
+        std::optional<ErrorMessage> error;
 
         try {
             auto yield = co_await handler(invocation);
             co_await send_wamp_message(yield);
+        } catch (const WampException& e) {
+            // Handler chose the error URI/payload to send back to the caller
+            spdlog::debug("Invocation handler raised {}", e.error_uri);
+            error = ErrorMessage{MessageType::INVOCATION, invocation.request_id, e.details,
+                                 e.error_uri, e.arguments, e.arguments_kw};
         } catch (const std::exception& e) {
             spdlog::error("Invocation handler error: {}", e.what());
-            error_message = e.what();
+            error = ErrorMessage{MessageType::INVOCATION, invocation.request_id,
+                                 {{"message", std::string{e.what()}}}, "wamp.error.callee_failure"};
         }
 
-        if (error_message.has_value()) {
-            auto error = ErrorMessage::create_callee_failure(invocation.request_id, *error_message);
-            co_await send_wamp_message(error);
+        if (error.has_value()) {
+            co_await send_wamp_message(*error);
         }
     }
 
@@ -674,8 +814,10 @@ private:
         spdlog::error("Received ERROR: uri={}, request_id={}, request_type={}",
                      error.error_uri, error.request_id, static_cast<int>(error.request_type));
 
-        // Route error to the appropriate pending operation based on request_type
+        // Route error to the appropriate pending operation based on request_type.
+        // The ERROR is stashed so the awaiting coroutine can rethrow it as a WampException.
         auto ec = boost::asio::error::operation_aborted;
+        failed_requests_.insert_or_assign(error.request_id, error);
 
         switch (error.request_type) {
             case MessageType::SUBSCRIBE: {
@@ -692,6 +834,24 @@ private:
                 if (it != pending_publishes_.end()) {
                     it->second->try_send(ec, std::nullopt);
                     pending_publishes_.erase(it);
+                }
+                break;
+            }
+
+            case MessageType::UNSUBSCRIBE: {
+                auto it = pending_unsubscribes_.find(error.request_id);
+                if (it != pending_unsubscribes_.end()) {
+                    it->second->try_send(ec, std::nullopt);
+                    pending_unsubscribes_.erase(it);
+                }
+                break;
+            }
+
+            case MessageType::UNREGISTER: {
+                auto it = pending_unregisters_.find(error.request_id);
+                if (it != pending_unregisters_.end()) {
+                    it->second->try_send(ec, std::nullopt);
+                    pending_unregisters_.erase(it);
                 }
                 break;
             }
@@ -715,6 +875,7 @@ private:
             }
 
             default:
+                failed_requests_.erase(error.request_id);
                 spdlog::warn("Unhandled ERROR for request_type={}", static_cast<int>(error.request_type));
                 break;
         }
@@ -858,6 +1019,10 @@ private:
 
         if constexpr (std::is_same_v<MessageType, SubscribeMessage>) {
             cbor_payload = serialize_subscribe(msg);
+        } else if constexpr (std::is_same_v<MessageType, UnsubscribeMessage>) {
+            cbor_payload = serialize_unsubscribe(msg);
+        } else if constexpr (std::is_same_v<MessageType, UnregisterMessage>) {
+            cbor_payload = serialize_unregister(msg);
         } else if constexpr (std::is_same_v<MessageType, PublishMessage>) {
             cbor_payload = serialize_publish(msg);
         } else if constexpr (std::is_same_v<MessageType, RegisterMessage>) {
@@ -952,6 +1117,13 @@ private:
     std::unordered_map<uint64_t, std::shared_ptr<PublishedChannel>> pending_publishes_;
     std::unordered_map<uint64_t, std::shared_ptr<RegisteredChannel>> pending_registers_;
     std::unordered_map<uint64_t, std::shared_ptr<ResultChannel>> pending_calls_;
+    using UnsubscribedChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<UnsubscribedMessage>)>;
+    using UnregisteredChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<UnregisteredMessage>)>;
+    std::unordered_map<uint64_t, std::shared_ptr<UnsubscribedChannel>> pending_unsubscribes_;
+    std::unordered_map<uint64_t, std::shared_ptr<UnregisteredChannel>> pending_unregisters_;
+
+    // ERRORs received for pending requests, keyed by request_id, until the waiter rethrows them
+    std::unordered_map<uint64_t, ErrorMessage> failed_requests_;
 
     // Subscription and registration handlers
     std::unordered_map<uint64_t, EventCallback> event_handlers_;

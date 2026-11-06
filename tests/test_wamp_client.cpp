@@ -257,3 +257,223 @@ TEST_CASE("WampClient - Error handling for non-existent procedure", "[wamp_clien
 
     REQUIRE(error_caught);
 }
+
+// ============================================================================
+// Payloads, unsubscribe/unregister and error propagation
+// ============================================================================
+
+namespace {
+awaitable<void> sleep_ms(io_context& io, int ms) {
+    boost::asio::steady_timer timer{io};
+    timer.expires_after(std::chrono::milliseconds(ms));
+    co_await timer.async_wait(use_awaitable);
+}
+}  // namespace
+
+TEST_CASE("WampClient - RPC arguments round trip", "[wamp_client][payload]") {
+    io_context io;
+    ServerConfig config;
+    uint16_t port = find_available_port();
+    WampServer server{io, port, config};
+    server.start();
+
+    WampClient callee{io};
+    WampClient caller{io};
+
+    const WampList sent{std::string{"abc"}, int64_t{7}, true};
+    const WampDict sent_kw{{"unit", std::string{"ms"}}};
+
+    WampList seen_args;
+    WampDict seen_kw;
+    ResultMessage result{0, {}};
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await callee.connect("127.0.0.1", port, "test.realm");
+        co_await caller.connect("127.0.0.1", port, "test.realm");
+
+        co_await callee.register_procedure(
+            "proto.client.echo",
+            [&](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                seen_args = inv.arguments;
+                seen_kw = inv.arguments_kw;
+                co_return YieldMessage{inv.request_id, {}, inv.arguments, inv.arguments_kw};
+            });
+
+        result = co_await caller.call_result("proto.client.echo", sent, sent_kw);
+        done = true;
+
+        co_await callee.disconnect();
+        co_await caller.disconnect();
+    }, detached);
+
+    io.run_for(std::chrono::seconds(3));
+
+    REQUIRE(done);
+    REQUIRE(seen_args == sent);
+    REQUIRE(seen_kw.size() == 1);
+    REQUIRE(result.arguments == sent);
+    REQUIRE(result.arguments_kw.size() == 1);
+}
+
+TEST_CASE("WampClient - PubSub payload, unsubscribe and exclude_me", "[wamp_client][payload]") {
+    io_context io;
+    ServerConfig config;
+    uint16_t port = find_available_port();
+    WampServer server{io, port, config};
+    server.start();
+
+    WampClient sub{io};
+    WampClient pub{io};
+
+    const WampList sent{std::string{"hello"}, int64_t{42}};
+    int sub_events = 0;
+    int pub_events = 0;
+    WampList last_args;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await sub.connect("127.0.0.1", port, "test.realm");
+        co_await pub.connect("127.0.0.1", port, "test.realm");
+
+        auto sub_id = co_await sub.subscribe("proto.client.topic", [&](const EventMessage& ev) {
+            sub_events++;
+            last_args = ev.arguments;
+        });
+        co_await pub.subscribe("proto.client.topic", [&](const EventMessage&) { pub_events++; });
+        co_await sleep_ms(io, 50);
+
+        // Default: publisher doesn't get its own event; subscriber gets the payload
+        co_await pub.publish("proto.client.topic", sent);
+        co_await sleep_ms(io, 100);
+        // exclude_me=false: publisher receives it too
+        co_await pub.publish("proto.client.topic", sent, {}, false, false);
+        co_await sleep_ms(io, 100);
+
+        co_await sub.unsubscribe(sub_id);
+        co_await pub.publish("proto.client.topic", sent, {}, false, false);
+        co_await sleep_ms(io, 100);
+        done = true;
+
+        co_await sub.disconnect();
+        co_await pub.disconnect();
+    }, detached);
+
+    io.run_for(std::chrono::seconds(3));
+
+    REQUIRE(done);
+    REQUIRE(last_args == sent);
+    REQUIRE(sub_events == 2);   // third publish came after unsubscribe
+    REQUIRE(pub_events == 2);   // second and third (exclude_me=false) publishes
+}
+
+TEST_CASE("WampClient - unregister removes the procedure", "[wamp_client][payload]") {
+    io_context io;
+    ServerConfig config;
+    uint16_t port = find_available_port();
+    WampServer server{io, port, config};
+    server.start();
+
+    WampClient callee{io};
+    WampClient caller{io};
+
+    std::string error_uri;
+    bool first_call_ok = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await callee.connect("127.0.0.1", port, "test.realm");
+        co_await caller.connect("127.0.0.1", port, "test.realm");
+
+        auto reg_id = co_await callee.register_procedure(
+            "proto.client.gone",
+            [](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                co_return YieldMessage{inv.request_id, {}};
+            });
+
+        (void)co_await caller.call("proto.client.gone");
+        first_call_ok = true;
+
+        co_await callee.unregister(reg_id);
+
+        try {
+            (void)co_await caller.call("proto.client.gone");
+        } catch (const WampException& e) {
+            error_uri = e.error_uri;
+        }
+
+        co_await callee.disconnect();
+        co_await caller.disconnect();
+    }, detached);
+
+    io.run_for(std::chrono::seconds(3));
+
+    REQUIRE(first_call_ok);
+    REQUIRE(error_uri == "wamp.error.no_such_procedure");
+}
+
+TEST_CASE("WampClient - callee errors reach the caller", "[wamp_client][payload]") {
+    io_context io;
+    ServerConfig config;
+    uint16_t port = find_available_port();
+    WampServer server{io, port, config};
+    server.start();
+
+    WampClient callee{io};
+    WampClient caller{io};
+
+    std::string custom_uri;
+    WampList custom_args;
+    std::string generic_uri;
+    std::string bad_unsubscribe_uri;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await callee.connect("127.0.0.1", port, "test.realm");
+        co_await caller.connect("127.0.0.1", port, "test.realm");
+
+        co_await callee.register_procedure(
+            "proto.client.custom_error",
+            [](const InvocationMessage&) -> awaitable<YieldMessage> {
+                throw WampException{"app.error.nope", {{"message", std::string{"denied"}}},
+                                    WampList{std::string{"detail"}}};
+                co_return YieldMessage{0, {}};
+            });
+        co_await callee.register_procedure(
+            "proto.client.generic_error",
+            [](const InvocationMessage&) -> awaitable<YieldMessage> {
+                throw std::runtime_error("kaboom");
+                co_return YieldMessage{0, {}};
+            });
+
+        try {
+            (void)co_await caller.call("proto.client.custom_error");
+        } catch (const WampException& e) {
+            custom_uri = e.error_uri;
+            custom_args = e.arguments;
+        }
+
+        try {
+            (void)co_await caller.call("proto.client.generic_error");
+        } catch (const WampException& e) {
+            generic_uri = e.error_uri;
+        }
+
+        try {
+            co_await caller.unsubscribe(123456789);
+        } catch (const WampException& e) {
+            bad_unsubscribe_uri = e.error_uri;
+        }
+        done = true;
+
+        co_await callee.disconnect();
+        co_await caller.disconnect();
+    }, detached);
+
+    io.run_for(std::chrono::seconds(3));
+
+    REQUIRE(done);
+    REQUIRE(custom_uri == "app.error.nope");
+    REQUIRE(custom_args == WampList{std::string{"detail"}});
+    REQUIRE(generic_uri == "wamp.error.callee_failure");
+    REQUIRE(bad_unsubscribe_uri == "wamp.error.no_such_subscription");
+}

@@ -62,6 +62,17 @@ public:
         spdlog::debug("WAMP session created");
     }
 
+    WampSession(const WampSession&) = delete;
+    WampSession& operator=(const WampSession&) = delete;
+
+    // The session coroutine can be destroyed without seeing EOF (e.g. io_context shutdown),
+    // so make sure global subscriptions/registrations never outlive the session.
+    ~WampSession() {
+        if (!disconnected_) {
+            on_disconnect();
+        }
+    }
+
     // Get session ID (0 if not yet established)
     [[nodiscard]] uint64_t session_id() const {
         return session_id_;
@@ -80,6 +91,7 @@ public:
     // Called when TCP connection closes
     void on_disconnect() {
         state_ = SessionProtocolState::CLOSED;
+        disconnected_ = true;
 
         // Clean up all subscriptions and registrations for this session
         if (session_id_ != 0) {
@@ -748,6 +760,7 @@ private:
     boost::asio::io_context& io_;
     const ServerConfig& config_;  // Server configuration (includes auth keys)
     SessionProtocolState state_;
+    bool disconnected_ = false;
     std::vector<uint8_t> buffer_;          // Accumulates partial reads
     std::vector<uint8_t> response_buffer_;  // Reusable buffer for responses
 
