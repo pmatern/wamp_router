@@ -477,3 +477,66 @@ TEST_CASE("WampClient - callee errors reach the caller", "[wamp_client][payload]
     REQUIRE(generic_uri == "wamp.error.callee_failure");
     REQUIRE(bad_unsubscribe_uri == "wamp.error.no_such_subscription");
 }
+
+TEST_CASE("WampClient - many concurrent callers share one callee", "[wamp_client][payload]") {
+    // Regression: concurrent invocation handlers used to interleave socket writes, and the router
+    // could drop an INVOCATION when a read and a channel event completed together.
+    io_context io;
+    ServerConfig config;
+    uint16_t port = find_available_port();
+    WampServer server{io, port, config};
+    server.start();
+
+    constexpr size_t kCallers = 8;
+    constexpr size_t kCallsEach = 40;
+
+    WampClient callee{io};
+    std::vector<std::unique_ptr<WampClient>> callers;
+    for (size_t i = 0; i < kCallers; ++i) {
+        callers.push_back(std::make_unique<WampClient>(io));
+    }
+
+    size_t ok = 0;
+    size_t failed = 0;
+    size_t running = kCallers;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await callee.connect("127.0.0.1", port, "test.realm");
+        co_await callee.register_procedure(
+            "proto.client.concurrent",
+            [](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                co_return YieldMessage{inv.request_id, {}, inv.arguments};
+            });
+
+        for (auto& caller : callers) {
+            co_await caller->connect("127.0.0.1", port, "test.realm");
+        }
+        for (auto& caller : callers) {
+            co_spawn(io, [&, c = caller.get()]() -> awaitable<void> {
+                for (size_t i = 0; i < kCallsEach; ++i) {
+                    try {
+                        (void)co_await c->call("proto.client.concurrent", WampList{int64_t(i)});
+                        ++ok;
+                    } catch (const std::exception&) {
+                        ++failed;
+                    }
+                }
+                --running;
+            }, detached);
+        }
+
+        while (running > 0) {
+            co_await sleep_ms(io, 5);
+        }
+        co_await callee.disconnect();
+        for (auto& caller : callers) {
+            co_await caller->disconnect();
+        }
+    }, detached);
+
+    io.run_for(std::chrono::seconds(10));
+
+    REQUIRE(running == 0);
+    REQUIRE(failed == 0);
+    REQUIRE(ok == kCallers * kCallsEach);
+}

@@ -23,6 +23,7 @@
 #include <boost/asio/experimental/channel.hpp>
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <spdlog/spdlog.h>
+#include <deque>
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -197,10 +198,12 @@ public:
         boost::asio::steady_timer timer{io_};
         timer.expires_after(std::chrono::milliseconds(500));
 
+        // Coroutine lambdas must stay alive while their coroutines run (the frame refers to the
+        // closure), so they are named locals rather than immediately-invoked temporaries.
         auto timeout = [&]() -> awaitable<bool> {
             co_await timer.async_wait(use_awaitable);
             co_return false; // timeout occurred
-        }();
+        };
 
         auto receive_goodbye = [&]() -> awaitable<bool> {
             auto [ec, msg] = co_await goodbye_channel_.async_receive(boost::asio::as_tuple(use_awaitable));
@@ -209,10 +212,10 @@ public:
                 co_return true; // got goodbye
             }
             co_return false;
-        }();
+        };
 
         // Race the timeout and the goodbye receive
-        auto result = co_await (std::move(timeout) || std::move(receive_goodbye));
+        auto result = co_await (timeout() || receive_goodbye());
 
         // Visit the variant to determine which completed first
         bool got_goodbye = std::visit([](auto&& value) { return value; }, result);
@@ -527,7 +530,7 @@ private:
                 {
                     auto pong = rawsocket::create_pong(payload);
                     co_spawn(io_, [this, pong = std::move(pong)]() -> awaitable<void> {
-                        co_await boost::asio::async_write(socket_, boost::asio::buffer(pong), use_awaitable);
+                        co_await write_frame(pong);
                     }, detached);
                 }
                 break;
@@ -1040,12 +1043,37 @@ private:
         }
 
         auto frame = rawsocket::create_wamp_message(cbor_payload);
+        co_await write_frame(frame);
+    }
 
-        co_await boost::asio::async_write(
+    // Asio forbids overlapping async_write calls on one socket, and concurrent coroutines
+    // (e.g. several invocation handlers answering at once) would interleave frames.
+    // Writers take turns: later ones wait on a timer that the previous writer cancels.
+    awaitable<void> write_frame(const std::vector<uint8_t>& frame) {
+        while (write_in_progress_) {
+            boost::asio::steady_timer gate{io_, boost::asio::steady_timer::time_point::max()};
+            write_waiters_.push_back(&gate);
+            co_await gate.async_wait(boost::asio::as_tuple(use_awaitable));
+        }
+        write_in_progress_ = true;
+
+        auto [ec, written] = co_await boost::asio::async_write(
             socket_,
             boost::asio::buffer(frame),
-            use_awaitable
+            boost::asio::as_tuple(use_awaitable)
         );
+        (void)written;
+
+        write_in_progress_ = false;
+        if (!write_waiters_.empty()) {
+            auto* next = write_waiters_.front();
+            write_waiters_.pop_front();
+            next->cancel();
+        }
+
+        if (ec) {
+            throw boost::system::system_error{ec};
+        }
     }
 
     uint64_t next_request_id() {
@@ -1090,6 +1118,10 @@ private:
 
     // Read loop control
     std::atomic<bool> read_loop_running_;
+
+    // Write serialization (see write_frame)
+    bool write_in_progress_ = false;
+    std::deque<boost::asio::steady_timer*> write_waiters_;
 
     // Request ID generation
     std::atomic<uint64_t> next_request_id_{1};

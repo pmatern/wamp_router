@@ -12,6 +12,7 @@ Outstanding work, as of 2026-11-05. Check items off as they land.
 - [x] `WampClient` now supports unsubscribe, unregister, args on `call`/`call_result`/`publish` (plus `exclude_me`), args on received events/invocations, and `WampException` for ERROR replies and for handlers that want to return an ERROR.
 
 ## Code quality and tests
+- [x] Found by the load test: `WampSession::process` handled one frame per socket read (pipelined messages sat in the buffer, and a partial 4-byte header spun forever); `handle_wamp_session` dropped an event or client bytes when the read and channel receive completed together; `WampClient` interleaved socket writes from concurrent invocation handlers; `WampClient::disconnect` used immediately-invoked coroutine lambdas (use-after-free in release builds).
 - [x] Flaky test "WampClient - Register procedure and handle call": the integration test fixture stopped its server before it saw the client EOF, so `WampSession` never ran `on_disconnect()` and `com.example.add` stayed registered in the process-wide registry. `WampSession` now cleans up in its destructor.
 - [ ] Fix `-Wunused-result` warnings from unchecked `session.process(...)` in `tests/test_wamp_session.cpp`.
 - [ ] Log the clean-disconnect "Operation canceled" read-loop error at debug, not error.
@@ -23,7 +24,8 @@ Outstanding work, as of 2026-11-05. Check items off as they land.
 ## Performance
 Do the protocol gaps (arguments forwarding in particular) first so benchmarks measure realistic payloads.
 - [x] Catch2 `BENCHMARK` micro-benchmarks in `bench/bench_micro.cpp` (target `wamp_bench`, not built by default). Baseline numbers are in the README.
-- [ ] End-to-end load tool on `WampClient`: N clients, PUBLISH→EVENT and CALL→RESULT p50/p99 latency and throughput.
+- [x] End-to-end load tool `wamp_load` (`bench/load_test.cpp`, not built by default). Baseline numbers are in the README.
+- [ ] Event loss under load: each session's `EventChannel` holds 100 events and `try_send` drops silently when full (10 subscribers lose ~5% at 5k events/s). Decide a policy: larger/unbounded queue, backpressure on the publisher, or disconnect slow consumers; at minimum count and log drops.
 - [ ] Serialize each EVENT once per PUBLISH instead of once per subscriber (only `subscription_id` differs); fan-out is ~2.8 µs per subscriber, nearly all serialization.
 - [ ] `SubscriptionManager::get_subscribers` copies the whole subscriber set into a vector on every publish (31 µs at 10,000 subscribers); iterate in place or cache.
 - [ ] After the load tool exists, revisit the single-threaded design and unbounded per-session channels (`include/event_channel.hpp`).

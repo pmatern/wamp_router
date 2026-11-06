@@ -103,48 +103,63 @@ public:
         spdlog::info("WAMP session disconnected");
     }
 
-    // Returns span view into response_buffer_ (empty span = no response)
+    // Consumes all complete frames in the buffer (a single socket read can carry several
+    // pipelined messages). Returns a view of the concatenated responses, valid until the next
+    // call (empty span = no response).
     [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> process(std::span<const uint8_t> data) {
         buffer_.insert(buffer_.end(), data.begin(), data.end());
+        output_buffer_.clear();
 
         spdlog::debug("Received {} bytes, buffer now {} bytes in state {}",
                      data.size(), buffer_.size(), state_name());
 
+        bool progressed = false;
         while (true) {
+            const auto state_before = state_;
+            const auto size_before = buffer_.size();
+
+            std::expected<std::span<const uint8_t>, std::error_code> result{std::span<const uint8_t>{}};
             switch (state_) {
                 case SessionProtocolState::AWAITING_RAWSOCKET_HANDSHAKE:
-                    return process_rawsocket_handshake();
-
-                case SessionProtocolState::AWAITING_FRAME_HEADER: {
-                    auto result = process_frame_header();
-                    if (!result.has_value()) {
-                        return std::unexpected{result.error()};
-                    }
-                    if (!result->empty()) {
-                        return result;
-                    }
+                    result = process_rawsocket_handshake();
                     break;
-                }
 
-                case SessionProtocolState::AWAITING_AUTHENTICATE: {
+                case SessionProtocolState::AWAITING_FRAME_HEADER:
+                    result = process_frame_header();
+                    break;
+
+                case SessionProtocolState::AWAITING_AUTHENTICATE:
                     // After CHALLENGE sent, client must send AUTHENTICATE
-                    auto result = process_frame_payload_authenticate();
-                    if (!result.has_value()) {
-                        return std::unexpected{result.error()};
-                    }
-                    if (!result->empty()) {
-                        return result;
-                    }
+                    result = process_frame_payload_authenticate();
                     break;
-                }
 
                 case SessionProtocolState::AWAITING_FRAME_PAYLOAD:
-                    return process_frame_payload();
+                    result = process_frame_payload();
+                    break;
 
                 case SessionProtocolState::SHUTTING_DOWN:
                 case SessionProtocolState::CLOSED:
                 default:
+                    // Frames handled earlier in this call (e.g. the GOODBYE reply) still get sent
+                    if (progressed) {
+                        return std::span<const uint8_t>(output_buffer_);
+                    }
                     return std::unexpected{make_error_code(WampError::INVALID_STATE)};
+            }
+
+            if (!result.has_value()) {
+                return std::unexpected{result.error()};
+            }
+            output_buffer_.insert(output_buffer_.end(), result->begin(), result->end());
+
+            const bool made_progress = state_ != state_before || buffer_.size() != size_before;
+            progressed = progressed || made_progress;
+
+            // Keep going only while input is being consumed and the session is ready for the
+            // next frame; after an ABORT or other terminal reply, stop and let the caller act.
+            const bool ready_for_more = result->empty() || state_ == SessionProtocolState::AWAITING_FRAME_HEADER;
+            if (!made_progress || !ready_for_more) {
+                return std::span<const uint8_t>(output_buffer_);
             }
         }
     }
@@ -761,6 +776,7 @@ private:
     const ServerConfig& config_;  // Server configuration (includes auth keys)
     SessionProtocolState state_;
     bool disconnected_ = false;
+    std::vector<uint8_t> output_buffer_;  // Responses accumulated during one process() call
     std::vector<uint8_t> buffer_;          // Accumulates partial reads
     std::vector<uint8_t> response_buffer_;  // Reusable buffer for responses
 

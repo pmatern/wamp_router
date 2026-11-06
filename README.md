@@ -330,6 +330,31 @@ Baseline (Release, Intel i7-1068NG7 @ 2.3 GHz, single thread, mean of 50 samples
 
 These are in-process numbers: they exclude socket I/O and TLS. The cost is dominated by CBOR (de)serialization through nlohmann::json; PUBLISH fan-out is roughly 2.8 µs per subscriber because each EVENT is serialized separately.
 
+### Load test
+
+`wamp_load` drives real `WampClient` connections against a router over TCP RawSocket and reports throughput and latency percentiles. By default the router runs in-process on its own thread (so router and clients share the machine's CPUs); `--host/--port` targets an external plain-TCP router.
+
+```bash
+cmake --build build-local-release --target wamp_load
+./build-local-release/wamp_load                                   # both scenarios
+./build-local-release/wamp_load --mode pubsub --subscribers 100 --messages 5000 --rate 1000
+./build-local-release/wamp_load --mode rpc --callers 50 --calls 200
+```
+
+Baseline (Release, same machine as above, embedded router, 10 positional arguments per message):
+
+| Scenario | Result |
+|---|---|
+| RPC, 1 caller, 5,000 calls | 4.3k calls/s, p50 0.22 ms, p99 0.39 ms |
+| RPC, 10 callers x 1,000 calls | 13.6k calls/s, p50 0.66 ms, p99 1.4 ms |
+| RPC, 50 callers x 200 calls | 12.1k calls/s, p50 3.4 ms, p99 11.7 ms |
+| PubSub, 10 subscribers, 2,000 events/s | 0.4% lost, p50 0.22 ms, p99 26 ms |
+| PubSub, 10 subscribers, 5,000 events/s | 4.8% lost, p50 0.24 ms, p99 38 ms |
+| PubSub, 100 subscribers, 1,000 events/s | 10% lost, p50 2.3 ms, p99 175 ms |
+| PubSub, 10 subscribers, unpaced (`--rate 0`) | 98% lost |
+
+Events are lost because each session's delivery queue holds 100 events and the router drops an event when a subscriber's queue is full. Bursts overflow it: the router handles a whole batch of PUBLISH messages before the subscriber sessions get to drain their queues.
+
 ## Architecture
 
 ### Key Design Decisions

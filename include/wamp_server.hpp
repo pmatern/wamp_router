@@ -167,41 +167,44 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
                 boost::asio::use_awaitable
             );
 
-            if (order[0] == 0) {
-                // Socket read completed
+            // wait_for_one cancels the loser, but the loser may already have completed; its result
+            // is still in the tuple and must not be dropped (that would lose an event or client bytes).
+            const bool read_done = order[0] == 0 || ec_read != boost::asio::error::operation_aborted;
+            const bool event_done = order[0] == 1 || ec_channel != boost::asio::error::operation_aborted;
+
+            if (event_done) {
+                if (ec_channel) {
+                    spdlog::error("Event channel error: {}", ec_channel.message());
+                    // Don't disconnect on channel error, just continue
+                } else {
+                    spdlog::debug("Sending {} byte event to session {}",
+                        event.event_data->size(), event.target_session_id);
+
+                    auto [ec_write, bytes_written] = co_await boost::asio::async_write(
+                        socket,
+                        boost::asio::buffer(*event.event_data),
+                        boost::asio::as_tuple(boost::asio::use_awaitable)
+                    );
+
+                    if (ec_write) {
+                        spdlog::error("Write error sending event to {}: {}",
+                            remote_address, ec_write.message());
+                        protocol.on_disconnect();
+                        co_return std::unexpected{ec_write};
+                    }
+
+                    spdlog::debug("Sent event: {} bytes to {}",
+                        bytes_written, remote_address);
+                }
+            }
+
+            if (read_done) {
                 auto result = co_await handle_socket_read_completion(
                     socket, buffer, protocol, remote_address, ec_read, bytes_read
                 );
                 if (!result) {
                     co_return std::unexpected{result.error()};
                 }
-
-            } else {
-                // Event channel received an event
-                if (ec_channel) {
-                    spdlog::error("Event channel error: {}", ec_channel.message());
-                    // Don't disconnect on channel error, just continue
-                    continue;
-                }
-
-                spdlog::debug("Sending {} byte event to session {}",
-                    event.event_data->size(), event.target_session_id);
-
-                auto [ec_write, bytes_written] = co_await boost::asio::async_write(
-                    socket,
-                    boost::asio::buffer(*event.event_data),
-                    boost::asio::as_tuple(boost::asio::use_awaitable)
-                );
-
-                if (ec_write) {
-                    spdlog::error("Write error sending event to {}: {}",
-                        remote_address, ec_write.message());
-                    protocol.on_disconnect();
-                    co_return std::unexpected{ec_write};
-                }
-
-                spdlog::debug("Sent event: {} bytes to {}",
-                    bytes_written, remote_address);
             }
 
         } else {

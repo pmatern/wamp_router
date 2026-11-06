@@ -18,6 +18,7 @@
 #include "include/pubsub_handler.hpp"
 #include "include/procedure_handler.hpp"
 #include "include/wamp_serializer.hpp"
+#include "include/wamp_session.hpp"
 
 using namespace wamp;
 
@@ -286,4 +287,112 @@ TEST_CASE("RPC forwards args and callee errors", "[protocol][rpc]") {
         REQUIRE(resp.has_value());
         REQUIRE(pop_frame(*ch_caller).empty());
     }
+}
+
+// ============================================================================
+// Pipelined frames: one socket read can carry many messages
+// ============================================================================
+
+namespace {
+
+void append(std::vector<uint8_t>& out, const std::vector<uint8_t>& more) {
+    out.insert(out.end(), more.begin(), more.end());
+}
+
+std::vector<uint8_t> handshake_bytes() {
+    auto hs = rawsocket::encode_handshake_request({
+        .max_length = rawsocket::MaxLengthCode::BYTES_16M,
+        .serializer = rawsocket::Serializer::CBOR});
+    return {hs.begin(), hs.end()};
+}
+
+std::vector<uint8_t> frame_of(const std::vector<uint8_t>& cbor) {
+    return rawsocket::create_wamp_message(cbor);
+}
+
+// Split concatenated RawSocket frames (after the 4-byte handshake reply) into WAMP message types
+std::vector<MessageType> message_types(std::span<const uint8_t> bytes) {
+    std::vector<MessageType> types;
+    size_t pos = rawsocket::HANDSHAKE_SIZE;
+    while (pos + kFrameHeader <= bytes.size()) {
+        auto header = rawsocket::decode_frame_header(bytes.subspan(pos, kFrameHeader));
+        REQUIRE(header.has_value());
+        pos += kFrameHeader;
+        REQUIRE(pos + header->payload_length <= bytes.size());
+        std::vector<uint8_t> payload{bytes.begin() + pos, bytes.begin() + pos + header->payload_length};
+        auto type = get_message_type_from_cbor(payload);
+        REQUIRE(type.has_value());
+        types.push_back(*type);
+        pos += header->payload_length;
+    }
+    REQUIRE(pos == bytes.size());
+    return types;
+}
+
+}  // namespace
+
+TEST_CASE("WampSession processes pipelined frames in one read", "[protocol][session]") {
+    boost::asio::io_context io;
+    ServerConfig config;
+    WampSession session{io, config};
+    session.on_connect();
+
+    std::vector<uint8_t> input = handshake_bytes();
+    append(input, frame_of(serialize_hello(HelloMessage::create_client("pipeline.realm"))));
+    append(input, frame_of(serialize_subscribe(SubscribeMessage{1, {}, "proto.pipeline"})));
+    append(input, frame_of(serialize_publish(PublishMessage{2, {{"acknowledge", true}}, "proto.pipeline"})));
+
+    auto result = session.process(std::span{input.data(), input.size()});
+    REQUIRE(result.has_value());
+
+    auto types = message_types(*result);
+    REQUIRE(types == std::vector<MessageType>{MessageType::WELCOME, MessageType::SUBSCRIBED, MessageType::PUBLISHED});
+    REQUIRE(session.is_established());
+}
+
+TEST_CASE("WampSession delivers every fire-and-forget PUBLISH in a burst", "[protocol][session]") {
+    Sessions s;
+    auto subscriber = s.add(910041);
+    (void)PubSubHandler::handle_subscribe(SubscribeMessage{1, {}, "proto.burst"}, 910041);
+
+    boost::asio::io_context io;
+    ServerConfig config;
+    WampSession publisher{io, config};
+
+    std::vector<uint8_t> input = handshake_bytes();
+    append(input, frame_of(serialize_hello(HelloMessage::create_client("burst.realm"))));
+    constexpr int kBurst = 50;
+    for (int i = 0; i < kBurst; ++i) {
+        append(input, frame_of(serialize_publish(PublishMessage{static_cast<uint64_t>(i + 1), {}, "proto.burst"})));
+    }
+
+    auto result = publisher.process(std::span{input.data(), input.size()});
+    REQUIRE(result.has_value());
+
+    int events = 0;
+    while (!pop_frame(*subscriber).empty()) {
+        ++events;
+    }
+    REQUIRE(events == kBurst);
+}
+
+TEST_CASE("WampSession handles frames split across reads", "[protocol][session]") {
+    boost::asio::io_context io;
+    ServerConfig config;
+    WampSession session{io, config};
+
+    auto handshake = handshake_bytes();
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
+
+    auto hello = frame_of(serialize_hello(HelloMessage::create_client("split.realm")));
+
+    // Header split mid-way must neither hang nor produce output
+    auto first = session.process(std::span{hello.data(), 2});
+    REQUIRE(first.has_value());
+    REQUIRE(first->empty());
+
+    auto second = session.process(std::span{hello.data() + 2, hello.size() - 2});
+    REQUIRE(second.has_value());
+    REQUIRE(!second->empty());
+    REQUIRE(session.is_established());
 }

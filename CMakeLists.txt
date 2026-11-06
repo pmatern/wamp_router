@@ -110,3 +110,23 @@ target_compile_options(wamp_bench PRIVATE -Wall -Wextra -Wpedantic)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(wamp_bench PRIVATE -O3)
 endif()
+
+# End-to-end load test (not built by default; run a Release build)
+#   cmake --build build-local-release --target wamp_load
+add_executable(wamp_load EXCLUDE_FROM_ALL bench/load_test.cpp)
+target_include_directories(wamp_load PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(wamp_load PRIVATE
+    Boost::system
+    Boost::boost
+    fmt::fmt
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+    toml11::toml11
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
+target_compile_options(wamp_load PRIVATE -Wall -Wextra -Wpedantic)
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(wamp_load PRIVATE -O3)
+endif()
+
