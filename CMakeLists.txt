@@ -90,3 +90,23 @@ target_compile_options(wamp_tests PRIVATE
 include(CTest)
 include(Catch)
 catch_discover_tests(wamp_tests)
+
+# Micro-benchmarks (not built by default; run a Release build)
+#   cmake --build build-local-release --target wamp_bench
+add_executable(wamp_bench EXCLUDE_FROM_ALL bench/bench_micro.cpp)
+target_include_directories(wamp_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(wamp_bench PRIVATE
+    Boost::system
+    Boost::boost
+    fmt::fmt
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+    Catch2::Catch2WithMain
+    toml11::toml11
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
+target_compile_options(wamp_bench PRIVATE -Wall -Wextra -Wpedantic)
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(wamp_bench PRIVATE -O3)
+endif()

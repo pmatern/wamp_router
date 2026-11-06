@@ -22,7 +22,7 @@
 
 int main(int argc, char* argv[]) {
     try {
-        std::filesystem::path config_path = "config.toml";
+        std::filesystem::path config_path{ "config.toml" };
         if (argc > 1) {
             if (std::string{argv[1]} == "--config" && argc > 2) {
                 config_path = argv[2];

@@ -22,9 +22,11 @@ Outstanding work, as of 2026-11-05. Check items off as they land.
 
 ## Performance
 Do the protocol gaps (arguments forwarding in particular) first so benchmarks measure realistic payloads.
-- [ ] Catch2 `BENCHMARK` micro-benchmarks: CBOR serialize/deserialize, RawSocket framing, subscription lookup and fan-out. Tagged so normal test runs skip them.
+- [x] Catch2 `BENCHMARK` micro-benchmarks in `bench/bench_micro.cpp` (target `wamp_bench`, not built by default). Baseline numbers are in the README.
 - [ ] End-to-end load tool on `WampClient`: N clients, PUBLISH→EVENT and CALL→RESULT p50/p99 latency and throughput.
-- [ ] Record baseline numbers in the README; revisit the single-threaded design and unbounded per-session channels (`include/event_channel.hpp`).
+- [ ] Serialize each EVENT once per PUBLISH instead of once per subscriber (only `subscription_id` differs); fan-out is ~2.8 µs per subscriber, nearly all serialization.
+- [ ] `SubscriptionManager::get_subscribers` copies the whole subscriber set into a vector on every publish (31 µs at 10,000 subscribers); iterate in place or cache.
+- [ ] After the load tool exists, revisit the single-threaded design and unbounded per-session channels (`include/event_channel.hpp`).
 
 ## Backlog
 - [ ] Roles and authorization per authid.

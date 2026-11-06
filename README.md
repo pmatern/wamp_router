@@ -304,6 +304,32 @@ runner = ApplicationRunner(
 runner.run(MyComponent)
 ```
 
+## Benchmarks
+
+Micro-benchmarks (Catch2 `BENCHMARK`) cover serialization, RawSocket framing, routing tables and handler paths. Build and run them in Release:
+
+```bash
+cmake --preset local-release
+cmake --build build-local-release --target wamp_bench
+./build-local-release/wamp_bench
+```
+
+Baseline (Release, Intel i7-1068NG7 @ 2.3 GHz, single thread, mean of 50 samples; "10 args + kw" = 10 positional arguments plus 3 keyword arguments):
+
+| Benchmark | Mean |
+|---|---|
+| Serialize CALL / EVENT, no args | 0.62 µs / 0.50 µs |
+| Serialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 1.9 – 2.8 µs |
+| Deserialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 4.5 – 5.1 µs |
+| RawSocket frame 128 B / 16 KiB | 52 ns / 146 ns |
+| `get_subscribers`, 1 / 100 / 10,000 subscribers | 62 ns / 383 ns / 31 µs |
+| `find_callee` (1,000 registrations) | 32 ns |
+| Invocation tracker track + retrieve | 87 ns |
+| PUBLISH fan-out to 1 / 10 / 100 subscribers (incl. drain) | 3.1 µs / 28 µs / 279 µs |
+| CALL → INVOCATION → YIELD → RESULT through the handlers (no socket I/O) | 12 µs |
+
+These are in-process numbers: they exclude socket I/O and TLS. The cost is dominated by CBOR (de)serialization through nlohmann::json; PUBLISH fan-out is roughly 2.8 µs per subscriber because each EVENT is serialized separately.
+
 ## Architecture
 
 ### Key Design Decisions
