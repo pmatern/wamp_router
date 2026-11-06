@@ -8,6 +8,8 @@ This is a C++23 WAMP (Web Application Messaging Protocol) router implementation 
 
 **Key Architecture**: Single-threaded asynchronous I/O using C++20 coroutines with Boost.Asio. The router implements the WAMP protocol's core features: RPC (CALL/REGISTER/YIELD) and PubSub (PUBLISH/SUBSCRIBE/EVENT). The architecture uses `awaitable` coroutines and concurrent operations via `parallel_group` for handling both socket I/O and event channel notifications.
 
+**Outstanding work:** see [TODO.md](TODO.md) for the prioritized task list. Update it as items are completed.
+
 ## Build Environment
 
 This project is self-contained and supports two build environments:
