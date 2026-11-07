@@ -18,6 +18,7 @@
 #include "wamp_session.hpp"
 #include "event_channel.hpp"
 #include "config.hpp"
+#include "procedure_handler.hpp"
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/asio/experimental/channel.hpp>
@@ -230,6 +231,18 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
     }
 }
 
+// Periodically fails pending calls whose callee has not answered in time.
+inline boost::asio::awaitable<void> call_timeout_sweeper() {
+    auto executor = co_await boost::asio::this_coro::executor;
+    boost::asio::steady_timer timer(executor);
+    for (;;) {
+        timer.expires_after(std::chrono::milliseconds(50));
+        auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
+        if (ec) co_return;
+        ProcedureHandler::expire_calls();
+    }
+}
+
 class WampServer {
 public:
     WampServer(boost::asio::io_context& io_context, unsigned short port, const ServerConfig& config)
@@ -239,9 +252,11 @@ public:
         , config_(config)
     {
         EventChannelRegistry::configure(config.events);
+        ProcedureHandler::set_default_call_timeout(config.call_timeout);
     }
 
     void start() {
+        boost::asio::co_spawn(io_context_, call_timeout_sweeper(), boost::asio::detached);
         boost::asio::co_spawn(
             io_context_,
             accept_loop(),
@@ -303,10 +318,12 @@ public:
         , config_(config)
     {
         EventChannelRegistry::configure(config.events);
+        ProcedureHandler::set_default_call_timeout(config.call_timeout);
         setup_ssl_context(config.tls);
     }
 
     void start() {
+        boost::asio::co_spawn(io_context_, call_timeout_sweeper(), boost::asio::detached);
         boost::asio::co_spawn(
             io_context_,
             accept_loop(),

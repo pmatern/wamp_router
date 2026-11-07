@@ -21,6 +21,10 @@ key = "/path/to/key.pem"
 # Maximum pending RPC invocations (LRU cache size)
 # Controls how many concurrent CALL operations can be in flight
 max_pending_invocations = 10000
+# How long a callee may take to answer a CALL before the caller gets
+# wamp.error.timeout (milliseconds, 0 = no timeout). A CALL's "timeout"
+# option overrides it.
+call_timeout_ms = 30000
 
 [server.events]
 # Per-session queue of events/invocations/results waiting to be written to a client

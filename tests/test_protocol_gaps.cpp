@@ -396,3 +396,68 @@ TEST_CASE("WampSession handles frames split across reads", "[protocol][session]"
     REQUIRE(!second->empty());
     REQUIRE(session.is_established());
 }
+
+// ============================================================================
+// Call timeouts
+// ============================================================================
+
+TEST_CASE("Unanswered calls time out", "[protocol][rpc][timeout]") {
+    using namespace std::chrono;
+    Sessions s;
+    auto ch_callee = s.add(910041);
+    auto ch_caller = s.add(910042);
+    REQUIRE(ProcedureHandler::handle_register(RegisterMessage{1, {}, "proto.slow"}, 910041).has_value());
+
+    const auto saved = ProcedureHandler::get_default_call_timeout();
+    struct Restore {
+        milliseconds t;
+        ~Restore() { ProcedureHandler::set_default_call_timeout(t); }
+    } restore{saved};
+
+    SECTION("CALL timeout option expires the call with wamp.error.timeout") {
+        ProcedureHandler::set_default_call_timeout(0ms);
+        WampDict opts{{"timeout", int64_t{100}}};
+        REQUIRE(ProcedureHandler::handle_call(CallMessage{60, opts, "proto.slow"}, 910042).has_value());
+        auto invocation = deserialize_invocation(payload_of(pop_frame(*ch_callee)));
+        REQUIRE(invocation.has_value());
+
+        REQUIRE(ProcedureHandler::expire_calls(steady_clock::now()) == 0);
+        REQUIRE(pop_frame(*ch_caller).empty());
+
+        REQUIRE(ProcedureHandler::expire_calls(steady_clock::now() + 1s) == 1);
+        auto err = deserialize_error(payload_of(pop_frame(*ch_caller)));
+        REQUIRE(err.has_value());
+        REQUIRE(err->request_type == MessageType::CALL);
+        REQUIRE(err->request_id == 60);
+        REQUIRE(err->error_uri == "wamp.error.timeout");
+
+        // A late YIELD is ignored
+        (void)ProcedureHandler::handle_yield(YieldMessage{invocation->request_id, {}}, 910041);
+        REQUIRE(pop_frame(*ch_caller).empty());
+    }
+
+    SECTION("Default timeout applies when the CALL has no option") {
+        ProcedureHandler::set_default_call_timeout(200ms);
+        REQUIRE(ProcedureHandler::handle_call(CallMessage{61, {}, "proto.slow"}, 910042).has_value());
+        REQUIRE(ProcedureHandler::expire_calls(steady_clock::now() + 1s) == 1);
+        auto err = deserialize_error(payload_of(pop_frame(*ch_caller)));
+        REQUIRE(err.has_value());
+        REQUIRE(err->error_uri == "wamp.error.timeout");
+    }
+
+    SECTION("No timeout configured: call never expires") {
+        ProcedureHandler::set_default_call_timeout(0ms);
+        REQUIRE(ProcedureHandler::handle_call(CallMessage{62, {}, "proto.slow"}, 910042).has_value());
+        REQUIRE(ProcedureHandler::expire_calls(steady_clock::now() + hours(24)) == 0);
+        REQUIRE(pop_frame(*ch_caller).empty());
+    }
+
+    SECTION("Answered calls do not time out") {
+        ProcedureHandler::set_default_call_timeout(100ms);
+        REQUIRE(ProcedureHandler::handle_call(CallMessage{63, {}, "proto.slow"}, 910042).has_value());
+        auto invocation = deserialize_invocation(payload_of(pop_frame(*ch_callee)));
+        REQUIRE(invocation.has_value());
+        (void)ProcedureHandler::handle_yield(YieldMessage{invocation->request_id, {}}, 910041);
+        REQUIRE(ProcedureHandler::expire_calls(steady_clock::now() + 1s) == 0);
+    }
+}

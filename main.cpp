@@ -70,6 +70,7 @@ int main(int argc, char* argv[]) {
         }
         fmt::print("  Max Pending Invocations: {}\n",
             config.max_pending_invocations);
+        fmt::print("  Call Timeout: {} ms\n", config.call_timeout.count());
         fmt::print("  Event Queue: {} per session, overflow={}, backpressure timeout={} ms\n",
             config.events.size,
             config.events.overflow == wamp::OverflowPolicy::BACKPRESSURE ? "backpressure" : "drop",

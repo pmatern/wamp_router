@@ -115,6 +115,7 @@ struct ServerConfig {
     unsigned short port{};
     TlsConfig tls{};
     size_t max_pending_invocations{};
+    std::chrono::milliseconds call_timeout{30000};  // 0 disables
     EventQueueConfig events{};
     spdlog::level::level_enum log_level{};
 
@@ -167,6 +168,10 @@ public:
                 const auto& rpc = toml::find(server, "rpc");
                 config.max_pending_invocations =
                     toml::find<size_t>(rpc, "max_pending_invocations");
+                if (rpc.contains("call_timeout_ms")) {
+                    config.call_timeout = std::chrono::milliseconds{
+                        toml::find<size_t>(rpc, "call_timeout_ms")};
+                }
             } else {
                 config.max_pending_invocations = 10000; // Default
             }

@@ -26,6 +26,7 @@
 #include <vector>
 #include <cstdint>
 #include <span>
+#include <chrono>
 #include <memory>
 
 namespace wamp {
@@ -52,6 +53,33 @@ public:
 
     static size_t get_max_pending_invocations() {
         return max_pending_invocations_;
+    }
+
+    // Default time a callee may take to answer a CALL (0 = no timeout).
+    // A CALL's `timeout` option (milliseconds) overrides it.
+    static void set_default_call_timeout(std::chrono::milliseconds timeout) {
+        default_call_timeout_ = timeout;
+    }
+
+    static std::chrono::milliseconds get_default_call_timeout() {
+        return default_call_timeout_;
+    }
+
+    // Fail every pending call whose deadline has passed with wamp.error.timeout.
+    // Returns the number of calls expired. Called periodically by the server.
+    static size_t expire_calls(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
+        auto expired = get_invocation_tracker().remove_expired(now);
+        for (const auto& pending : expired) {
+            auto error = ErrorMessage::create_timeout(pending.call_request_id, "Call timed out");
+            auto frame = rawsocket::create_wamp_message(serialize_error(error));
+            auto data = std::make_shared<std::vector<uint8_t>>(std::move(frame));
+            spdlog::warn("Call timed out: caller_session={}, request_id={}, callee_session={}",
+                        pending.caller_session_id, pending.call_request_id, pending.callee_session_id);
+            // Runs from a timer, so it cannot wait for queue space
+            (void)EventChannelRegistry::deliver(pending.caller_session_id,
+                EventToSend{pending.caller_session_id, data}, /*may_defer=*/false);
+        }
+        return expired.size();
     }
 
     // Clean up all registrations and pending invocations for a session (called on disconnect)
@@ -216,7 +244,16 @@ public:
 
         // Track the invocation for routing YIELD back to caller as RESULT
         auto& invocation_tracker = get_invocation_tracker();
-        invocation_tracker.track(invocation_id, PendingCall{caller_session_id, call.request_id, callee_session_id});
+        auto timeout = default_call_timeout_;
+        if (auto it = call.options.find("timeout"); it != call.options.end()) {
+            if (const auto* ms = std::get_if<int64_t>(&it->second); ms && *ms > 0) {
+                timeout = std::chrono::milliseconds{*ms};
+            }
+        }
+        auto deadline = timeout.count() > 0 ? std::chrono::steady_clock::now() + timeout
+                                            : std::chrono::steady_clock::time_point::max();
+        invocation_tracker.track(invocation_id,
+            PendingCall{caller_session_id, call.request_id, callee_session_id, deadline});
 
         spdlog::debug("Tracking invocation_id={} -> caller_session={}, call_request_id={} ({} pending)",
                      invocation_id, caller_session_id, call.request_id,
@@ -322,6 +359,7 @@ public:
 
 private:
     inline static size_t max_pending_invocations_ = 10000;  // Default: 10k pending calls
+    inline static std::chrono::milliseconds default_call_timeout_{30000};
 };
 
 } // namespace wamp

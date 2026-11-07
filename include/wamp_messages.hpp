@@ -643,6 +643,12 @@ struct ErrorMessage {
         return ErrorMessage{MessageType::CALL, request_id, details, "wamp.error.no_such_procedure"};
     }
 
+    static ErrorMessage create_timeout(uint64_t request_id, const std::string& reason) {
+        WampDict details;
+        details["message"] = reason;
+        return ErrorMessage{MessageType::CALL, request_id, details, "wamp.error.timeout"};
+    }
+
     static ErrorMessage create_callee_failure(uint64_t request_id, const std::string& reason) {
         WampDict details;
         details["message"] = reason;

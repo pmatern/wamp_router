@@ -606,3 +606,41 @@ TEST_CASE("DROP policy accounts for every event", "[wamp_client][events]") {
 
     REQUIRE(delivered + dropped == kBurst);
 }
+
+TEST_CASE("WampClient - Call to an unresponsive callee times out", "[wamp_client][timeout]") {
+    io_context io;
+    ServerConfig config;
+    config.call_timeout = std::chrono::milliseconds{200};
+    uint16_t port = find_available_port();
+
+    WampServer server{io, port, config};
+    server.start();
+
+    WampClient callee{io};
+    WampClient caller{io};
+    std::string error_uri;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await callee.connect("127.0.0.1", port, "test.realm");
+        co_await caller.connect("127.0.0.1", port, "test.realm");
+
+        co_await callee.register_procedure(
+            "com.example.hang",
+            [&](const InvocationMessage& invocation) -> awaitable<YieldMessage> {
+                boost::asio::steady_timer t{io};
+                t.expires_after(std::chrono::seconds(5));
+                co_await t.async_wait(use_awaitable);
+                co_return YieldMessage{invocation.request_id, {}};
+            });
+
+        try {
+            co_await caller.call("com.example.hang");
+        } catch (const WampException& e) {
+            error_uri = e.error_uri;
+        }
+        io.stop();
+    }, detached);
+
+    io.run_for(std::chrono::seconds(3));
+    REQUIRE(error_uri == "wamp.error.timeout");
+}

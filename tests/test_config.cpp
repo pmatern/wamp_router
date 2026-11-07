@@ -526,3 +526,32 @@ queue_size = 7
         CHECK(result.error() == wamp::ConfigError::INVALID_VALUE);
     }
 }
+
+TEST_CASE("Config::load() call_timeout_ms", "[config]") {
+    TempCertFile cert("cert");
+    TempCertFile key("key");
+    auto make = [&](const std::string& rpc_extra) {
+        return std::string(R"(
+[server]
+port = 8080
+[server.tls]
+cert = ")") + cert.path().string() + R"("
+key = ")" + key.path().string() + R"("
+[server.rpc]
+max_pending_invocations = 100
+)" + rpc_extra;
+    };
+
+    SECTION("default is 30s") {
+        TempConfigFile config(make(""));
+        auto result = wamp::Config::load(config.path());
+        REQUIRE(result.has_value());
+        CHECK(result->call_timeout == std::chrono::milliseconds{30000});
+    }
+    SECTION("explicit value, 0 disables") {
+        TempConfigFile config(make("call_timeout_ms = 0\n"));
+        auto result = wamp::Config::load(config.path());
+        REQUIRE(result.has_value());
+        CHECK(result->call_timeout == std::chrono::milliseconds{0});
+    }
+}

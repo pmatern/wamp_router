@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
@@ -29,11 +30,15 @@ struct PendingCall {
     uint64_t caller_session_id;  // Who made the CALL
     uint64_t call_request_id;     // Original request_id from CALL message
     uint64_t callee_session_id;   // Who was sent the INVOCATION (0 if unknown)
+    std::chrono::steady_clock::time_point deadline;  // time_point::max() = no timeout
 
-    PendingCall(uint64_t caller_id, uint64_t request_id, uint64_t callee_id = 0)
+    PendingCall(uint64_t caller_id, uint64_t request_id, uint64_t callee_id = 0,
+                std::chrono::steady_clock::time_point call_deadline =
+                    std::chrono::steady_clock::time_point::max())
         : caller_session_id(caller_id)
         , call_request_id(request_id)
         , callee_session_id(callee_id)
+        , deadline(call_deadline)
     {}
 };
 
@@ -104,6 +109,22 @@ public:
         auto it = lru_list_.begin();
         while (it != lru_list_.end()) {
             if (it->second.callee_session_id == callee_session_id) {
+                removed.push_back(it->second);
+                invocation_map_.erase(it->first);
+                it = lru_list_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return removed;
+    }
+
+    // Remove and return all pending invocations whose deadline has passed
+    [[nodiscard]] std::vector<PendingCall> remove_expired(std::chrono::steady_clock::time_point now) {
+        std::vector<PendingCall> removed;
+        auto it = lru_list_.begin();
+        while (it != lru_list_.end()) {
+            if (it->second.deadline <= now) {
                 removed.push_back(it->second);
                 invocation_map_.erase(it->first);
                 it = lru_list_.erase(it);
