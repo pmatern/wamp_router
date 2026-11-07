@@ -63,6 +63,7 @@ add_executable(wamp_tests
     tests/test_event_queue.cpp
     tests/test_crypto_utils.cpp
     tests/test_authorization.cpp
+    tests/test_realms.cpp
 )
 
 # Add include directory for tests

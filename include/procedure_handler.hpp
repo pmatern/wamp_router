@@ -18,7 +18,7 @@
 #include "wamp_messages.hpp"
 #include "wamp_serializer.hpp"
 #include "wamp_id.hpp"
-#include "registration_manager.hpp"
+#include "realm.hpp"
 #include "invocation_tracker.hpp"
 #include "event_channel.hpp"
 #include "raw_socket.hpp"
@@ -36,11 +36,6 @@ namespace wamp {
 // ============================================================================
 class ProcedureHandler {
 public:
-    static RegistrationManager& get_registration_manager() {
-        static RegistrationManager manager;
-        return manager;
-    }
-
     static InvocationTracker& get_invocation_tracker() {
         static InvocationTracker tracker{get_max_pending_invocations()};
         return tracker;
@@ -92,8 +87,8 @@ public:
     }
 
     // Clean up all registrations and pending invocations for a session (called on disconnect)
-    static void cleanup_session(uint64_t session_id) {
-        auto& reg_manager = get_registration_manager();
+    static void cleanup_session(Realm& realm, uint64_t session_id) {
+        auto& reg_manager = realm.registrations;
         auto& invocation_tracker = get_invocation_tracker();
 
         reg_manager.unregister_session(session_id);
@@ -119,10 +114,11 @@ public:
     // Handle REGISTER message
     // Returns response bytes (REGISTERED or ERROR message wrapped in RawSocket frame)
     [[nodiscard]] static std::expected<std::vector<uint8_t>, std::error_code> handle_register(
+        Realm& realm,
         const RegisterMessage& register_msg,
         uint64_t session_id
     ) {
-        auto& reg_manager = get_registration_manager();
+        auto& reg_manager = realm.registrations;
         spdlog::debug("REGISTER request_id={}, procedure={}, session={}",
                      register_msg.request_id, register_msg.procedure, session_id);
 
@@ -163,10 +159,11 @@ public:
     // Handle UNREGISTER message
     // Returns UNREGISTERED, or ERROR if the registration doesn't exist or belongs to another session
     [[nodiscard]] static std::expected<std::vector<uint8_t>, std::error_code> handle_unregister(
+        Realm& realm,
         const UnregisterMessage& unregister_msg,
         uint64_t session_id
     ) {
-        auto& reg_manager = get_registration_manager();
+        auto& reg_manager = realm.registrations;
         spdlog::debug("UNREGISTER request_id={}, registration_id={}, session={}",
                      unregister_msg.request_id, unregister_msg.registration_id, session_id);
 
@@ -191,10 +188,11 @@ public:
     // Routes call to registered callee by sending INVOCATION via event channel
     // Returns ERROR if procedure not found or callee unavailable, empty vector otherwise
     [[nodiscard]] static std::expected<std::vector<uint8_t>, std::error_code> handle_call(
+        Realm& realm,
         const CallMessage& call,
         uint64_t caller_session_id
     ) {
-        const auto& reg_manager = get_registration_manager();
+        const auto& reg_manager = realm.registrations;
         spdlog::debug("CALL request_id={}, procedure={}, caller_session={}",
                      call.request_id, call.procedure, caller_session_id);
 

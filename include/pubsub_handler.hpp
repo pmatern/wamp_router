@@ -18,7 +18,7 @@
 #include "wamp_messages.hpp"
 #include "wamp_serializer.hpp"
 #include "wamp_id.hpp"
-#include "subscription_manager.hpp"
+#include "realm.hpp"
 #include "event_channel.hpp"
 #include "raw_socket.hpp"
 #include <spdlog/spdlog.h>
@@ -35,13 +35,8 @@ namespace wamp {
 // ============================================================================
 class PubSubHandler {
 public:
-    static SubscriptionManager& get_subscription_manager() {
-        static SubscriptionManager manager;
-        return manager;
-    }
-
-    static void cleanup_session(uint64_t session_id) {
-        auto& sub_manager = get_subscription_manager();
+    static void cleanup_session(Realm& realm, uint64_t session_id) {
+        auto& sub_manager = realm.subscriptions;
         sub_manager.unsubscribe_session(session_id);
         spdlog::debug("Cleaned up subscriptions for session {}", session_id);
     }
@@ -49,10 +44,11 @@ public:
     // Handle SUBSCRIBE message
     // Returns response bytes (SUBSCRIBED message wrapped in RawSocket frame)
     [[nodiscard]] static std::vector<uint8_t> handle_subscribe(
+        Realm& realm,
         const SubscribeMessage& subscribe,
         uint64_t session_id
     ) {
-        auto& sub_manager = get_subscription_manager();
+        auto& sub_manager = realm.subscriptions;
         spdlog::debug("SUBSCRIBE request_id={}, topic={}, session={}",
                      subscribe.request_id, subscribe.topic, session_id);
 
@@ -73,10 +69,11 @@ public:
     // Handle UNSUBSCRIBE message
     // Returns UNSUBSCRIBED, or ERROR if the subscription doesn't exist or belongs to another session
     [[nodiscard]] static std::vector<uint8_t> handle_unsubscribe(
+        Realm& realm,
         const UnsubscribeMessage& unsubscribe,
         uint64_t session_id
     ) {
-        auto& sub_manager = get_subscription_manager();
+        auto& sub_manager = realm.subscriptions;
         spdlog::debug("UNSUBSCRIBE request_id={}, subscription_id={}, session={}",
                      unsubscribe.request_id, unsubscribe.subscription_id, session_id);
 
@@ -100,10 +97,11 @@ public:
     // Handle PUBLISH message
     // Sends events directly to subscriber channels, returns acknowledgment response if requested
     [[nodiscard]] static std::vector<uint8_t> handle_publish(
+        Realm& realm,
         const PublishMessage& publish,
         uint64_t session_id
     ) {
-        const auto& sub_manager = get_subscription_manager();
+        const auto& sub_manager = realm.subscriptions;
         spdlog::debug("PUBLISH request_id={}, topic={}, session={}",
                      publish.request_id, publish.topic, session_id);
 

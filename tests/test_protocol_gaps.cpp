@@ -26,6 +26,11 @@ namespace {
 
 constexpr size_t kFrameHeader = 4;
 
+// Handlers are called directly in a single realm; sessions in these tests join it too
+Realm& kRealm() {
+    return RealmRegistry::get("test.realm");
+}
+
 std::vector<uint8_t> payload_of(const std::vector<uint8_t>& frame) {
     REQUIRE(frame.size() > kFrameHeader);
     return {frame.begin() + kFrameHeader, frame.end()};
@@ -53,8 +58,8 @@ struct Sessions {
     }
     ~Sessions() {
         for (auto id : ids) {
-            PubSubHandler::cleanup_session(id);
-            ProcedureHandler::cleanup_session(id);
+            PubSubHandler::cleanup_session(kRealm(), id);
+            ProcedureHandler::cleanup_session(kRealm(), id);
             EventChannelRegistry::remove(id);
         }
     }
@@ -138,22 +143,22 @@ TEST_CASE("UNSUBSCRIBE handling", "[protocol][pubsub]") {
     s.add(910002);
 
     auto subscribed = deserialize_subscribed(payload_of(
-        PubSubHandler::handle_subscribe(SubscribeMessage{1, {}, "proto.topic"}, 910001)));
+        PubSubHandler::handle_subscribe(kRealm(), SubscribeMessage{1, {}, "proto.topic"}, 910001)));
     REQUIRE(subscribed.has_value());
     auto sub_id = subscribed->subscription_id;
 
     SECTION("Owner can unsubscribe and no longer receives events") {
-        auto resp = PubSubHandler::handle_unsubscribe(UnsubscribeMessage{2, sub_id}, 910001);
+        auto resp = PubSubHandler::handle_unsubscribe(kRealm(), UnsubscribeMessage{2, sub_id}, 910001);
         auto unsubscribed = deserialize_unsubscribed(payload_of(resp));
         REQUIRE(unsubscribed.has_value());
         REQUIRE(unsubscribed->request_id == 2);
 
-        (void)PubSubHandler::handle_publish(PublishMessage{3, {}, "proto.topic"}, 910002);
+        (void)PubSubHandler::handle_publish(kRealm(), PublishMessage{3, {}, "proto.topic"}, 910002);
         REQUIRE(pop_frame(*ch_sub).empty());
     }
 
     SECTION("Unknown subscription yields no_such_subscription") {
-        auto resp = PubSubHandler::handle_unsubscribe(UnsubscribeMessage{4, 123456789}, 910001);
+        auto resp = PubSubHandler::handle_unsubscribe(kRealm(), UnsubscribeMessage{4, 123456789}, 910001);
         auto err = deserialize_error(payload_of(resp));
         REQUIRE(err.has_value());
         REQUIRE(err->request_type == MessageType::UNSUBSCRIBE);
@@ -161,12 +166,12 @@ TEST_CASE("UNSUBSCRIBE handling", "[protocol][pubsub]") {
     }
 
     SECTION("Another session cannot remove the subscription") {
-        auto resp = PubSubHandler::handle_unsubscribe(UnsubscribeMessage{5, sub_id}, 910002);
+        auto resp = PubSubHandler::handle_unsubscribe(kRealm(), UnsubscribeMessage{5, sub_id}, 910002);
         auto err = deserialize_error(payload_of(resp));
         REQUIRE(err.has_value());
         REQUIRE(err->error_uri == "wamp.error.no_such_subscription");
 
-        (void)PubSubHandler::handle_publish(PublishMessage{6, {}, "proto.topic"}, 910002);
+        (void)PubSubHandler::handle_publish(kRealm(), PublishMessage{6, {}, "proto.topic"}, 910002);
         REQUIRE(!pop_frame(*ch_sub).empty());
     }
 }
@@ -176,14 +181,14 @@ TEST_CASE("PUBLISH forwards payload and honors exclude_me", "[protocol][pubsub]"
     auto ch_pub = s.add(910011);
     auto ch_sub = s.add(910012);
 
-    (void)PubSubHandler::handle_subscribe(SubscribeMessage{1, {}, "proto.events"}, 910011);
-    (void)PubSubHandler::handle_subscribe(SubscribeMessage{2, {}, "proto.events"}, 910012);
+    (void)PubSubHandler::handle_subscribe(kRealm(), SubscribeMessage{1, {}, "proto.events"}, 910011);
+    (void)PubSubHandler::handle_subscribe(kRealm(), SubscribeMessage{2, {}, "proto.events"}, 910012);
 
     const WampList args{std::string{"hello"}, int64_t{42}};
     const WampDict kw{{"flag", true}};
 
     SECTION("Subscriber gets args, publisher excluded by default") {
-        (void)PubSubHandler::handle_publish(PublishMessage{3, {}, "proto.events", args, kw}, 910011);
+        (void)PubSubHandler::handle_publish(kRealm(), PublishMessage{3, {}, "proto.events", args, kw}, 910011);
 
         auto event = deserialize_event(payload_of(pop_frame(*ch_sub)));
         REQUIRE(event.has_value());
@@ -193,7 +198,7 @@ TEST_CASE("PUBLISH forwards payload and honors exclude_me", "[protocol][pubsub]"
     }
 
     SECTION("exclude_me=false delivers to the publisher too") {
-        (void)PubSubHandler::handle_publish(
+        (void)PubSubHandler::handle_publish(kRealm(),
             PublishMessage{4, {{"exclude_me", false}}, "proto.events", args, {}}, 910011);
 
         REQUIRE(!pop_frame(*ch_pub).empty());
@@ -206,26 +211,26 @@ TEST_CASE("UNREGISTER handling", "[protocol][rpc]") {
     s.add(910021);
     s.add(910022);
 
-    auto registered = deserialize_registered(payload_of(*ProcedureHandler::handle_register(
+    auto registered = deserialize_registered(payload_of(*ProcedureHandler::handle_register(kRealm(),
         RegisterMessage{1, {}, "proto.add"}, 910021)));
     REQUIRE(registered.has_value());
     auto reg_id = registered->registration_id;
 
     SECTION("Another session cannot unregister it") {
-        auto resp = ProcedureHandler::handle_unregister(UnregisterMessage{2, reg_id}, 910022);
+        auto resp = ProcedureHandler::handle_unregister(kRealm(), UnregisterMessage{2, reg_id}, 910022);
         REQUIRE(resp.has_value());
         auto err = deserialize_error(payload_of(*resp));
         REQUIRE(err.has_value());
         REQUIRE(err->error_uri == "wamp.error.no_such_registration");
-        REQUIRE(ProcedureHandler::get_registration_manager().find_callee("proto.add").has_value());
+        REQUIRE(kRealm().registrations.find_callee("proto.add").has_value());
     }
 
     SECTION("Owner unregisters; later CALL gets no_such_procedure") {
-        auto resp = ProcedureHandler::handle_unregister(UnregisterMessage{3, reg_id}, 910021);
+        auto resp = ProcedureHandler::handle_unregister(kRealm(), UnregisterMessage{3, reg_id}, 910021);
         REQUIRE(resp.has_value());
         REQUIRE(deserialize_unregistered(payload_of(*resp)).has_value());
 
-        auto call = ProcedureHandler::handle_call(CallMessage{4, {}, "proto.add"}, 910022);
+        auto call = ProcedureHandler::handle_call(kRealm(), CallMessage{4, {}, "proto.add"}, 910022);
         REQUIRE(call.has_value());
         auto err = deserialize_error(payload_of(*call));
         REQUIRE(err.has_value());
@@ -238,12 +243,12 @@ TEST_CASE("RPC forwards args and callee errors", "[protocol][rpc]") {
     auto ch_callee = s.add(910031);
     auto ch_caller = s.add(910032);
 
-    REQUIRE(ProcedureHandler::handle_register(RegisterMessage{1, {}, "proto.echo"}, 910031).has_value());
+    REQUIRE(ProcedureHandler::handle_register(kRealm(), RegisterMessage{1, {}, "proto.echo"}, 910031).has_value());
 
     const WampList args{std::string{"x"}, int64_t{1}};
     const WampDict kw{{"k", std::string{"v"}}};
 
-    auto call = ProcedureHandler::handle_call(CallMessage{50, {}, "proto.echo", args, kw}, 910032);
+    auto call = ProcedureHandler::handle_call(kRealm(), CallMessage{50, {}, "proto.echo", args, kw}, 910032);
     REQUIRE(call.has_value());
     REQUIRE(call->empty());
 
@@ -272,7 +277,7 @@ TEST_CASE("RPC forwards args and callee errors", "[protocol][rpc]") {
     }
 
     SECTION("Callee disconnect fails pending calls with callee_failure") {
-        ProcedureHandler::cleanup_session(910031);
+        ProcedureHandler::cleanup_session(kRealm(), 910031);
 
         auto err = deserialize_error(payload_of(pop_frame(*ch_caller)));
         REQUIRE(err.has_value());
@@ -338,7 +343,7 @@ TEST_CASE("WampSession processes pipelined frames in one read", "[protocol][sess
     session.on_connect();
 
     std::vector<uint8_t> input = handshake_bytes();
-    append(input, frame_of(serialize_hello(HelloMessage::create_client("pipeline.realm"))));
+    append(input, frame_of(serialize_hello(HelloMessage::create_client("test.realm"))));
     append(input, frame_of(serialize_subscribe(SubscribeMessage{1, {}, "proto.pipeline"})));
     append(input, frame_of(serialize_publish(PublishMessage{2, {{"acknowledge", true}}, "proto.pipeline"})));
 
@@ -353,14 +358,14 @@ TEST_CASE("WampSession processes pipelined frames in one read", "[protocol][sess
 TEST_CASE("WampSession delivers every fire-and-forget PUBLISH in a burst", "[protocol][session]") {
     Sessions s;
     auto subscriber = s.add(910041);
-    (void)PubSubHandler::handle_subscribe(SubscribeMessage{1, {}, "proto.burst"}, 910041);
+    (void)PubSubHandler::handle_subscribe(kRealm(), SubscribeMessage{1, {}, "proto.burst"}, 910041);
 
     boost::asio::io_context io;
     ServerConfig config;
     WampSession publisher{io, config};
 
     std::vector<uint8_t> input = handshake_bytes();
-    append(input, frame_of(serialize_hello(HelloMessage::create_client("burst.realm"))));
+    append(input, frame_of(serialize_hello(HelloMessage::create_client("test.realm"))));
     constexpr int kBurst = 50;
     for (int i = 0; i < kBurst; ++i) {
         append(input, frame_of(serialize_publish(PublishMessage{static_cast<uint64_t>(i + 1), {}, "proto.burst"})));
@@ -384,7 +389,7 @@ TEST_CASE("WampSession handles frames split across reads", "[protocol][session]"
     auto handshake = handshake_bytes();
     REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
-    auto hello = frame_of(serialize_hello(HelloMessage::create_client("split.realm")));
+    auto hello = frame_of(serialize_hello(HelloMessage::create_client("test.realm")));
 
     // Header split mid-way must neither hang nor produce output
     auto first = session.process(std::span{hello.data(), 2});
@@ -414,7 +419,7 @@ TEST_CASE("Unanswered calls time out", "[protocol][rpc][timeout]") {
     Sessions s;
     auto ch_callee = s.add(910041);
     auto ch_caller = s.add(910042);
-    REQUIRE(ProcedureHandler::handle_register(RegisterMessage{1, {}, "proto.slow"}, 910041).has_value());
+    REQUIRE(ProcedureHandler::handle_register(kRealm(), RegisterMessage{1, {}, "proto.slow"}, 910041).has_value());
 
     const auto saved = ProcedureHandler::get_default_call_timeout();
     struct Restore {
@@ -425,7 +430,7 @@ TEST_CASE("Unanswered calls time out", "[protocol][rpc][timeout]") {
     SECTION("CALL timeout option expires the call with wamp.error.timeout") {
         ProcedureHandler::set_default_call_timeout(0ms);
         WampDict opts{{"timeout", int64_t{100}}};
-        REQUIRE(ProcedureHandler::handle_call(CallMessage{60, opts, "proto.slow"}, 910042).has_value());
+        REQUIRE(ProcedureHandler::handle_call(kRealm(), CallMessage{60, opts, "proto.slow"}, 910042).has_value());
         auto invocation = deserialize_invocation(payload_of(pop_frame(*ch_callee)));
         REQUIRE(invocation.has_value());
 
@@ -452,7 +457,7 @@ TEST_CASE("Unanswered calls time out", "[protocol][rpc][timeout]") {
 
     SECTION("Default timeout applies when the CALL has no option") {
         ProcedureHandler::set_default_call_timeout(200ms);
-        REQUIRE(ProcedureHandler::handle_call(CallMessage{61, {}, "proto.slow"}, 910042).has_value());
+        REQUIRE(ProcedureHandler::handle_call(kRealm(), CallMessage{61, {}, "proto.slow"}, 910042).has_value());
         REQUIRE(ProcedureHandler::expire_calls(steady_clock::now() + 1s) == 1);
         auto err = deserialize_error(payload_of(pop_frame(*ch_caller)));
         REQUIRE(err.has_value());
@@ -461,14 +466,14 @@ TEST_CASE("Unanswered calls time out", "[protocol][rpc][timeout]") {
 
     SECTION("No timeout configured: call never expires") {
         ProcedureHandler::set_default_call_timeout(0ms);
-        REQUIRE(ProcedureHandler::handle_call(CallMessage{62, {}, "proto.slow"}, 910042).has_value());
+        REQUIRE(ProcedureHandler::handle_call(kRealm(), CallMessage{62, {}, "proto.slow"}, 910042).has_value());
         REQUIRE(ProcedureHandler::expire_calls(steady_clock::now() + hours(24)) == 0);
         REQUIRE(pop_frame(*ch_caller).empty());
     }
 
     SECTION("Answered calls do not time out") {
         ProcedureHandler::set_default_call_timeout(100ms);
-        REQUIRE(ProcedureHandler::handle_call(CallMessage{63, {}, "proto.slow"}, 910042).has_value());
+        REQUIRE(ProcedureHandler::handle_call(kRealm(), CallMessage{63, {}, "proto.slow"}, 910042).has_value());
         auto invocation = deserialize_invocation(payload_of(pop_frame(*ch_callee)));
         REQUIRE(invocation.has_value());
         (void)ProcedureHandler::handle_yield(YieldMessage{invocation->request_id, {}}, 910041);

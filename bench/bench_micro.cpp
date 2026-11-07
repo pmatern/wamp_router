@@ -43,6 +43,10 @@ const bool kQuiet = (spdlog::set_level(spdlog::level::off), true);
 constexpr const char* kTopic = "com.bench.topic";
 constexpr const char* kProcedure = "com.bench.procedure";
 
+Realm& kRealm() {
+    return RealmRegistry::get("bench.realm");
+}
+
 WampList make_args(size_t n) {
     WampList args;
     for (size_t i = 0; i < n; ++i) {
@@ -230,14 +234,14 @@ TEST_CASE("bench: publish fan-out", "[bench][handlers]") {
             const uint64_t session = 9'100'000 + i;
             sessions.push_back(session);
             channels.push_back(EventChannelRegistry::get_or_create(session, io));
-            (void)PubSubHandler::handle_subscribe(SubscribeMessage{i + 1, {}, kTopic}, session);
+            (void)PubSubHandler::handle_subscribe(kRealm(), SubscribeMessage{i + 1, {}, kTopic}, session);
         }
 
         // Channels hold 100 events; drain them after every publish so none overflow.
         // The drain cost (n try_receive calls) is included in the number.
         const PublishMessage publish{1, {}, kTopic, args, kw};
         BENCHMARK("PUBLISH + drain, " + std::to_string(n) + " subscribers") {
-            auto response = PubSubHandler::handle_publish(publish, publisher);
+            auto response = PubSubHandler::handle_publish(kRealm(), publish, publisher);
             for (auto& channel : channels) {
                 channel->try_receive([](boost::system::error_code, EventToSend) {});
             }
@@ -245,7 +249,7 @@ TEST_CASE("bench: publish fan-out", "[bench][handlers]") {
         };
 
         for (auto session : sessions) {
-            PubSubHandler::cleanup_session(session);
+            PubSubHandler::cleanup_session(kRealm(), session);
             EventChannelRegistry::remove(session);
         }
     }
@@ -257,7 +261,7 @@ TEST_CASE("bench: RPC round trip through the router", "[bench][handlers]") {
     const uint64_t caller = 9'200'002;
     auto callee_channel = EventChannelRegistry::get_or_create(callee, io);
     auto caller_channel = EventChannelRegistry::get_or_create(caller, io);
-    REQUIRE(ProcedureHandler::handle_register(RegisterMessage{1, {}, kProcedure}, callee).has_value());
+    REQUIRE(ProcedureHandler::handle_register(kRealm(), RegisterMessage{1, {}, kProcedure}, callee).has_value());
 
     const WampList args = make_args(10);
     const WampDict kw = make_kw();
@@ -265,7 +269,7 @@ TEST_CASE("bench: RPC round trip through the router", "[bench][handlers]") {
 
     // CALL -> INVOCATION (callee) -> deserialize + YIELD -> RESULT (caller), minus socket I/O
     BENCHMARK("CALL + INVOCATION + YIELD + RESULT (10 args + kw)") {
-        (void)ProcedureHandler::handle_call(call, caller);
+        (void)ProcedureHandler::handle_call(kRealm(), call, caller);
 
         uint64_t invocation_id = 0;
         callee_channel->try_receive([&](boost::system::error_code, EventToSend ev) {
@@ -283,8 +287,8 @@ TEST_CASE("bench: RPC round trip through the router", "[bench][handlers]") {
         return delivered;
     };
 
-    ProcedureHandler::cleanup_session(callee);
-    ProcedureHandler::cleanup_session(caller);
+    ProcedureHandler::cleanup_session(kRealm(), callee);
+    ProcedureHandler::cleanup_session(kRealm(), caller);
     EventChannelRegistry::remove(callee);
     EventChannelRegistry::remove(caller);
 }

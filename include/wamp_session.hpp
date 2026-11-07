@@ -94,8 +94,10 @@ public:
 
         // Clean up all subscriptions and registrations for this session
         if (session_id_ != 0) {
-            PubSubHandler::cleanup_session(session_id_);
-            ProcedureHandler::cleanup_session(session_id_);
+            if (realm_ptr_) {
+                PubSubHandler::cleanup_session(*realm_ptr_, session_id_);
+                ProcedureHandler::cleanup_session(*realm_ptr_, session_id_);
+            }
             EventChannelRegistry::remove(session_id_);
         }
 
@@ -399,6 +401,7 @@ private:
 
             session_id_ = generate_session_id();
             wamp_session_established_ = true;
+            realm_ptr_ = &RealmRegistry::get(realm_);
 
             WelcomeMessage welcome{session_id_, realm_};
             auto welcome_cbor = serialize_welcome(welcome);
@@ -511,6 +514,7 @@ private:
 
         session_id_ = generate_session_id();
         wamp_session_established_ = true;
+        realm_ptr_ = &RealmRegistry::get(realm_);
         state_ = SessionProtocolState::AWAITING_FRAME_HEADER;
 
         spdlog::info("Authentication successful: session_id={}, authid={}, realm={}",
@@ -610,6 +614,7 @@ private:
                 }
 
                 response_buffer_ = PubSubHandler::handle_subscribe(
+                    *realm_ptr_,
                     *subscribe_result,
                     session_id_
                 );
@@ -638,6 +643,7 @@ private:
                 }
 
                 response_buffer_ = PubSubHandler::handle_publish(
+                    *realm_ptr_,
                     *publish_result,
                     session_id_
                 );
@@ -655,6 +661,7 @@ private:
                 }
 
                 response_buffer_ = PubSubHandler::handle_unsubscribe(
+                    *realm_ptr_,
                     *unsubscribe_result,
                     session_id_
                 );
@@ -672,6 +679,7 @@ private:
                 }
 
                 auto handle_result = ProcedureHandler::handle_unregister(
+                    *realm_ptr_,
                     *unregister_result,
                     session_id_
                 );
@@ -730,6 +738,7 @@ private:
                 }
 
                 auto handle_result = ProcedureHandler::handle_register(
+                    *realm_ptr_,
                     *register_result,
                     session_id_
                 );
@@ -758,6 +767,7 @@ private:
                 }
 
                 auto handle_result = ProcedureHandler::handle_call(
+                    *realm_ptr_,
                     *call_result,
                     session_id_
                 );
@@ -843,6 +853,7 @@ private:
     // WAMP session state
     uint64_t session_id_;
     std::string realm_;
+    Realm* realm_ptr_{nullptr};  // routing state of realm_, set when the session is established
     bool wamp_session_established_;  // True after HELLO/WELCOME handshake
 
     // Authentication state

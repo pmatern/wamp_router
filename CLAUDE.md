@@ -259,6 +259,7 @@ wamp_router/
 ├── include/                   # Header-only implementation
 │   ├── config.hpp            # TOML configuration loader with auth keys support
 │   ├── authorizer.hpp        # Role permissions (Action, Permissions): exact/prefix URI rules
+│   ├── realm.hpp             # Realm (per-realm subscriptions + registrations), RealmRegistry
 │   ├── crypto_utils.hpp      # Ed25519 signature verification, challenge generation
 │   ├── wamp_server.hpp       # WampServer (plain TCP for tests), WampTlsServer (TLS 1.3)
 │   ├── wamp_session.hpp      # Protocol state machine, buffering, authentication
@@ -487,6 +488,7 @@ Tests use Catch2 framework with CTest integration:
 - **test_protocol_gaps.cpp**: UNSUBSCRIBE/UNREGISTER, payload forwarding, callee errors, pipelined frames
 - **test_event_queue.cpp**: Event queue sizing, drop/backpressure policies, timeout
 - **test_authorization.cpp**: Permissions matching, role enforcement in the session, no restrictions without auth
+- **test_realms.cpp**: Realm isolation of topics and procedures
 - **test_crypto_utils.cpp**: Ed25519 signature verification and challenge generation
 
 ### Benchmarks
