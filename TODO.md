@@ -37,7 +37,8 @@ Do the protocol gaps (arguments forwarding in particular) first so benchmarks me
 - [x] Stage 0.3: direct CBOR codec (`include/cbor.hpp`) for the hot-path messages: byte-identical wire format, serialize 7x and deserialize 5.5x faster, RPC 17.8k -> 29k calls/s, router CPU -35% (RPC) / -65% (fan-out). Handshake/auth messages still use nlohmann (rare); could be ported to drop the dependency.
 - [x] Stage 0.4 (frame buffer pooling): measured and skipped. After the codec, allocation is about 2% of router CPU, so a pool cannot win more than that (profile in docs/threading-analysis.md).
 - [x] Stage 0.5: Asio io_uring backend evaluated and rejected (40% slower on RPC, 50-80% more kernel CPU in the Linux VM; see docs/threading-analysis.md). Stage 0 is finished.
-- [ ] Reproduce the profile on bare-metal/normal Linux (Docker Desktop's VM inflates syscall cost) and make `wamp_load` multi-threaded/multi-process so it is not the bottleneck.
+- [x] Re-profiled on AWS EC2 (c7i.2xlarge router core + 1-3 load-generator instances, results in docs/threading-analysis.md): RPC 100-118k calls/s and about 4.8 us per delivered event on one core. Found and fixed a quadratic buffer erase in `WampSession` (-20% fan-out CPU). `wamp_load --instance N` lets several processes share one router.
+- [ ] Cheap user-space follow-ups from the EC2 profile: cache the event channel in the session instead of `EventChannelRegistry::find` per delivery; reduce asio overhead on the delivery path (coroutine resumes, channel operations).
 - [ ] Thread-per-core, shared-nothing router (staged: `Shard` object replacing the process-wide statics; N shards with an acceptor and SPSC lanes; replicated interest/registration tables with cross-shard pub/sub and RPC; per-shard metrics and logging). Needs Stage 0 and the bare-metal profile first.
 
 ## Backlog

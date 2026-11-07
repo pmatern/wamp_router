@@ -117,6 +117,47 @@ are within 2x; unbatched `post` is 10x worse); (b) **do not share one frame's re
 threads each atomic op costs 136 ns, more than cloning a frame of up to 4 KiB; (c) a 30-60 ns hop is 0.5% of the 12 us per-message
 router cost, so the architecture is bound by per-session work, not by communication.
 
+## Re-profile on real hardware (AWS EC2)
+
+Setup (us-west-2, default VPC, torn down afterwards): the router (`wamp_profile_router`, one thread pinned to one core) on a
+`c7i.2xlarge` (Sapphire Rapids, Ubuntu 24.04, Linux 7.0-aws), driven over the network from one to three more `c7i.2xlarge`
+instances running 7 pinned `wamp_load` processes each (one process is single-threaded, so several are needed to saturate a core).
+`perf record -e cpu-clock -F 1000 -g` on the router, kernel symbols available. Total cost a few dollars.
+
+| Measurement (one router core, saturated) | Result |
+|---|---|
+| RPC, 7 x 20 callers | 100-118k calls/s; 8.3 s CPU per 8 s: about 4.3 us user + 4.3 us kernel per call |
+| RPC CPU split | kernel 52%, asio 18-20%, CBOR 7.5%, router logic 5.4%, allocation 4.8%, std/libc 10%, logging 0.7% |
+| PubSub, 21 x 10 subscribers, unpaced | 14.4M events delivered; 4.8 us CPU per delivered event (2.1 user + 2.7 kernel) |
+| PubSub CPU split | kernel 56%, asio 28%, std/libc 7%, allocation 4.3%, router logic 3.9%, CBOR 0.7% |
+| TLS 1.3 handshake, server CPU | 463 us (RSA-2048) / 217 us (ECDSA P-256) = 2.2k / 4.6k handshakes/s per core |
+| TLS record layer, 200 B message | +0.32 us (x1.1), 16 KiB +1.9 us (x1.5) |
+| Handoff between threads (batched) | mutex+condvar 33-39 ns, `asio::post` 36-58 ns; unbatched 155 / 713 ns |
+| One `shared_ptr` frame copied on 1 / 2 / 4 threads | 9.6 / 70 / 150 ns per op; cloning 128 B costs 23 ns, 4 KiB 80 ns |
+
+What changed compared with the Docker VM profile:
+* **Syscalls are cheap on real hardware.** Kernel share is 52-59%, not 74-83%, and a whole RPC costs 8.5 us instead of about
+  90 us. User space is now 41-48% of the router's CPU, so user-space work matters more than the VM suggested; asio's own
+  machinery (reactor, coroutine resumes, channel operations) is the largest user-space cost at 18-28%.
+* **TLS is much cheaper than on the laptop**: the record layer adds only 11% for small messages (AES-GCM with AVX-512), and a
+  handshake is about 0.2-0.5 ms.
+* **The thread hand-off and refcount findings hold** (same numbers within noise), so the design above is unchanged.
+
+**A bug the real-hardware profile found.** One libc address took 17.7% of the fan-out profile: `WampSession` erased consumed
+bytes from the front of its `std::vector` buffer once per frame, which moves everything behind it (quadratic in the number of
+pipelined frames per read, and worse since the shared read scratch grew to 64 KiB). It now advances a read offset and compacts once
+per `process()` call. Whole-run A/B on identical load (14.4M events delivered, 3 generators):
+
+| | CPU | per delivered event | wall |
+|---|---|---|---|
+| before | 85.9 s (45.6 user + 40.3 sys) | 6.0 us | 97.8 s |
+| after | 68.8 s (30.4 user + 38.5 sys) | 4.8 us | 77.7 s |
+
+(-20% CPU, -33% user time.) A regression test now feeds 5,000 pipelined frames in uneven chunks.
+
+Remaining user-space targets visible in the profile: asio overhead (about 20-28%), `EventChannelRegistry::find` once per
+delivered event (about 1%, cacheable in the session), per-frame `shared_ptr<vector>` allocation (about 4%).
+
 ## Recommended design
 
 ### Stage 0: single-thread fixes first (independent of threading)

@@ -355,6 +355,45 @@ TEST_CASE("WampSession processes pipelined frames in one read", "[protocol][sess
     REQUIRE(session.is_established());
 }
 
+TEST_CASE("WampSession handles thousands of pipelined frames split at arbitrary points", "[protocol][session]") {
+    // A 64 KiB read can carry hundreds of small frames; consuming them must not shift the buffer per frame.
+    boost::asio::io_context io;
+    ServerConfig config;
+    WampSession session{io, config};
+    session.on_connect();
+
+    std::vector<uint8_t> input = handshake_bytes();
+    append(input, frame_of(serialize_hello(HelloMessage::create_client("test.realm"))));
+    constexpr int kFrames = 5000;
+    for (int i = 0; i < kFrames; ++i) {
+        append(input, frame_of(serialize_subscribe(SubscribeMessage{static_cast<uint64_t>(i + 1), {}, "proto.many"})));
+    }
+
+    // feed it in uneven chunks so frames straddle read boundaries
+    std::vector<uint8_t> all_output;  // handshake reply first, then the frames
+    size_t pos = 0;
+    size_t chunk = 7;
+    while (pos < input.size()) {
+        const size_t n = std::min(chunk, input.size() - pos);
+        auto result = session.process(std::span{input.data() + pos, n});
+        REQUIRE(result.has_value());
+        all_output.insert(all_output.end(), result->begin(), result->end());
+        pos += n;
+        chunk = chunk * 3 % 9973 + 5;
+    }
+    auto types = message_types(all_output);
+    REQUIRE(types.size() == static_cast<size_t>(kFrames) + 1);  // WELCOME + a SUBSCRIBED per frame
+    REQUIRE(types.front() == MessageType::WELCOME);
+    REQUIRE(std::all_of(types.begin() + 1, types.end(), [](auto t) { return t == MessageType::SUBSCRIBED; }));
+
+    // and all in one read
+    WampSession whole{io, config};
+    whole.on_connect();
+    auto result = whole.process(std::span{input.data(), input.size()});
+    REQUIRE(result.has_value());
+    REQUIRE(message_types(*result).size() == static_cast<size_t>(kFrames) + 1);
+}
+
 TEST_CASE("WampSession delivers every fire-and-forget PUBLISH in a burst", "[protocol][session]") {
     Sessions s;
     auto subscriber = s.add(910041);

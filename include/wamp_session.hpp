@@ -108,18 +108,43 @@ public:
     // pipelined messages). Returns a view of the concatenated responses, valid until the next
     // call (empty span = no response).
     [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> process(std::span<const uint8_t> data) {
+        auto result = process_input(data);
+        compact_buffer();
+        return result;
+    }
+
+private:
+    // Consumed bytes are skipped with read_pos_ instead of erased one frame at a time (each erase
+    // moves everything behind it, which is quadratic when a read carries hundreds of small frames);
+    // process() drops them once per call.
+    void compact_buffer() {
+        if (read_pos_ == buffer_.size()) {
+            buffer_.clear();
+        } else if (read_pos_ > 0) {
+            buffer_.erase(buffer_.begin(), buffer_.begin() + static_cast<std::ptrdiff_t>(read_pos_));
+        }
+        read_pos_ = 0;
+    }
+
+    [[nodiscard]] size_t unread() const { return buffer_.size() - read_pos_; }
+
+    [[nodiscard]] std::span<const uint8_t> unread_span() const {
+        return std::span<const uint8_t>{buffer_}.subspan(read_pos_);
+    }
+
+    [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> process_input(std::span<const uint8_t> data) {
         buffer_.insert(buffer_.end(), data.begin(), data.end());
         output_buffer_.clear();
         // Sends parked by earlier callers that never flushed them must not leak into this session's turn
         EventChannelRegistry::clear_blocked();
 
         spdlog::debug("Received {} bytes, buffer now {} bytes in state {}",
-                     data.size(), buffer_.size(), state_name());
+                     data.size(), unread(), state_name());
 
         bool progressed = false;
         while (true) {
             const auto state_before = state_;
-            const auto size_before = buffer_.size();
+            const auto size_before = unread();
 
             std::expected<std::span<const uint8_t>, std::error_code> result{std::span<const uint8_t>{}};
             switch (state_) {
@@ -155,7 +180,7 @@ public:
             }
             output_buffer_.insert(output_buffer_.end(), result->begin(), result->end());
 
-            const bool made_progress = state_ != state_before || buffer_.size() != size_before;
+            const bool made_progress = state_ != state_before || unread() != size_before;
             progressed = progressed || made_progress;
 
             // Keep going only while input is being consumed and the session is ready for the
@@ -170,12 +195,12 @@ public:
 private:
     // Process RawSocket handshake (expecting 4 bytes)
     [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> process_rawsocket_handshake() {
-        if (buffer_.size() < rawsocket::HANDSHAKE_SIZE) {
+        if (unread() < rawsocket::HANDSHAKE_SIZE) {
             // Not enough data yet
             return std::span<const uint8_t>{};
         }
 
-        auto handshake_result = rawsocket::decode_handshake_request(buffer_);
+        auto handshake_result = rawsocket::decode_handshake_request(unread_span());
         if (!handshake_result.has_value()) {
             spdlog::error("Invalid RawSocket handshake: {}",
                          handshake_result.error().message());
@@ -215,7 +240,7 @@ private:
             .serializer = handshake.serializer
         });
 
-        buffer_.erase(buffer_.begin(), buffer_.begin() + rawsocket::HANDSHAKE_SIZE);
+        read_pos_ += rawsocket::HANDSHAKE_SIZE;
 
         state_ = SessionProtocolState::AWAITING_FRAME_HEADER;
 
@@ -227,13 +252,13 @@ private:
 
     // Process frame header (expecting 4 bytes)
     [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> process_frame_header() {
-        if (buffer_.size() < rawsocket::FRAME_HEADER_SIZE) {
+        if (unread() < rawsocket::FRAME_HEADER_SIZE) {
             // Not enough data yet
             return std::span<const uint8_t>{};
         }
 
         // Decode frame header
-        auto header_result = rawsocket::decode_frame_header(buffer_);
+        auto header_result = rawsocket::decode_frame_header(unread_span());
         if (!header_result.has_value()) {
             spdlog::error("Invalid frame header: {}", header_result.error().message());
             return std::unexpected{header_result.error()};
@@ -254,7 +279,7 @@ private:
             return std::unexpected{
                 rawsocket::make_error_code(rawsocket::RawSocketError::PAYLOAD_TOO_LARGE)};
         }
-        buffer_.erase(buffer_.begin(), buffer_.begin() + rawsocket::FRAME_HEADER_SIZE);
+        read_pos_ += rawsocket::FRAME_HEADER_SIZE;
 
         expected_payload_length_ = current_frame_header_.payload_length;
 
@@ -271,18 +296,18 @@ private:
 
     // Process frame payload (expecting expected_payload_length_ bytes)
     [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> process_frame_payload() {
-        if (buffer_.size() < expected_payload_length_) {
+        if (unread() < expected_payload_length_) {
             // Not enough data yet
             spdlog::debug("Waiting for payload: have {} bytes, need {}",
-                         buffer_.size(), expected_payload_length_);
+                         unread(), expected_payload_length_);
             return std::span<const uint8_t>{};
         }
         std::vector<uint8_t> payload(
-            buffer_.begin(),
-            buffer_.begin() + expected_payload_length_
+            buffer_.begin() + static_cast<std::ptrdiff_t>(read_pos_),
+            buffer_.begin() + static_cast<std::ptrdiff_t>(read_pos_ + expected_payload_length_)
         );
 
-        buffer_.erase(buffer_.begin(), buffer_.begin() + expected_payload_length_);
+        read_pos_ += expected_payload_length_;
 
         spdlog::debug("Received complete frame payload: {} bytes", payload.size());
 
@@ -296,19 +321,19 @@ private:
 
     // Process frame payload during authentication (only AUTHENTICATE allowed)
     [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> process_frame_payload_authenticate() {
-        if (buffer_.size() < expected_payload_length_) {
+        if (unread() < expected_payload_length_) {
             // Not enough data yet
             spdlog::debug("Waiting for payload: have {} bytes, need {}",
-                         buffer_.size(), expected_payload_length_);
+                         unread(), expected_payload_length_);
             return std::span<const uint8_t>{};
         }
 
         std::vector<uint8_t> payload(
-            buffer_.begin(),
-            buffer_.begin() + expected_payload_length_
+            buffer_.begin() + static_cast<std::ptrdiff_t>(read_pos_),
+            buffer_.begin() + static_cast<std::ptrdiff_t>(read_pos_ + expected_payload_length_)
         );
 
-        buffer_.erase(buffer_.begin(), buffer_.begin() + expected_payload_length_);
+        read_pos_ += expected_payload_length_;
 
         spdlog::debug("Received complete frame payload during auth: {} bytes", payload.size());
 
@@ -851,6 +876,7 @@ private:
     bool disconnected_ = false;
     std::vector<uint8_t> output_buffer_;  // Responses accumulated during one process() call
     std::vector<uint8_t> buffer_;          // Accumulates partial reads
+    size_t read_pos_{0};                   // Bytes of buffer_ already consumed (dropped at the end of process())
     std::vector<uint8_t> response_buffer_;  // Reusable buffer for responses
 
     // RawSocket parameters

@@ -58,6 +58,7 @@ struct Options {
     size_t calls = 1000;         // calls per caller
     size_t payload_args = 10;
     size_t connections = 1000;   // idle: connections to open
+    size_t instance = 0;         // names the topic/procedure/realm so several wamp_load processes can share one router
     size_t hold_seconds = 3;     // idle: how long to keep them open (so memory can be sampled)
     size_t queue_size = 100;     // embedded router: per-session event queue size
     std::string overflow = "backpressure";  // embedded router: backpressure | drop
@@ -70,6 +71,7 @@ void usage() {
         "wamp_load [options]\n"
         "  --mode pubsub|rpc|both|idle  scenarios to run (default both; idle opens connections and holds them)\n"
         "  --connections N          idle: connections to open (default 1000)\n"
+        "  --instance N             suffix topic/procedure names with N, to run several wamp_load processes against one router\n"
         "  --hold S                 idle: seconds to keep them open (default 3)\n"
         "  --subscribers N          pubsub: subscriber clients (default 10)\n"
         "  --messages N             pubsub: events published (default 10000)\n"
@@ -106,6 +108,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (a == "--overflow") { const char* v = next(); if (!v) return false; o.overflow = v; }
         else if (a == "--rate") { if (!number(o.rate)) return false; }
         else if (a == "--connections") { if (!number(o.connections)) return false; }
+        else if (a == "--instance") { if (!number(o.instance)) return false; }
         else if (a == "--hold") { if (!number(o.hold_seconds)) return false; }
         else if (a == "--payload-args") { if (!number(o.payload_args)) return false; }
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(); return false; }
@@ -225,7 +228,7 @@ double seconds(Clock::time_point a, Clock::time_point b) {
 // ----------------------------------------------------------------------------
 awaitable<void> run_pubsub(boost::asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port,
                            bool embedded) {
-    constexpr const char* kTopic = "load.pubsub";
+    const std::string kTopic = "load.pubsub." + std::to_string(o.instance);
 
     // Event callbacks can fire after this coroutine returns, so they share ownership of the stats
     auto state = std::make_shared<PubSubState>();
@@ -300,7 +303,7 @@ awaitable<void> run_pubsub(boost::asio::io_context& io, ClientPool& pool, const 
 // RPC: N concurrent callers -> 1 callee (echo)
 // ----------------------------------------------------------------------------
 awaitable<void> run_rpc(boost::asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port) {
-    constexpr const char* kProcedure = "load.echo";
+    const std::string kProcedure = "load.echo." + std::to_string(o.instance);
 
     auto callee_ptr = std::make_shared<WampClient>(io);
     pool.push_back(callee_ptr);
