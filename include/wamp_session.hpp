@@ -441,6 +441,16 @@ private:
             return std::span<const uint8_t>(response_buffer_);
         }
 
+        // The authid must be allowed to join the requested realm. The same error covers unknown and
+        // disallowed realms so a client cannot probe which realms exist.
+        if (!config_.may_join(*hello.authid, realm_)) {
+            spdlog::warn("authid '{}' is not allowed to join realm '{}'", *hello.authid, realm_);
+            auto abort = AbortMessage::create_not_authorized("Not allowed to join this realm");
+            auto abort_cbor = serialize_abort(abort);
+            response_buffer_ = rawsocket::create_wamp_message(abort_cbor);
+            return std::span<const uint8_t>(response_buffer_);
+        }
+
         // Generate cryptographic challenge
         pending_authid_ = *hello.authid;
         pending_challenge_ = generate_challenge();
@@ -528,8 +538,9 @@ private:
         role_name_ = "none";
         role_ = &no_permissions;
         if (auto role_it = config_.auth_roles.find(authid_); role_it != config_.auth_roles.end()) {
-            if (auto def = config_.roles.find(role_it->second); def != config_.roles.end()) {
-                role_name_ = role_it->second;
+            const std::string& role_name = role_it->second.role_for(realm_);
+            if (auto def = config_.roles.find(role_name); def != config_.roles.end()) {
+                role_name_ = role_name;
                 role_ = &def->second;
             }
         }

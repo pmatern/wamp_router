@@ -55,13 +55,21 @@ level = "info"
 "user1" = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
 "admin" = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
 
+# Realms. Topics and procedures exist per realm: the same URI in two realms is two unrelated things.
+# Once [auth.keys] is non-empty an authid may only join the realms listed here (an authid with no
+# entry cannot join any). Without [auth.keys] clients may join any realm.
+[auth.realms]
+"user1" = ["realm1"]
+"admin" = ["realm1", "realm2"]
+
 # Authorization. Once [auth.keys] is non-empty, everything is denied unless a role allows it.
 # Each authid is assigned one role; a role is a list of rules. Actions: call, register,
 # publish, subscribe. match = "exact" (default) or "prefix" (also matches the prefix itself).
 # Denied requests get wamp.error.not_authorized. An authid without a role can connect but do nothing.
+# A role name applies in every realm the authid may join; a table gives a role per realm.
 [auth.roles]
 "user1" = "user"
-"admin" = "admin"
+"admin" = { realm1 = "admin", realm2 = "user" }
 
 [[roles.user.rules]]
 uri = "com.example."

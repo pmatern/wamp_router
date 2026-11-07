@@ -35,6 +35,6 @@ Do the protocol gaps (arguments forwarding in particular) first so benchmarks me
 
 ## Backlog
 - [x] Roles and authorization per authid: `[auth.roles]` + `[[roles.<name>.rules]]` (exact/prefix URIs; call, register, publish, subscribe), default-deny once `[auth.keys]` is set, `wamp.error.not_authorized`. Not done: wildcard URI patterns, reloading permissions without a restart.
-- [ ] Realm support: ~~realm isolation~~ (done: `Realm` in `include/realm.hpp` holds the subscription and registration managers, one per realm; the session caches a pointer), realm-scoped roles, per-authid allowed realms, and ~~signing the raw Cryptosign challenge as the spec does~~ (done). Do before the threading review.
+- [x] Realm support: Cryptosign signs the raw challenge bytes as the spec does; subscriptions and registrations are isolated per realm (`Realm` in `include/realm.hpp`, one pair of managers per realm, cached by the session; the invocation tracker and event channels stay global); `[auth.realms]` lists the realms each authid may join; `[auth.roles]` may give a role per realm. For the threading review: a `Realm` is the natural shard unit.
 - [ ] WebSocket transport; JSON and MessagePack serializers.
 - [ ] Pattern-based subscriptions/registrations, call cancellation, progressive results.

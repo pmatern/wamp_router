@@ -96,6 +96,8 @@ ServerConfig authz_config(const std::string& public_hex) {
     config.max_pending_invocations = 1000;
     config.auth_keys["alice"] = public_hex;
     config.auth_keys["bob"] = public_hex;
+    config.auth_realms["alice"] = {"com.example.realm"};
+    config.auth_realms["bob"] = {"com.example.realm"};
 
     Permissions user;
     user.add_rule(Action::PUBLISH, "com.example.", true);
@@ -108,7 +110,8 @@ ServerConfig authz_config(const std::string& public_hex) {
 }
 
 // Runs the RawSocket handshake and Cryptosign flow; returns the WELCOME
-WelcomeMessage establish(WampSession& session, const KeyPair& kp, const std::string& authid) {
+WelcomeMessage establish(WampSession& session, const KeyPair& kp, const std::string& authid,
+                         const std::string& realm = "com.example.realm") {
     session.on_connect();
 
     auto handshake = rawsocket::encode_handshake_request({
@@ -116,7 +119,7 @@ WelcomeMessage establish(WampSession& session, const KeyPair& kp, const std::str
         .serializer = rawsocket::Serializer::CBOR});
     REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
-    HelloMessage hello{"com.example.realm"};
+    HelloMessage hello{realm};
     hello.authid = authid;
     hello.authmethods = std::vector<std::string>{"cryptosign"};
     auto hello_frame = rawsocket::create_wamp_message(serialize_hello(hello));
@@ -232,4 +235,114 @@ TEST_CASE("Without auth keys nothing is restricted", "[authz][wamp_session]") {
 
     auto ok = send(session, serialize_subscribe(SubscribeMessage{1, {}, "any.topic.at.all"}));
     REQUIRE(get_message_type_from_cbor(ok) == MessageType::SUBSCRIBED);
+}
+
+TEST_CASE("Session only admits authids to their allowed realms", "[authz][realm][wamp_session]") {
+    auto kp = make_keypair();
+    boost::asio::io_context io;
+    auto config = authz_config(kp.public_hex);
+    config.auth_realms["alice"] = {"com.example.realm", "second.realm"};
+    WampSession session{io, config};
+
+    session.on_connect();
+    auto handshake = rawsocket::encode_handshake_request({
+        .max_length = rawsocket::MaxLengthCode::BYTES_16M,
+        .serializer = rawsocket::Serializer::CBOR});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
+
+    auto join = [&](const std::string& realm) {
+        HelloMessage hello{realm};
+        hello.authid = "alice";
+        hello.authmethods = std::vector<std::string>{"cryptosign"};
+        return send(session, serialize_hello(hello));
+    };
+
+    SECTION("a realm outside the authid's list is aborted before any CHALLENGE") {
+        auto reply = join("third.realm");
+        REQUIRE(get_message_type_from_cbor(reply) == MessageType::ABORT);
+    }
+
+    SECTION("a realm in the list gets a CHALLENGE") {
+        REQUIRE(get_message_type_from_cbor(join("second.realm")) == MessageType::CHALLENGE);
+    }
+}
+
+TEST_CASE("An authid with no realm list cannot join anywhere", "[authz][realm][wamp_session]") {
+    auto kp = make_keypair();
+    boost::asio::io_context io;
+    auto config = authz_config(kp.public_hex);
+    config.auth_realms.erase("bob");
+    WampSession session{io, config};
+
+    session.on_connect();
+    auto handshake = rawsocket::encode_handshake_request({
+        .max_length = rawsocket::MaxLengthCode::BYTES_16M,
+        .serializer = rawsocket::Serializer::CBOR});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
+
+    HelloMessage hello{"com.example.realm"};
+    hello.authid = "bob";
+    hello.authmethods = std::vector<std::string>{"cryptosign"};
+    REQUIRE(get_message_type_from_cbor(send(session, serialize_hello(hello))) == MessageType::ABORT);
+}
+
+TEST_CASE("Roles can differ per realm", "[authz][realm][wamp_session]") {
+    auto kp = make_keypair();
+    boost::asio::io_context io;
+    auto config = authz_config(kp.public_hex);
+
+    Permissions readonly;
+    readonly.add_rule(Action::SUBSCRIBE, "com.example.", true);
+    config.roles.emplace("readonly", std::move(readonly));
+
+    config.auth_realms["alice"] = {"com.example.realm", "second.realm"};
+    AuthRole alice;
+    alice.by_realm["com.example.realm"] = "user";
+    alice.by_realm["second.realm"] = "readonly";
+    config.auth_roles["alice"] = alice;
+
+    WampSession first{io, config};
+    auto welcome1 = establish(first, kp, "alice", "com.example.realm");
+    REQUIRE(welcome1.authrole == "user");
+    REQUIRE(get_message_type_from_cbor(send(first, serialize_publish(
+        PublishMessage{1, {{"acknowledge", true}}, "com.example.news"}))) == MessageType::PUBLISHED);
+
+    WampSession second{io, config};
+    auto welcome2 = establish(second, kp, "alice", "second.realm");
+    REQUIRE(welcome2.authrole == "readonly");
+    require_not_authorized(send(second, serialize_publish(
+        PublishMessage{1, {{"acknowledge", true}}, "com.example.news"})), MessageType::PUBLISH, 1);
+    REQUIRE(get_message_type_from_cbor(send(second, serialize_subscribe(
+        SubscribeMessage{2, {}, "com.example.news"}))) == MessageType::SUBSCRIBED);
+}
+
+TEST_CASE("Authenticated sessions in different realms are isolated", "[authz][realm][wamp_session]") {
+    auto kp = make_keypair();
+    boost::asio::io_context io;
+    auto config = authz_config(kp.public_hex);
+    config.auth_realms["alice"] = {"com.example.realm", "second.realm"};
+
+    WampSession in_first{io, config};
+    WampSession in_second{io, config};
+    auto w1 = establish(in_first, kp, "alice", "com.example.realm");
+    auto w2 = establish(in_second, kp, "alice", "second.realm");
+    REQUIRE(w1.session_id != w2.session_id);
+
+    REQUIRE(get_message_type_from_cbor(send(in_first, serialize_subscribe(
+        SubscribeMessage{1, {}, "com.example.news"}))) == MessageType::SUBSCRIBED);
+
+    // Publishing the same topic from the other realm must not produce an EVENT for the first
+    (void)send(in_second, serialize_publish(PublishMessage{1, {}, "com.example.news"}));
+    auto channel = EventChannelRegistry::find(w1.session_id);
+    REQUIRE(channel != nullptr);
+    bool got_event = false;
+    channel->try_receive([&](boost::system::error_code, EventToSend) { got_event = true; });
+    REQUIRE_FALSE(got_event);
+
+    // ...while a publish in its own realm does (alice is publisher-capable; use a second session)
+    WampSession publisher{io, config};
+    (void)establish(publisher, kp, "alice", "com.example.realm");
+    (void)send(publisher, serialize_publish(PublishMessage{2, {}, "com.example.news"}));
+    channel->try_receive([&](boost::system::error_code, EventToSend) { got_event = true; });
+    REQUIRE(got_event);
 }

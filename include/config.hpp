@@ -24,6 +24,7 @@
 #include <string>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <spdlog/spdlog.h>
 
 namespace wamp {
@@ -111,6 +112,26 @@ struct EventQueueConfig {
 };
 
 // ============================================================================
+// AuthRole - the role name(s) an authid gets: one for every realm, optionally overridden per realm
+// ============================================================================
+struct AuthRole {
+    std::string default_role;                              // empty = no role unless a realm entry matches
+    std::unordered_map<std::string, std::string> by_realm;  // realm → role name
+
+    AuthRole() = default;
+    AuthRole(std::string role) : default_role(std::move(role)) {}  // NOLINT: allows `= "role"`
+    AuthRole(const char* role) : default_role(role) {}             // NOLINT
+
+    // Role name for a realm; empty if there is none
+    [[nodiscard]] const std::string& role_for(const std::string& realm) const {
+        if (auto it = by_realm.find(realm); it != by_realm.end()) {
+            return it->second;
+        }
+        return default_role;
+    }
+};
+
+// ============================================================================
 // ServerConfig - Complete server configuration
 // ============================================================================
 struct ServerConfig {
@@ -126,8 +147,17 @@ struct ServerConfig {
 
     // Authorization: authid → role name, and role name → permitted URIs per action.
     // Only enforced when auth_keys is non-empty (then default-deny).
-    std::unordered_map<std::string, std::string> auth_roles;
+    std::unordered_map<std::string, AuthRole> auth_roles;
     std::unordered_map<std::string, Permissions> roles;
+
+    // Realms each authid may join: authid → realm names. Only enforced when auth_keys is non-empty
+    // (an authid with no entry can authenticate nowhere). Without auth any realm is accepted.
+    std::unordered_map<std::string, std::unordered_set<std::string>> auth_realms;
+
+    [[nodiscard]] bool may_join(const std::string& authid, const std::string& realm) const {
+        auto it = auth_realms.find(authid);
+        return it != auth_realms.end() && it->second.contains(realm);
+    }
 };
 
 // ============================================================================
@@ -307,25 +337,81 @@ public:
                     spdlog::info("Loaded {} authentication key(s)", config.auth_keys.size());
                 }
 
+                if (auth.contains("realms")) {
+                    for (const auto& [authid, realms_value] : toml::find(auth, "realms").as_table()) {
+                        if (!config.auth_keys.contains(authid)) {
+                            spdlog::error("[auth.realms] authid '{}' has no entry in [auth.keys]", authid);
+                            return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                        }
+                        auto& realms = config.auth_realms[authid];
+                        for (const auto& realm_value : realms_value.as_array()) {
+                            const std::string realm = realm_value.as_string();
+                            if (realm.empty()) {
+                                spdlog::error("[auth.realms] authid '{}' has an empty realm name", authid);
+                                return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                            }
+                            realms.insert(realm);
+                        }
+                        if (realms.empty()) {
+                            spdlog::error("[auth.realms] authid '{}' has an empty realm list", authid);
+                            return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                        }
+                    }
+                }
+
                 if (auth.contains("roles")) {
+                    auto require_role = [&](const std::string& authid, const std::string& role_name) {
+                        if (!config.roles.contains(role_name)) {
+                            spdlog::error("[auth.roles] authid '{}' uses undefined role '{}'", authid, role_name);
+                            return false;
+                        }
+                        return true;
+                    };
+
                     for (const auto& [authid, role_value] : toml::find(auth, "roles").as_table()) {
-                        const std::string role_name = role_value.as_string();
                         if (!config.auth_keys.contains(authid)) {
                             spdlog::error("[auth.roles] authid '{}' has no entry in [auth.keys]", authid);
                             return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
                         }
-                        if (!config.roles.contains(role_name)) {
-                            spdlog::error("[auth.roles] authid '{}' uses undefined role '{}'", authid, role_name);
-                            return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+
+                        AuthRole auth_role;
+                        if (role_value.is_string()) {
+                            // One role in every realm the authid may join
+                            auth_role.default_role = role_value.as_string();
+                            if (!require_role(authid, auth_role.default_role)) {
+                                return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                            }
+                        } else {
+                            // realm → role
+                            for (const auto& [realm, realm_role] : role_value.as_table()) {
+                                const std::string role_name = realm_role.as_string();
+                                if (!config.may_join(authid, realm)) {
+                                    spdlog::error("[auth.roles] authid '{}' has a role for realm '{}', which is "
+                                                  "not in its [auth.realms] list", authid, realm);
+                                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                                }
+                                if (!require_role(authid, role_name)) {
+                                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                                }
+                                auth_role.by_realm[realm] = role_name;
+                            }
                         }
-                        config.auth_roles[authid] = role_name;
+                        config.auth_roles[authid] = std::move(auth_role);
                     }
                 }
 
                 for (const auto& [authid, key] : config.auth_keys) {
-                    if (!config.auth_roles.contains(authid)) {
-                        spdlog::warn("authid '{}' has no role in [auth.roles]; it can connect but not call, "
-                                     "register, publish or subscribe", authid);
+                    auto realms_it = config.auth_realms.find(authid);
+                    if (realms_it == config.auth_realms.end()) {
+                        spdlog::warn("authid '{}' has no entry in [auth.realms]; it cannot join any realm", authid);
+                        continue;
+                    }
+                    for (const auto& realm : realms_it->second) {
+                        auto role_it = config.auth_roles.find(authid);
+                        if (role_it == config.auth_roles.end() || role_it->second.role_for(realm).empty()) {
+                            spdlog::warn("authid '{}' has no role in realm '{}'; it can connect but not call, "
+                                         "register, publish or subscribe", authid, realm);
+                        }
                     }
                 }
             }

@@ -251,9 +251,19 @@ If `[auth.keys]` is configured in config.toml, clients must authenticate using W
 
 If `[auth.keys]` is empty or omitted, authentication is disabled and sessions are established immediately after HELLO.
 
+### Realms
+
+Each realm has its own topics and procedures: a publish in `realm1` never reaches subscribers in `realm2`, and the same procedure name can be registered in both. A session is bound to the realm named in its HELLO. When authentication is enabled, `[auth.realms]` lists the realms each authid may join; any other realm (or an authid with no entry) is refused with `wamp.error.not_authorized`, the same answer for unknown and forbidden realms. Without authentication any realm can be joined.
+
+```toml
+[auth.realms]
+"user1" = ["realm1"]
+"admin" = ["realm1", "realm2"]
+```
+
 ### Authorization
 
-When authentication is enabled, what a session may do is decided by its role. `[auth.roles]` maps each authid to a role; `[[roles.<name>.rules]]` lists what the role may do:
+When authentication is enabled, what a session may do is decided by its role. `[auth.roles]` maps each authid to a role (or, as a table such as `{ realm1 = "admin", realm2 = "user" }`, to a role per realm); `[[roles.<name>.rules]]` lists what the role may do:
 
 ```toml
 [auth.roles]

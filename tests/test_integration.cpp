@@ -594,6 +594,7 @@ static ServerConfig create_auth_server_config(const std::string& authid, const s
     config.max_pending_invocations = 1000;
     config.log_level = spdlog::level::warn;
     config.auth_keys[authid] = public_key_hex;
+    config.auth_realms[authid] = {"com.example.realm"};
 
     // The authenticated user may only subscribe below "allowed."
     Permissions limited;
@@ -613,9 +614,11 @@ public:
 // Auth-aware test client that can perform cryptosign authentication
 class WampAuthTestClient {
 public:
-    WampAuthTestClient(asio::io_context& io, const std::string& priv_key_path, const std::string& authid)
+    WampAuthTestClient(asio::io_context& io, const std::string& priv_key_path, const std::string& authid,
+                       std::string realm = "com.example.realm")
         : io_(io)
         , socket_(io)
+        , realm_(std::move(realm))
         , priv_key_path_(priv_key_path)
         , authid_(authid)
         , session_id_(0)
@@ -646,7 +649,7 @@ public:
             asio::read(socket_, asio::buffer(handshake_response));
 
             // Send HELLO with auth info
-            HelloMessage hello = HelloMessage::create_client("com.example.realm");
+            HelloMessage hello = HelloMessage::create_client(realm_);
             hello.authid = authid_;
             hello.authmethods = std::vector<std::string>{"cryptosign"};
 
@@ -747,6 +750,7 @@ private:
 
     asio::io_context& io_;
     tcp::socket socket_;
+    std::string realm_;
     std::string priv_key_path_;
     std::string authid_;
     uint64_t session_id_;
@@ -816,6 +820,21 @@ TEST_CASE("Integration: Role permissions are enforced end to end", "[integration
     auto publish = client.request(serialize_publish(PublishMessage{3, {{"acknowledge", true}}, "allowed.topic"}));
     REQUIRE(publish.has_value());
     REQUIRE(deserialize_error(*publish)->error_uri == "wamp.error.not_authorized");
+
+    std::remove(priv_path.c_str());
+}
+
+TEST_CASE("Integration: Cryptosign login is refused for a realm the authid may not join",
+          "[integration][auth][realm]") {
+    auto [priv_path, public_key_hex] = create_integration_test_keypair();
+
+    WampAuthServerFixture fixture("testuser", public_key_hex);
+
+    WampAuthTestClient wrong_realm(fixture.io_context(), priv_path, "testuser", "other.realm");
+    REQUIRE_FALSE(wrong_realm.connect(fixture.port(), 5s));
+
+    WampAuthTestClient right_realm(fixture.io_context(), priv_path, "testuser");
+    REQUIRE(right_realm.connect(fixture.port(), 5s));
 
     std::remove(priv_path.c_str());
 }

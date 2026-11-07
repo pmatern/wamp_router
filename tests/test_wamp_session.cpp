@@ -359,6 +359,7 @@ static ServerConfig create_auth_test_config(const std::string& authid, const std
     config.max_pending_invocations = 1000;
     config.log_level = spdlog::level::debug;
     config.auth_keys[authid] = public_key_hex;
+    config.auth_realms[authid] = {"com.example.realm"};
     return config;
 }
 

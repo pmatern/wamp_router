@@ -202,6 +202,8 @@ Add authentication keys to config.toml:
    - Success: Sends `WELCOME` with authid, authrole, authmethod
    - Failure: Sends `ABORT` with `wamp.error.not_authorized`
 
+**Realms:** `[auth.realms]` maps each authid to the realms it may join (HELLO for any other realm is aborted with `wamp.error.not_authorized`). Topics and procedures are isolated per realm (`Realm` in `include/realm.hpp`); `[auth.roles]` may give a role per realm.
+
 **Security Notes:**
 - Public keys are stored in config.toml (not secret)
 - Private keys never touch the server (client-side only)

@@ -594,7 +594,7 @@ uri = "com.example.add"
 allow = ["call"]
 )");
         REQUIRE(result.has_value());
-        CHECK(result->auth_roles.at("alice") == "publisher");
+        CHECK(result->auth_roles.at("alice").default_role == "publisher");
         CHECK_FALSE(result->auth_roles.contains("bob"));
 
         const auto& role = result->roles.at("publisher");
@@ -619,5 +619,80 @@ allow = ["call"]
         CHECK_FALSE(load("[[roles.r.rules]]\nuri = \"a\"\nallow = []\n").has_value());
         CHECK_FALSE(load("[auth.roles]\nalice = \"missing\"\n").has_value());
         CHECK_FALSE(load("[auth.roles]\nnobody = \"r\"\n[[roles.r.rules]]\nuri = \"a\"\nallow = [\"call\"]\n").has_value());
+    }
+}
+
+TEST_CASE("Config::load() auth realms and per-realm roles", "[config][authz][realm]") {
+    TempCertFile cert("cert");
+    TempCertFile key("key");
+    const std::string pub(64, 'a');
+
+    auto load = [&](const std::string& extra) {
+        std::string content = R"(
+[server]
+port = 8080
+[server.tls]
+cert = ")" + cert.path().string() + R"("
+key = ")" + key.path().string() + R"("
+[auth.keys]
+alice = ")" + pub + R"("
+bob = ")" + pub + R"("
+[[roles.reader.rules]]
+uri = "a."
+match = "prefix"
+allow = ["subscribe"]
+[[roles.writer.rules]]
+uri = "a."
+match = "prefix"
+allow = ["publish"]
+)" + extra;
+        TempConfigFile config(content);
+        return wamp::Config::load(config.path());
+    };
+
+    SECTION("parses realm lists and a role for every realm") {
+        auto result = load(R"(
+[auth.realms]
+alice = ["r1", "r2"]
+bob = ["r1"]
+
+[auth.roles]
+bob = "reader"
+)");
+        REQUIRE(result.has_value());
+        CHECK(result->may_join("alice", "r1"));
+        CHECK(result->may_join("alice", "r2"));
+        CHECK_FALSE(result->may_join("alice", "r3"));
+        CHECK_FALSE(result->may_join("bob", "r2"));
+        CHECK_FALSE(result->may_join("nobody", "r1"));
+        CHECK(result->auth_roles.at("bob").role_for("r1") == "reader");
+    }
+
+    SECTION("parses a role per realm") {
+        auto result = load(R"(
+[auth.realms]
+alice = ["r1", "r2"]
+
+[auth.roles]
+alice = { r1 = "reader", r2 = "writer" }
+)");
+        REQUIRE(result.has_value());
+        CHECK(result->auth_roles.at("alice").role_for("r1") == "reader");
+        CHECK(result->auth_roles.at("alice").role_for("r2") == "writer");
+        CHECK(result->auth_roles.at("alice").role_for("r3").empty());
+    }
+
+    SECTION("without [auth.realms] nobody may join") {
+        auto result = load("");
+        REQUIRE(result.has_value());
+        CHECK_FALSE(result->may_join("alice", "r1"));
+    }
+
+    SECTION("invalid configurations are rejected") {
+        CHECK_FALSE(load("[auth.realms]\nnobody = [\"r1\"]\n").has_value());      // authid has no key
+        CHECK_FALSE(load("[auth.realms]\nalice = []\n").has_value());              // empty list
+        CHECK_FALSE(load("[auth.realms]\nalice = [\"\"]\n").has_value());          // empty realm
+        CHECK_FALSE(load("[auth.realms]\nalice = [\"r1\"]\n[auth.roles]\nalice = { r2 = \"reader\" }\n").has_value());  // realm not allowed
+        CHECK_FALSE(load("[auth.realms]\nalice = [\"r1\"]\n[auth.roles]\nalice = { r1 = \"missing\" }\n").has_value());  // undefined role
     }
 }
