@@ -20,7 +20,7 @@ Outstanding work, as of 2026-11-05. Check items off as they land.
 - [x] Clean-disconnect "Operation canceled" read errors (client read loop, server read) are logged at debug; also stopped logging a cancelled event-channel receive (the loser of the read/event race) as an error.
 - [x] Integration tests: one `RouterFixture` owns the io_context/server and stops it thread-safely (no pointer into the server thread's stack, no startup sleeps); the test clients are purely blocking with real deadlines (`read_exact` + `poll`). Removed the async receive loop that raced the blocking reads for the same socket bytes (the actual source of the flakiness and of hangs when a reply never came).
 - [x] Removed the stale TODO at `include/wamp_session.hpp:35` (in-process use is already covered: tests drive `WampSession::process()` directly without sockets).
-- [x] Docker build re-verified (Clang 18 + libc++): builds cleanly and all 112 tests pass in the container.
+- [x] Docker build re-verified (Clang 18 + libc++): builds cleanly and all 128 tests pass in the container (re-verified after the realm work).
 - [x] `test_crypto_utils.cpp` is in the `CLAUDE.md` test list.
 
 ## Performance
