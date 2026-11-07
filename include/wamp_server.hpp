@@ -36,6 +36,11 @@ namespace wamp {
 using boost::asio::ip::tcp;
 namespace ssl = boost::asio::ssl;
 
+// True for ssl::stream<...>; false for a plain tcp::socket (which also has lowest_layer())
+template<typename SocketType>
+inline constexpr bool is_tls_socket =
+    requires(SocketType& s) { s.async_handshake(ssl::stream_base::server, boost::asio::use_awaitable); };
+
 // ============================================================================
 // Socket Helper Functions - Work with both plain TCP and TLS sockets
 // ============================================================================
@@ -54,12 +59,12 @@ inline auto get_remote_endpoint(SocketType& socket) {
 // Set socket options (works for both plain and SSL sockets)
 template<typename SocketType>
 inline void set_socket_options(SocketType& socket) {
-    if constexpr (requires { socket.lowest_layer(); }) {
-        // SSL socket
+    if constexpr (is_tls_socket<SocketType>) {
         socket.lowest_layer().set_option(tcp::no_delay(true));
     } else {
-        // Plain socket
+        // Non-blocking so a read after wait_read never waits (see read_some)
         socket.set_option(tcp::no_delay(true));
+        socket.non_blocking(true);
     }
 }
 
@@ -109,18 +114,66 @@ private:
 inline constexpr size_t kMaxBatchFrames = 64;
 inline constexpr size_t kMaxBatchBytes = 256 * 1024;
 
+// ----------------------------------------------------------------------------
+// Reading without a per-session buffer
+// ----------------------------------------------------------------------------
+// A session blocked in a read must not own a large buffer (8 KiB of the ~11 KiB each idle session
+// cost). Plain sockets wait for readability first and then read into one scratch buffer shared by every
+// session on the thread; the read completes synchronously and process() copies what it needs before
+// the next suspension, so the scratch is never held across one. TLS streams cannot do this (OpenSSL
+// may hold decrypted bytes the socket no longer signals), so they keep a small per-session buffer.
+inline constexpr size_t kSharedReadScratch = 64 * 1024;
+inline constexpr size_t kTlsReadBuffer = 4 * 1024;
+
+inline std::span<uint8_t> shared_read_scratch() {
+    static thread_local std::array<uint8_t, kSharedReadScratch> scratch;
+    return scratch;
+}
+
+// Per-session read state: unused for plain sockets, a small buffer for TLS
+template<typename SocketType>
+struct ReadState {
+    std::vector<uint8_t> tls_buffer;
+};
+
+struct ReadResult {
+    boost::system::error_code ec;
+    std::span<const uint8_t> data;  // valid until the next suspension point
+};
+
+template<typename SocketType>
+inline boost::asio::awaitable<ReadResult> read_some(SocketType& socket, ReadState<SocketType>& state) {
+    if constexpr (is_tls_socket<SocketType>) {
+        if (state.tls_buffer.empty()) state.tls_buffer.resize(kTlsReadBuffer);
+        auto [ec, n] = co_await socket.async_read_some(
+            boost::asio::buffer(state.tls_buffer), boost::asio::as_tuple(boost::asio::use_awaitable));
+        co_return ReadResult{ec, std::span<const uint8_t>{state.tls_buffer.data(), n}};
+    } else {
+        while (true) {
+            auto [ec_wait] = co_await socket.async_wait(
+                tcp::socket::wait_read, boost::asio::as_tuple(boost::asio::use_awaitable));
+            if (ec_wait) co_return ReadResult{ec_wait, {}};
+
+            auto scratch = shared_read_scratch();
+            boost::system::error_code ec;
+            const size_t n = socket.read_some(boost::asio::buffer(scratch.data(), scratch.size()), ec);
+            if (ec == boost::asio::error::would_block) continue;  // readiness was spurious
+            co_return ReadResult{ec, std::span<const uint8_t>{scratch.data(), n}};
+        }
+    }
+}
+
 // Handles one socket read result. `write_lock` is null before the session's writer exists.
 template<typename SocketType>
 inline boost::asio::awaitable<std::expected<bool, std::error_code>>
 handle_socket_read_completion(
     SocketType& socket,
-    const std::array<uint8_t, 8192>& buffer,
     WampSession& protocol,
     const std::string& remote_address,
-    boost::system::error_code ec_read,
-    std::size_t bytes_read,
+    const ReadResult& read,
     WriteLock* write_lock = nullptr
 ) {
+    const auto ec_read = read.ec;
     // Check for EOF (client disconnected gracefully)
     if (ec_read == boost::asio::error::eof) {
         spdlog::info("Client {} disconnected", remote_address);
@@ -140,9 +193,9 @@ handle_socket_read_completion(
         co_return std::unexpected{ec_read};
     }
 
-    spdlog::debug("Received {} bytes from {}", bytes_read, remote_address);
+    spdlog::debug("Received {} bytes from {}", read.data.size(), remote_address);
 
-    auto result = protocol.process(std::span<const uint8_t>(buffer.data(), bytes_read));
+    auto result = protocol.process(read.data);
 
     if (!result) {
         spdlog::error("Protocol error from {}: {}", remote_address, result.error().message());
@@ -185,16 +238,13 @@ handle_socket_read_completion(
 // Reads client messages until the connection ends
 template<typename SocketType>
 inline boost::asio::awaitable<std::expected<void, std::error_code>>
-session_reader(SocketType& socket, std::array<uint8_t, 8192>& buffer, WampSession& protocol,
+session_reader(SocketType& socket, ReadState<SocketType>& state, WampSession& protocol,
                const std::string& remote_address, WriteLock& write_lock) {
     while (true) {
-        auto [ec_read, bytes_read] = co_await socket.async_read_some(
-            boost::asio::buffer(buffer),
-            boost::asio::as_tuple(boost::asio::use_awaitable)
-        );
+        auto read = co_await read_some(socket, state);
 
         auto result = co_await handle_socket_read_completion(
-            socket, buffer, protocol, remote_address, ec_read, bytes_read, &write_lock
+            socket, protocol, remote_address, read, &write_lock
         );
         if (!result) {
             co_return std::unexpected{result.error()};
@@ -255,7 +305,7 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
 template<typename SocketType>
 inline boost::asio::awaitable<std::expected<void, std::error_code>>
 handle_wamp_session(SocketType socket, boost::asio::io_context& io, const ServerConfig& config) {
-    std::array<uint8_t, 8192> buffer{};
+    ReadState<SocketType> read_state;
 
     auto remote_endpoint = get_remote_endpoint(socket);
     std::string remote_address = remote_endpoint.address().to_string();
@@ -285,13 +335,10 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
     // Until the WAMP session is established nothing can be queued for the client, so a plain
     // read loop is enough
     while (!protocol.is_established()) {
-        auto [ec_read, bytes_read] = co_await socket.async_read_some(
-            boost::asio::buffer(buffer),
-            boost::asio::as_tuple(boost::asio::use_awaitable)
-        );
+        auto read = co_await read_some(socket, read_state);
 
         auto result = co_await handle_socket_read_completion(
-            socket, buffer, protocol, remote_address, ec_read, bytes_read
+            socket, protocol, remote_address, read
         );
         if (!result) {
             co_return std::unexpected{result.error()};
@@ -309,7 +356,7 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
     auto [order, reader_ex, reader_result, writer_ex, writer_result] =
         co_await boost::asio::experimental::make_parallel_group(
             boost::asio::co_spawn(executor,
-                session_reader(socket, buffer, protocol, remote_address, write_lock),
+                session_reader(socket, read_state, protocol, remote_address, write_lock),
                 boost::asio::deferred),
             boost::asio::co_spawn(executor,
                 session_writer(socket, *event_channel, remote_address, write_lock),

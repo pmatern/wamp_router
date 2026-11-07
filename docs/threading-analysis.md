@@ -138,7 +138,7 @@ messages are strictly request/response.
    event, and turns N back-to-back events into one syscall. Expected: syscalls per delivered event from about 2.5 to 1/batch +
    small; the kernel half of the PubSub cost drops by roughly a third to a half under load. It also removes the `parallel_group`
    machinery (about 11% of PubSub CPU).
-2. **Shrink the per-session buffer** (1-2 KiB, grow on demand): about 70% less memory per idle session.
+2. **(done)** **Shrink the per-session buffer.** Plain sockets wait for readability and then read into one 64 KiB scratch buffer shared by the thread's sessions (TLS keeps a 4 KiB per-session buffer): idle session RSS 11.0 KB -> 4.5 KB (-59%, macOS, 5,000 sessions), and the failed speculative `recv` per read is gone (RPC router CPU 2.44 s -> 2.20 s).
 3. **Replace nlohmann CBOR** with a purpose-built reader/writer for the WAMP message shapes (decode straight into `WampList`/
    `WampDict`, encode straight into the frame buffer; no `json` tree): CBOR is a third of RPC user time, and the README shows
    4.5-5 us to decode a 10-argument message.

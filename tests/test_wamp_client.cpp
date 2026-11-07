@@ -750,3 +750,49 @@ TEST_CASE("WampClient - Events and acknowledged responses share one socket witho
         }
     }
 }
+
+TEST_CASE("WampClient - Messages larger than the read scratch buffer arrive intact", "[wamp_client]") {
+    // Sessions read into a shared 64 KiB scratch buffer, so a 300 KB event needs several reads that
+    // are reassembled by the session; two subscribers also share that scratch between reads.
+    io_context io;
+    ServerConfig config;
+    uint16_t port = find_available_port();
+
+    WampServer server{io, port, config};
+    server.start();
+
+    WampClient sub_a{io};
+    WampClient sub_b{io};
+    WampClient pub{io};
+
+    const std::string big(300 * 1024, 'x');
+    std::vector<size_t> sizes;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await sub_a.connect("127.0.0.1", port, "test.realm");
+        co_await sub_b.connect("127.0.0.1", port, "test.realm");
+        co_await pub.connect("127.0.0.1", port, "test.realm");
+
+        for (auto* sub : {&sub_a, &sub_b}) {
+            co_await sub->subscribe("com.test.big", [&](const EventMessage& event) {
+                sizes.push_back(std::get<std::string>(event.arguments.at(0)).size());
+            });
+        }
+
+        (void)co_await pub.publish("com.test.big", WampList{big}, {}, /*acknowledge=*/true);
+
+        boost::asio::steady_timer timer{io};
+        timer.expires_after(std::chrono::milliseconds(300));
+        co_await timer.async_wait(use_awaitable);
+
+        co_await sub_a.disconnect();
+        co_await sub_b.disconnect();
+        co_await pub.disconnect();
+    }, detached);
+
+    io.run_for(std::chrono::seconds(5));
+
+    REQUIRE(sizes.size() == 2);
+    REQUIRE(sizes[0] == big.size());
+    REQUIRE(sizes[1] == big.size());
+}
