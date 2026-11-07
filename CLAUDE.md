@@ -329,9 +329,7 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 - **Templated function** - Works with both `tcp::socket` (tests) and `ssl::stream<tcp::socket>` (production)
 - Coroutine managing a single client connection's lifetime
 - For TLS sockets: Performs `async_handshake` before entering main loop
-- Uses `parallel_group` with `wait_for_one()` to concurrently wait on:
-  - Socket reads (client → router messages)
-  - Event channel receives (router → client events/invocations)
+- Before the WAMP session is established: a plain read loop. After: a reader coroutine (socket reads, direct responses) and a writer coroutine (drains the event channel, coalesces queued frames into one gathered write) run under a `parallel_group` with `wait_for_one()`; a `WriteLock` serializes their socket writes
 - Continues until EOF or error, then calls `protocol.on_disconnect()` for cleanup
 - Socket abstraction via template enables zero-overhead polymorphism
 

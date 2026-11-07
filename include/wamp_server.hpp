@@ -28,6 +28,7 @@
 #include <system_error>
 #include <span>
 #include <memory>
+#include <optional>
 #include <openssl/ssl.h>
 
 namespace wamp {
@@ -62,6 +63,53 @@ inline void set_socket_options(SocketType& socket) {
     }
 }
 
+// ============================================================================
+// Session I/O: a reader coroutine and a writer coroutine per established session
+// ============================================================================
+// The reader owns the socket's read side: it parses client messages and writes their direct responses.
+// The writer waits on the session's event channel and sends everything queued in one gathered write.
+// Both write to the same socket, so writes take a WriteLock (they would otherwise interleave frames).
+
+// Mutual exclusion for coroutines on one io_context thread. Uncontended lock/unlock never suspend.
+class WriteLock {
+public:
+    explicit WriteLock(boost::asio::io_context& io) : token_(io, 1) {
+        token_.try_send(boost::system::error_code{});
+    }
+
+    // False if the wait was cancelled (the session is closing)
+    boost::asio::awaitable<bool> lock() {
+        if (token_.try_receive([](boost::system::error_code) {})) {
+            co_return true;
+        }
+        auto [ec] = co_await token_.async_receive(boost::asio::as_tuple(boost::asio::use_awaitable));
+        co_return !ec;
+    }
+
+    void unlock() {
+        token_.try_send(boost::system::error_code{});
+    }
+
+    class Guard {
+    public:
+        explicit Guard(WriteLock& lock) : lock_(lock) {}
+        ~Guard() { lock_.unlock(); }
+        Guard(const Guard&) = delete;
+        Guard& operator=(const Guard&) = delete;
+    private:
+        WriteLock& lock_;
+    };
+
+private:
+    boost::asio::experimental::channel<void(boost::system::error_code)> token_;
+};
+
+// Upper bounds for one gathered write, so a flood for one subscriber cannot hold the socket (and the
+// write lock) for long
+inline constexpr size_t kMaxBatchFrames = 64;
+inline constexpr size_t kMaxBatchBytes = 256 * 1024;
+
+// Handles one socket read result. `write_lock` is null before the session's writer exists.
 template<typename SocketType>
 inline boost::asio::awaitable<std::expected<bool, std::error_code>>
 handle_socket_read_completion(
@@ -70,7 +118,8 @@ handle_socket_read_completion(
     WampSession& protocol,
     const std::string& remote_address,
     boost::system::error_code ec_read,
-    std::size_t bytes_read
+    std::size_t bytes_read,
+    WriteLock* write_lock = nullptr
 ) {
     // Check for EOF (client disconnected gracefully)
     if (ec_read == boost::asio::error::eof) {
@@ -108,6 +157,13 @@ handle_socket_read_completion(
     }
 
     if (!result->empty()) {
+        if (write_lock && !co_await write_lock->lock()) {
+            protocol.on_disconnect();
+            co_return std::unexpected{make_error_code(std::errc::operation_canceled)};
+        }
+        std::optional<WriteLock::Guard> guard;
+        if (write_lock) guard.emplace(*write_lock);
+
         auto [ec_write, bytes_written] = co_await boost::asio::async_write(
             socket,
             boost::asio::buffer(*result),
@@ -124,6 +180,76 @@ handle_socket_read_completion(
     }
 
     co_return true;  // Continue processing
+}
+
+// Reads client messages until the connection ends
+template<typename SocketType>
+inline boost::asio::awaitable<std::expected<void, std::error_code>>
+session_reader(SocketType& socket, std::array<uint8_t, 8192>& buffer, WampSession& protocol,
+               const std::string& remote_address, WriteLock& write_lock) {
+    while (true) {
+        auto [ec_read, bytes_read] = co_await socket.async_read_some(
+            boost::asio::buffer(buffer),
+            boost::asio::as_tuple(boost::asio::use_awaitable)
+        );
+
+        auto result = co_await handle_socket_read_completion(
+            socket, buffer, protocol, remote_address, ec_read, bytes_read, &write_lock
+        );
+        if (!result) {
+            co_return std::unexpected{result.error()};
+        }
+    }
+}
+
+// Sends queued events/invocations/results to the client, coalescing whatever is already waiting
+// into one gathered write
+template<typename SocketType>
+inline boost::asio::awaitable<std::expected<void, std::error_code>>
+session_writer(SocketType& socket, EventChannel& channel, const std::string& remote_address,
+               WriteLock& write_lock) {
+    std::vector<std::shared_ptr<const std::vector<uint8_t>>> frames;
+    std::vector<boost::asio::const_buffer> buffers;
+
+    while (true) {
+        auto [ec_channel, first] = co_await channel.async_receive(
+            boost::asio::as_tuple(boost::asio::use_awaitable));
+        if (ec_channel) {
+            // Closed on disconnect, or cancelled because the reader finished
+            co_return std::unexpected{ec_channel};
+        }
+
+        frames.clear();
+        buffers.clear();
+        size_t bytes = 0;
+        auto add = [&](boost::system::error_code ec, EventToSend event) {
+            if (!ec && event.event_data) {
+                bytes += event.event_data->size();
+                buffers.emplace_back(event.event_data->data(), event.event_data->size());
+                frames.push_back(std::move(event.event_data));
+            }
+        };
+        add(ec_channel, std::move(first));
+        while (frames.size() < kMaxBatchFrames && bytes < kMaxBatchBytes &&
+               channel.try_receive(add)) {
+        }
+
+        if (!co_await write_lock.lock()) {
+            co_return std::unexpected{make_error_code(std::errc::operation_canceled)};
+        }
+        WriteLock::Guard guard{write_lock};
+
+        auto [ec_write, bytes_written] = co_await boost::asio::async_write(
+            socket, buffers, boost::asio::as_tuple(boost::asio::use_awaitable));
+        if (ec_write) {
+            if (ec_write != boost::asio::error::operation_aborted) {
+                spdlog::error("Write error sending events to {}: {}", remote_address, ec_write.message());
+            }
+            co_return std::unexpected{ec_write};
+        }
+
+        spdlog::debug("Sent {} events ({} bytes) to {}", frames.size(), bytes_written, remote_address);
+    }
 }
 
 template<typename SocketType>
@@ -156,88 +282,49 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
     WampSession protocol{io, config};
     protocol.on_connect();
 
-    std::shared_ptr<EventChannel> event_channel;
+    // Until the WAMP session is established nothing can be queued for the client, so a plain
+    // read loop is enough
+    while (!protocol.is_established()) {
+        auto [ec_read, bytes_read] = co_await socket.async_read_some(
+            boost::asio::buffer(buffer),
+            boost::asio::as_tuple(boost::asio::use_awaitable)
+        );
 
-    while (true) {
-        // Get event channel once session is established
-        if (!event_channel && protocol.is_established()) {
-            event_channel = EventChannelRegistry::get_or_create(protocol.session_id(), io);
-            spdlog::debug("Event channel acquired for session {}", protocol.session_id());
-        }
-
-        if (event_channel) {
-            // Session established - wait concurrently on socket and event channel
-            auto [order, ec_read, bytes_read, ec_channel, event] = co_await boost::asio::experimental::make_parallel_group(
-                socket.async_read_some(
-                    boost::asio::buffer(buffer),
-                    boost::asio::deferred
-                ),
-                event_channel->async_receive(
-                    boost::asio::deferred
-                )
-            ).async_wait(
-                boost::asio::experimental::wait_for_one(),
-                boost::asio::use_awaitable
-            );
-
-            // wait_for_one cancels the loser, but the loser may already have completed; its result
-            // is still in the tuple and must not be dropped (that would lose an event or client bytes).
-            const bool read_done = order[0] == 0 || ec_read != boost::asio::error::operation_aborted;
-            // (a cancelled channel receive reports channel_cancelled rather than operation_aborted)
-            const bool event_done = order[0] == 1 ||
-                (ec_channel != boost::asio::error::operation_aborted &&
-                 ec_channel != boost::asio::experimental::error::channel_cancelled);
-
-            if (event_done) {
-                if (ec_channel) {
-                    spdlog::error("Event channel error: {}", ec_channel.message());
-                    // Don't disconnect on channel error, just continue
-                } else {
-                    spdlog::debug("Sending {} byte event to session {}",
-                        event.event_data->size(), event.target_session_id);
-
-                    auto [ec_write, bytes_written] = co_await boost::asio::async_write(
-                        socket,
-                        boost::asio::buffer(*event.event_data),
-                        boost::asio::as_tuple(boost::asio::use_awaitable)
-                    );
-
-                    if (ec_write) {
-                        spdlog::error("Write error sending event to {}: {}",
-                            remote_address, ec_write.message());
-                        protocol.on_disconnect();
-                        co_return std::unexpected{ec_write};
-                    }
-
-                    spdlog::debug("Sent event: {} bytes to {}",
-                        bytes_written, remote_address);
-                }
-            }
-
-            if (read_done) {
-                auto result = co_await handle_socket_read_completion(
-                    socket, buffer, protocol, remote_address, ec_read, bytes_read
-                );
-                if (!result) {
-                    co_return std::unexpected{result.error()};
-                }
-            }
-
-        } else {
-            // Session not yet established - only wait on socket
-            auto [ec_read, bytes_read] = co_await socket.async_read_some(
-                boost::asio::buffer(buffer),
-                boost::asio::as_tuple(boost::asio::use_awaitable)
-            );
-
-            auto result = co_await handle_socket_read_completion(
-                socket, buffer, protocol, remote_address, ec_read, bytes_read
-            );
-            if (!result) {
-                co_return std::unexpected{result.error()};
-            }
+        auto result = co_await handle_socket_read_completion(
+            socket, buffer, protocol, remote_address, ec_read, bytes_read
+        );
+        if (!result) {
+            co_return std::unexpected{result.error()};
         }
     }
+
+    // Established: one coroutine reads, another writes queued events; whichever ends first
+    // (disconnect, error) cancels the other
+    auto event_channel = EventChannelRegistry::get_or_create(protocol.session_id(), io);
+    spdlog::debug("Event channel acquired for session {}", protocol.session_id());
+
+    WriteLock write_lock{io};
+    auto executor = co_await boost::asio::this_coro::executor;
+
+    auto [order, reader_ex, reader_result, writer_ex, writer_result] =
+        co_await boost::asio::experimental::make_parallel_group(
+            boost::asio::co_spawn(executor,
+                session_reader(socket, buffer, protocol, remote_address, write_lock),
+                boost::asio::deferred),
+            boost::asio::co_spawn(executor,
+                session_writer(socket, *event_channel, remote_address, write_lock),
+                boost::asio::deferred)
+        ).async_wait(boost::asio::experimental::wait_for_one(), boost::asio::use_awaitable);
+
+    protocol.on_disconnect();
+
+    // Only the coroutine that finished first reports; the other was cancelled
+    if (auto ex = order[0] == 0 ? reader_ex : writer_ex) std::rethrow_exception(ex);
+    const auto& finished = order[0] == 0 ? reader_result : writer_result;
+    if (!finished) {
+        co_return std::unexpected{finished.error()};
+    }
+    co_return std::expected<void, std::error_code>{};
 }
 
 // Periodically fails pending calls whose callee has not answered in time.

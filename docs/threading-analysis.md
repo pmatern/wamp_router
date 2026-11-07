@@ -117,7 +117,23 @@ router cost, so the architecture is bound by per-session work, not by communicat
 
 ### Stage 0: single-thread fixes first (independent of threading)
 
-1. **Split each session into a reader coroutine and a writer coroutine.** The writer waits on the queue, drains everything that is
+**Status: 0.1 is done** (`handle_wamp_session` in `include/wamp_server.hpp`). Measured effect, same harness as the profile:
+
+| | before | after |
+|---|---|---|
+| PubSub, 10 subscribers, unpaced: delivery rate | 46k events/s | 84k events/s |
+| same: router CPU (user + sys) | 2.23 s | 1.66 s (-26%) |
+| same: p50 latency | 1.3 s (queues backed up) | 0.25 ms |
+| PubSub, 100 subscribers, paced: router CPU | 8.1 s | 6.9 s (-15%) |
+| RPC, 10 callers: calls/s, router CPU | 16.7k, 2.45 s | 17.8k, 2.44 s (unchanged) |
+| syscalls per delivered event (Linux, `strace -c`) | about 2.5 | about 0.35 (sends carry 4-5 frames each) |
+| syscalls per RPC call | 7.0 (2.0 sendto, 3.0 recvfrom, 2.0 epoll_wait) | 4.6 (1.3 sendmsg, 2.6 recvfrom, 0.7 epoll_wait) |
+
+The gain shows up where events queue up behind each other (fan-out, bursts). A paced publisher with one event per subscriber per
+millisecond has nothing to coalesce, so those workloads gain only the removed read cancel/re-arm. RPC is unchanged because its
+messages are strictly request/response.
+
+1. **(done)** **Split each session into a reader coroutine and a writer coroutine.** The writer waits on the queue, drains everything that is
    ready and writes it with one gathered `async_write` (`writev`). This removes the read cancel/re-arm, the EAGAIN `recv` per
    event, and turns N back-to-back events into one syscall. Expected: syscalls per delivered event from about 2.5 to 1/batch +
    small; the kernel half of the PubSub cost drops by roughly a third to a half under load. It also removes the `parallel_group`

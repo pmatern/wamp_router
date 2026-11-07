@@ -380,7 +380,7 @@ Baseline (Release, same machine as above, embedded router, 10 positional argumen
 | PubSub, 10 subscribers, unpaced (`--rate 0`), backpressure | 0 lost; publisher throttled to ~19k msg/s |
 | PubSub, 10 subscribers, unpaced, `--overflow drop` | 98% lost |
 
-RPC rows above were measured before the event-queue work; a rerun gives about 18k calls/s with 10 callers (p50 0.55 ms, p99 0.8–1.1 ms).
+The session reader/writer split later raised unpaced 10-subscriber fan-out from 46k to 84k events/s (see [docs/threading-analysis.md](docs/threading-analysis.md)). RPC rows above were measured before the event-queue work; a rerun gives about 18k calls/s with 10 callers (p50 0.55 ms, p99 0.8–1.1 ms).
 
 ### Profiling and threading analysis
 

@@ -694,3 +694,59 @@ TEST_CASE("WampClient - Call to an unresponsive callee times out", "[wamp_client
     io.run_for(std::chrono::seconds(3));
     REQUIRE(error_uri == "wamp.error.timeout");
 }
+
+TEST_CASE("WampClient - Events and acknowledged responses share one socket without corruption", "[wamp_client]") {
+    // One session both receives events (written by the router's writer coroutine) and gets PUBLISHED
+    // replies (written by its reader coroutine); the two write paths must never interleave frames.
+    io_context io;
+    ServerConfig config;
+    config.events.size = 1000;
+    uint16_t port = find_available_port();
+
+    WampServer server{io, port, config};
+    server.start();
+
+    WampClient self{io};
+    WampClient other{io};
+    constexpr int kEvents = 300;
+
+    std::vector<int64_t> self_seen;
+    std::vector<int64_t> other_seen;
+    int acknowledged = 0;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await self.connect("127.0.0.1", port, "test.realm");
+        co_await other.connect("127.0.0.1", port, "test.realm");
+
+        co_await self.subscribe("com.test.mixed", [&](const EventMessage& event) {
+            self_seen.push_back(std::get<int64_t>(event.arguments.at(0)));
+        });
+        co_await other.subscribe("com.test.mixed", [&](const EventMessage& event) {
+            other_seen.push_back(std::get<int64_t>(event.arguments.at(0)));
+        });
+
+        // exclude_me=false: the publisher also receives its own events while waiting for PUBLISHED
+        for (int i = 0; i < kEvents; ++i) {
+            (void)co_await self.publish("com.test.mixed", WampList{int64_t{i}}, {}, /*acknowledge=*/true,
+                                        /*exclude_me=*/false);
+            ++acknowledged;
+        }
+
+        boost::asio::steady_timer timer{io};
+        timer.expires_after(std::chrono::milliseconds(300));
+        co_await timer.async_wait(use_awaitable);
+
+        co_await self.disconnect();
+        co_await other.disconnect();
+    }, detached);
+
+    io.run_for(std::chrono::seconds(10));
+
+    REQUIRE(acknowledged == kEvents);
+    for (const auto* seen : {&self_seen, &other_seen}) {
+        REQUIRE(seen->size() == static_cast<size_t>(kEvents));
+        for (int i = 0; i < kEvents; ++i) {
+            REQUIRE((*seen)[static_cast<size_t>(i)] == i);  // in publish order
+        }
+    }
+}
