@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(fmt CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
-find_package(nlohmann_json CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)  # tests only: the independent CBOR oracle
 find_package(Catch2 3 CONFIG REQUIRED)
 find_package(toml11 CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
@@ -26,7 +26,6 @@ target_link_libraries(wamp_router PRIVATE
     Boost::boost  # Header-only Boost.Asio
     fmt::fmt
     spdlog::spdlog
-    nlohmann_json::nlohmann_json
     toml11::toml11
     OpenSSL::SSL
     OpenSSL::Crypto
@@ -105,7 +104,6 @@ target_link_libraries(wamp_bench PRIVATE
     Boost::boost
     fmt::fmt
     spdlog::spdlog
-    nlohmann_json::nlohmann_json
     Catch2::Catch2WithMain
     toml11::toml11
     OpenSSL::SSL
@@ -125,7 +123,6 @@ target_link_libraries(wamp_load PRIVATE
     Boost::boost
     fmt::fmt
     spdlog::spdlog
-    nlohmann_json::nlohmann_json
     toml11::toml11
     OpenSSL::SSL
     OpenSSL::Crypto
@@ -145,7 +142,6 @@ target_link_libraries(wamp_profile_router PRIVATE
     Boost::boost
     fmt::fmt
     spdlog::spdlog
-    nlohmann_json::nlohmann_json
     toml11::toml11
     OpenSSL::SSL
     OpenSSL::Crypto

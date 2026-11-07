@@ -18,8 +18,9 @@
 #include "wamp_messages.hpp"
 #include "raw_socket.hpp"
 #include "cbor.hpp"
-#include <nlohmann/json.hpp>
 #include <algorithm>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <vector>
 #include <cstdint>
@@ -80,103 +81,11 @@ struct std::is_error_code_enum<wamp::SerializationError> : std::true_type {};
 
 namespace wamp {
 
-using json = nlohmann::json;
-
 // ============================================================================
-// Variant-JSON Conversion Helpers
+// Direct CBOR codec
 // ============================================================================
-
-// Convert WampList element variant to JSON
-inline json variant_to_json(const std::variant<std::string, int64_t, bool>& v) {
-    return std::visit([](const auto& val) -> json { return val; }, v);
-}
-
-// Convert WampDict element variant to JSON (includes nested dict support)
-inline json variant_to_json(const WampDict::mapped_type& v) {
-    return std::visit(
-        []<typename T0>(const T0& val) -> json {
-            using T = std::decay_t<T0>;
-            if constexpr (std::is_same_v<T, std::unordered_map<std::string, std::string>>) {
-                return json(val);
-            } else {
-                return val;
-            }
-        },
-        v);
-}
-
-// Convert JSON to WampList element variant
-inline std::optional<std::variant<std::string, int64_t, bool>> json_to_list_variant(const json& j) {
-    if (j.is_string()) {
-        return j.get<std::string>();
-    } else if (j.is_boolean()) {
-        return j.get<bool>();
-    } else if (j.is_number()) {
-        return j.get<int64_t>();
-    }
-    return std::nullopt;
-}
-
-// Convert JSON to WampDict element variant
-inline std::optional<WampDict::mapped_type> json_to_dict_variant(const json& j) {
-    if (j.is_string()) {
-        return j.get<std::string>();
-    } else if (j.is_boolean()) {
-        return j.get<bool>();
-    } else if (j.is_number()) {
-        return j.get<int64_t>();
-    } else if (j.is_object()) {
-        std::unordered_map<std::string, std::string> nested;
-        for (const auto& [k, v] : j.items()) {
-            if (v.is_string()) {
-                nested[k] = v.get<std::string>();
-            }
-        }
-        return nested;
-    }
-    return std::nullopt;
-}
-
-// ============================================================================
-// Deserialization Helper
-// ============================================================================
-
-// Helper template to reduce boilerplate in deserialize_* functions.
-// Handles CBOR decoding, array validation, message type checking, and error handling.
-// The extractor lambda receives the parsed JSON array and returns the message struct.
-template<typename T, typename Extractor>
-std::expected<T, std::error_code>
-deserialize_message(const std::vector<uint8_t>& cbor_data,
-                    size_t min_size,
-                    MessageType expected_type,
-                    std::string_view msg_name,
-                    Extractor&& extract) {
-    try {
-        json j = json::from_cbor(cbor_data);
-
-        if (!j.is_array() || j.size() < min_size) {
-            return std::unexpected(make_error_code(SerializationError::MALFORMED_MESSAGE));
-        }
-
-        int type = j[0].get<int>();
-        if (type != static_cast<int>(expected_type)) {
-            return std::unexpected(make_error_code(SerializationError::INVALID_MESSAGE_TYPE));
-        }
-
-        return extract(j);
-    } catch (const json::exception& e) {
-        spdlog::error("Failed to deserialize {}: {}", msg_name, e.what());
-        return std::unexpected{make_error_code(SerializationError::CBOR_DECODE_ERROR)};
-    }
-}
-
-
-// ============================================================================
-// Direct CBOR codec for the hot-path messages
-// ============================================================================
-// Everything between a socket and a handler (SUBSCRIBE ... INTERRUPT) is read into and written from the WAMP
-// structs by cbor::Reader / cbor::Writer, with no nlohmann::json tree. HELLO, WELCOME, GOODBYE, ABORT,
-// CHALLENGE and AUTHENTICATE (once per session) still use the JSON-based code below.
+// Every message is read into and written from the WAMP structs by cbor::Reader / cbor::Writer, with no
+// intermediate tree.
 
 namespace fast {
 
@@ -226,6 +135,36 @@ inline void write_dict(cbor::Writer& w, const WampDict& dict) {
     for (const auto* entry : entries) {
         w.write_text(entry->first);
         write_dict_value(w, entry->second);
+    }
+}
+
+// Details "roles": {name: {}} with names in sorted order
+inline void write_roles(cbor::Writer& w, const std::vector<Role>& roles) {
+    w.write_text("roles");
+    std::set<std::string> names;
+    for (const auto& role : roles) names.insert(role.name);
+    w.write_map(names.size());
+    for (const auto& name : names) {
+        w.write_text(name);
+        w.write_empty_map();  // features
+    }
+}
+
+inline std::vector<Role> read_roles(cbor::Reader& r) {
+    std::vector<Role> roles;
+    auto c = r.read_map();
+    while (r.next(c)) {
+        roles.push_back(Role{r.read_text(), {}});
+        r.skip();  // features
+    }
+    return roles;
+}
+
+inline void write_string_map(cbor::Writer& w, const std::map<std::string, std::string>& map) {
+    w.write_map(map.size());
+    for (const auto& [key, value] : map) {  // std::map is already key-ordered
+        w.write_text(key);
+        w.write_text(value);
     }
 }
 
@@ -322,6 +261,32 @@ public:
         }
     }
 
+    // A required map element of text values (other values are dropped)
+    std::map<std::string, std::string> string_map() {
+        std::map<std::string, std::string> result;
+        map([&result](const std::string& key, cbor::Reader& r) {
+            if (r.peek_major() == cbor::Major::TEXT) result[key] = r.read_text();
+            else r.skip();
+        });
+        return result;
+    }
+
+    // A required map element: calls fn(key, reader) for each entry, fn must consume the value.
+    // A non-map element is skipped.
+    template<typename Fn>
+    void map(Fn&& fn) {
+        require();
+        if (r_.peek_major() != cbor::Major::MAP) {
+            r_.skip();
+            return;
+        }
+        auto c = r_.read_map();
+        while (r_.next(c)) {
+            std::string key = r_.read_text();
+            fn(key, r_);
+        }
+    }
+
     cbor::Reader& reader() { return r_; }
 
 private:
@@ -377,225 +342,92 @@ inline cbor::Writer begin(std::vector<uint8_t>& out, MessageType type, uint64_t 
 // CBOR Serialization Functions
 // ============================================================================
 
-inline json serialize_list(const WampList& list) {
-    auto arr = json::array();
-    for (const auto& item : list) {
-        arr.push_back(variant_to_json(item));
-    }
-    return arr;
-}
-
-inline json serialize_dict(const WampDict& dict) {
-    auto obj = json::object();
-    for (const auto& [key, value] : dict) {
-        obj[key] = variant_to_json(value);
-    }
-    return obj;
-}
-
-inline WampList deserialize_list(const json::array_t& j) {
-    WampList list;
-    for (const auto& item : j) {
-        if (auto val = json_to_list_variant(item)) {
-            list.push_back(*val);
-        }
-    }
-    return list;
-}
-
-inline WampDict deserialize_dict(const json::object_t& j) {
-    WampDict dict;
-    for (const auto& [key, value] : j) {
-        if (auto val = json_to_dict_variant(value)) {
-            dict[key] = *val;
-        }
-    }
-    return dict;
-}
-
-// Append optional Arguments|list / ArgumentsKw|dict to a message array.
-// Per spec, ArgumentsKw requires an Arguments list (possibly empty) before it.
-inline void append_payload(json& j, const WampList& args, const WampDict& args_kw) {
-    if (args.empty() && args_kw.empty()) {
-        return;
-    }
-    j.push_back(serialize_list(args));
-    if (!args_kw.empty()) {
-        j.push_back(serialize_dict(args_kw));
-    }
-}
-
-// Read optional Arguments|list / ArgumentsKw|dict starting at index `pos`.
-inline void extract_payload(const json& j, size_t pos, WampList& args, WampDict& args_kw) {
-    if (j.size() > pos && j[pos].is_array()) {
-        args = deserialize_list(j[pos]);
-    }
-    if (j.size() > pos + 1 && j[pos + 1].is_object()) {
-        args_kw = deserialize_dict(j[pos + 1]);
-    }
-}
-
-// Read a Details/Options dict at index `pos` (empty if absent or not an object).
-inline WampDict extract_dict(const json& j, size_t pos) {
-    if (j.size() > pos && j[pos].is_object()) {
-        return deserialize_dict(j[pos]);
-    }
-    return {};
-}
-
 // Serialize HELLO message to CBOR
 // Format: [1, realm, details]
 inline std::vector<uint8_t> serialize_hello(const HelloMessage& msg) {
-    json j = json::array();
+    std::vector<uint8_t> out;
+    auto w = fast::begin(out, MessageType::HELLO, 3);
+    w.write_text(msg.realm);
 
-    // Message type
-    j.push_back(static_cast<int>(MessageType::HELLO));
-
-    // Realm (string)
-    j.push_back(msg.realm);
-
-    // Details (dictionary)
-    json details = json::object();
-
-    // Add roles
-    json roles = json::object();
-    for (const auto& role : msg.roles) {
-        roles[role.name] = json::object();  // Empty features for now
+    // Details, keys in order: authid, authmethods, roles
+    const bool has_methods = msg.authmethods.has_value() && !msg.authmethods->empty();
+    w.write_map(1 + (msg.authid ? 1 : 0) + (has_methods ? 1 : 0));
+    if (msg.authid) {
+        w.write_text("authid");
+        w.write_text(*msg.authid);
     }
-    details["roles"] = roles;
-
-    // Add optional authmethods
-    if (msg.authmethods.has_value() && !msg.authmethods->empty()) {
-        json authmethods_array = json::array();
-        for (const auto& method : *msg.authmethods) {
-            authmethods_array.push_back(method);
-        }
-        details["authmethods"] = authmethods_array;
+    if (has_methods) {
+        w.write_text("authmethods");
+        w.write_array(msg.authmethods->size());
+        for (const auto& method : *msg.authmethods) w.write_text(method);
     }
-
-    // Add optional authid
-    if (msg.authid.has_value()) {
-        details["authid"] = *msg.authid;
-    }
-
-    j.push_back(details);
-
-    return json::to_cbor(j);
+    fast::write_roles(w, msg.roles);
+    return out;
 }
 
 // Serialize WELCOME message to CBOR
 // Format: [2, session_id, details]
 inline std::vector<uint8_t> serialize_welcome(const WelcomeMessage& msg) {
-    json j = json::array();
+    std::vector<uint8_t> out;
+    auto w = fast::begin(out, MessageType::WELCOME, 3);
+    w.write_uint(msg.session_id);
 
-    // Message type
-    j.push_back(static_cast<int>(MessageType::WELCOME));
-
-    // Session ID (integer)
-    j.push_back(msg.session_id);
-
-    // Details (dictionary)
-    json details = json::object();
-
-    // Add roles
-    json roles = json::object();
-    for (const auto& role : msg.roles) {
-        roles[role.name] = json::object();  // Empty features for now
+    // Details, keys in order: authid, authmethod, authrole, roles
+    w.write_map(1 + (msg.authid ? 1 : 0) + (msg.authmethod ? 1 : 0) + (msg.authrole ? 1 : 0));
+    if (msg.authid) {
+        w.write_text("authid");
+        w.write_text(*msg.authid);
     }
-    details["roles"] = roles;
-
-    // Add optional fields
-    if (msg.authid.has_value()) {
-        details["authid"] = *msg.authid;
+    if (msg.authmethod) {
+        w.write_text("authmethod");
+        w.write_text(*msg.authmethod);
     }
-    if (msg.authrole.has_value()) {
-        details["authrole"] = *msg.authrole;
+    if (msg.authrole) {
+        w.write_text("authrole");
+        w.write_text(*msg.authrole);
     }
-    if (msg.authmethod.has_value()) {
-        details["authmethod"] = *msg.authmethod;
-    }
-
-    j.push_back(details);
-
-    return json::to_cbor(j);
+    fast::write_roles(w, msg.roles);
+    return out;
 }
 
 // Serialize GOODBYE message to CBOR
 // Format: [6, details, reason]
 inline std::vector<uint8_t> serialize_goodbye(const GoodbyeMessage& msg) {
-    json j = json::array();
-
-    // Message type
-    j.push_back(static_cast<int>(MessageType::GOODBYE));
-
-    // Details (empty object for now)
-    j.push_back(json::object());
-
-    // Reason (URI string)
-    j.push_back(msg.reason);
-
-    return json::to_cbor(j);
+    std::vector<uint8_t> out;
+    auto w = fast::begin(out, MessageType::GOODBYE, 3);
+    w.write_empty_map();  // details
+    w.write_text(msg.reason);
+    return out;
 }
 
 // Serialize ABORT message to CBOR
 // Format: [3, details, reason]
 inline std::vector<uint8_t> serialize_abort(const AbortMessage& msg) {
-    json j = json::array();
-
-    // Message type
-    j.push_back(static_cast<int>(MessageType::ABORT));
-
-    // Details (can contain message field)
-    json details = json::object();
-    // Note: WampDict conversion simplified here
-    j.push_back(details);
-
-    // Reason (URI string)
-    j.push_back(msg.reason);
-
-    return json::to_cbor(j);
+    std::vector<uint8_t> out;
+    auto w = fast::begin(out, MessageType::ABORT, 3);
+    w.write_empty_map();  // details
+    w.write_text(msg.reason);
+    return out;
 }
 
 // Serialize CHALLENGE message to CBOR
 // Format: [4, authmethod, extra]
 inline std::vector<uint8_t> serialize_challenge(const ChallengeMessage& msg) {
-    json j = json::array();
-
-    // Message type
-    j.push_back(static_cast<int>(MessageType::CHALLENGE));
-
-    // AuthMethod (string)
-    j.push_back(msg.authmethod);
-
-    // Extra (dictionary)
-    json extra = json::object();
-    for (const auto& [key, value] : msg.extra) {
-        extra[key] = value;
-    }
-    j.push_back(extra);
-
-    return json::to_cbor(j);
+    std::vector<uint8_t> out;
+    auto w = fast::begin(out, MessageType::CHALLENGE, 3);
+    w.write_text(msg.authmethod);
+    fast::write_string_map(w, msg.extra);
+    return out;
 }
 
 // Serialize AUTHENTICATE message to CBOR
 // Format: [5, signature, extra]
 inline std::vector<uint8_t> serialize_authenticate(const AuthenticateMessage& msg) {
-    json j = json::array();
-
-    // Message type
-    j.push_back(static_cast<int>(MessageType::AUTHENTICATE));
-
-    // Signature (string)
-    j.push_back(msg.signature);
-
-    // Extra (dictionary)
-    json extra = json::object();
-    for (const auto& [key, value] : msg.extra) {
-        extra[key] = value;
-    }
-    j.push_back(extra);
-
-    return json::to_cbor(j);
+    std::vector<uint8_t> out;
+    auto w = fast::begin(out, MessageType::AUTHENTICATE, 3);
+    w.write_text(msg.signature);
+    fast::write_string_map(w, msg.extra);
+    return out;
 }
 
 // ============================================================================
@@ -625,129 +457,91 @@ get_message_type_from_cbor(const std::vector<uint8_t>& cbor_data) {
 // Format: [1, realm, details]
 inline std::expected<HelloMessage, std::error_code>
 deserialize_hello(const std::vector<uint8_t>& cbor_data) {
-    return deserialize_message<HelloMessage>(
-        cbor_data, 3, MessageType::HELLO, "HELLO",
-        [](const json& j) {
-            HelloMessage msg{j[1].get<std::string>()};
-
-            if (j[2].is_object()) {
-                const auto& details = j[2];
-
-                if (details.contains("roles") && details["roles"].is_object()) {
-                    for (const auto& [role_name, features] : details["roles"].items()) {
-                        msg.roles.push_back(Role{role_name, {}});
-                    }
+    return fast::decode<HelloMessage>(cbor_data, MessageType::HELLO, 3, "HELLO", [](fast::Fields& f) {
+        HelloMessage msg{f.text()};
+        f.map([&msg](const std::string& key, cbor::Reader& r) {
+            if (key == "roles" && r.peek_major() == cbor::Major::MAP) {
+                msg.roles = fast::read_roles(r);
+            } else if (key == "authmethods" && r.peek_major() == cbor::Major::ARRAY) {
+                std::vector<std::string> methods;
+                auto c = r.read_array();
+                while (r.next(c)) {
+                    if (r.peek_major() == cbor::Major::TEXT) methods.push_back(r.read_text());
+                    else r.skip();
                 }
-
-                if (details.contains("authmethods") && details["authmethods"].is_array()) {
-                    std::vector<std::string> methods;
-                    for (const auto& method : details["authmethods"]) {
-                        if (method.is_string()) {
-                            methods.push_back(method.get<std::string>());
-                        }
-                    }
-                    if (!methods.empty()) {
-                        msg.authmethods = methods;
-                    }
-                }
-
-                if (details.contains("authid") && details["authid"].is_string()) {
-                    msg.authid = details["authid"].get<std::string>();
-                }
+                if (!methods.empty()) msg.authmethods = std::move(methods);
+            } else if (key == "authid" && r.peek_major() == cbor::Major::TEXT) {
+                msg.authid = r.read_text();
+            } else {
+                r.skip();
             }
-
-            return msg;
         });
+        return msg;
+    });
 }
 
 // Deserialize WELCOME message from CBOR
 // Format: [2, session_id, details]
 inline std::expected<WelcomeMessage, std::error_code>
 deserialize_welcome(const std::vector<uint8_t>& cbor_data) {
-    return deserialize_message<WelcomeMessage>(
-        cbor_data, 3, MessageType::WELCOME, "WELCOME",
-        [](const json& j) {
-            WelcomeMessage msg{j[1].get<uint64_t>(), ""};
-
-            if (j[2].is_object()) {
-                const auto& details = j[2];
-
-                if (details.contains("roles") && details["roles"].is_object()) {
-                    for (const auto& [role_name, features] : details["roles"].items()) {
-                        msg.roles.push_back(Role{role_name, {}});
-                    }
-                }
-
-                if (details.contains("authid") && details["authid"].is_string()) {
-                    msg.authid = details["authid"].get<std::string>();
-                }
-                if (details.contains("authrole") && details["authrole"].is_string()) {
-                    msg.authrole = details["authrole"].get<std::string>();
-                }
-                if (details.contains("authmethod") && details["authmethod"].is_string()) {
-                    msg.authmethod = details["authmethod"].get<std::string>();
-                }
+    return fast::decode<WelcomeMessage>(cbor_data, MessageType::WELCOME, 3, "WELCOME", [](fast::Fields& f) {
+        WelcomeMessage msg{f.uint64(), ""};
+        f.map([&msg](const std::string& key, cbor::Reader& r) {
+            const bool is_text = r.peek_major() == cbor::Major::TEXT;
+            if (key == "roles" && r.peek_major() == cbor::Major::MAP) {
+                msg.roles = fast::read_roles(r);
+            } else if (key == "authid" && is_text) {
+                msg.authid = r.read_text();
+            } else if (key == "authrole" && is_text) {
+                msg.authrole = r.read_text();
+            } else if (key == "authmethod" && is_text) {
+                msg.authmethod = r.read_text();
+            } else {
+                r.skip();
             }
-
-            return msg;
         });
+        return msg;
+    });
 }
 
 // Deserialize GOODBYE message from CBOR
 // Format: [6, details, reason]
 inline std::expected<GoodbyeMessage, std::error_code>
 deserialize_goodbye(const std::vector<uint8_t>& cbor_data) {
-    return deserialize_message<GoodbyeMessage>(
-        cbor_data, 3, MessageType::GOODBYE, "GOODBYE",
-        [](const json& j) {
-            return GoodbyeMessage{WampDict{}, j[2].get<std::string>()};
-        });
+    return fast::decode<GoodbyeMessage>(cbor_data, MessageType::GOODBYE, 3, "GOODBYE", [](fast::Fields& f) {
+        f.skip();  // details
+        return GoodbyeMessage{WampDict{}, f.text()};
+    });
 }
 
 // Deserialize ABORT message from CBOR
 // Format: [3, details, reason]
 inline std::expected<AbortMessage, std::error_code>
 deserialize_abort(const std::vector<uint8_t>& cbor_data) {
-    return deserialize_message<AbortMessage>(
-        cbor_data, 3, MessageType::ABORT, "ABORT",
-        [](const json& j) {
-            return AbortMessage{WampDict{}, j[2].get<std::string>()};
-        });
-}
-
-// Helper to extract string map from JSON object
-inline std::map<std::string, std::string> extract_string_map(const json& obj) {
-    std::map<std::string, std::string> result;
-    if (obj.is_object()) {
-        for (auto it = obj.begin(); it != obj.end(); ++it) {
-            if (it.value().is_string()) {
-                result[it.key()] = it.value().get<std::string>();
-            }
-        }
-    }
-    return result;
+    return fast::decode<AbortMessage>(cbor_data, MessageType::ABORT, 3, "ABORT", [](fast::Fields& f) {
+        f.skip();  // details
+        return AbortMessage{WampDict{}, f.text()};
+    });
 }
 
 // Deserialize CHALLENGE message from CBOR
 // Format: [4, authmethod, extra]
 inline std::expected<ChallengeMessage, std::error_code>
 deserialize_challenge(const std::vector<uint8_t>& cbor_data) {
-    return deserialize_message<ChallengeMessage>(
-        cbor_data, 3, MessageType::CHALLENGE, "CHALLENGE",
-        [](const json& j) {
-            return ChallengeMessage{j[1].get<std::string>(), extract_string_map(j[2])};
-        });
+    return fast::decode<ChallengeMessage>(cbor_data, MessageType::CHALLENGE, 3, "CHALLENGE", [](fast::Fields& f) {
+        auto authmethod = f.text();
+        return ChallengeMessage{std::move(authmethod), f.string_map()};
+    });
 }
 
 // Deserialize AUTHENTICATE message from CBOR
 // Format: [5, signature, extra]
 inline std::expected<AuthenticateMessage, std::error_code>
 deserialize_authenticate(const std::vector<uint8_t>& cbor_data) {
-    return deserialize_message<AuthenticateMessage>(
-        cbor_data, 3, MessageType::AUTHENTICATE, "AUTHENTICATE",
-        [](const json& j) {
-            return AuthenticateMessage{j[1].get<std::string>(), extract_string_map(j[2])};
-        });
+    return fast::decode<AuthenticateMessage>(cbor_data, MessageType::AUTHENTICATE, 3, "AUTHENTICATE", [](fast::Fields& f) {
+        auto signature = f.text();
+        return AuthenticateMessage{std::move(signature), f.string_map()};
+    });
 }
 
 // Serialize SUBSCRIBE message to CBOR

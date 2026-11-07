@@ -370,32 +370,20 @@ public:
         spdlog::debug("Unregistered: registration_id={}", registration_id);
     }
 
-    // Call a procedure; returns the unwrapped result (see call_result for the full RESULT).
-    // Throws WampException if the router or callee answers with an ERROR.
-    awaitable<nlohmann::json> call(std::string procedure) {
+    // Call a procedure; returns the positional result arguments (empty if the callee returned none; use
+    // call_result for keyword results and details). Throws WampException if the router or callee answers
+    // with an ERROR.
+    awaitable<WampList> call(std::string procedure) {
         co_return co_await call(std::move(procedure), WampList{}, WampDict{});
     }
 
     // `timeout` (if non-zero) is sent as the CALL `timeout` option; the router fails the call with
     // wamp.error.timeout (thrown as WampException) if the callee has not answered in time.
-    awaitable<nlohmann::json> call(std::string procedure, WampList args, WampDict args_kw = {},
-                                   std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
-        const auto result = co_await call_result(std::move(procedure), std::move(args),
-                                                 std::move(args_kw), timeout);
-
-        // Extract result: prefer keyword arguments, then positional arguments
-        if (!result.arguments_kw.empty()) {
-            co_return serialize_dict(result.arguments_kw);
-        } else if (!result.arguments.empty()) {
-            // If single positional argument, unwrap it; otherwise return array
-            if (result.arguments.size() == 1) {
-                co_return variant_to_json(result.arguments[0]);
-            } else {
-                co_return serialize_list(result.arguments);
-            }
-        } else {
-            co_return nlohmann::json{};
-        }
+    awaitable<WampList> call(std::string procedure, WampList args, WampDict args_kw = {},
+                             std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
+        auto result = co_await call_result(std::move(procedure), std::move(args),
+                                           std::move(args_kw), timeout);
+        co_return std::move(result.arguments);
     }
 
     // Call a procedure and return the complete RESULT message (arguments and keyword arguments).

@@ -14,6 +14,7 @@
 
 
 #include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
 #include <boost/asio/io_context.hpp>
 #include "include/pubsub_handler.hpp"
 #include "include/procedure_handler.hpp"

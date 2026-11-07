@@ -16,6 +16,7 @@
 // against nlohmann::json, which produced and consumed every message before it existed.
 
 #include <catch2/catch_test_macros.hpp>
+#include <nlohmann/json.hpp>
 #include <cstdint>
 #include <random>
 #include "include/cbor.hpp"
@@ -204,6 +205,96 @@ TEST_CASE("Hot-path serializers produce the bytes nlohmann produced", "[cbor][se
     }
 }
 
+TEST_CASE("Session handshake messages produce the bytes nlohmann produced", "[cbor][serializer]") {
+    SECTION("HELLO") {
+        HelloMessage hello = HelloMessage::create_client("realm1");
+        hello.authid = "alice";
+        hello.authmethods = std::vector<std::string>{"cryptosign", "ticket"};
+        REQUIRE(serialize_hello(hello) ==
+                reference(json::array({1, "realm1",
+                                       json::object({{"authid", "alice"},
+                                                     {"authmethods", json::array({"cryptosign", "ticket"})},
+                                                     {"roles", json::object({{"caller", json::object()},
+                                                                             {"callee", json::object()},
+                                                                             {"publisher", json::object()},
+                                                                             {"subscriber", json::object()}})}})})));
+        // minimal HELLO: no authid / authmethods, no roles
+        REQUIRE(serialize_hello(HelloMessage{"r"}) ==
+                reference(json::array({1, "r", json::object({{"roles", json::object()}})})));
+    }
+
+    SECTION("WELCOME") {
+        auto welcome = WelcomeMessage::create_router(4242, "realm1");
+        welcome.authid = "alice";
+        welcome.authrole = "user";
+        welcome.authmethod = "cryptosign";
+        REQUIRE(serialize_welcome(welcome) ==
+                reference(json::array({2, 4242,
+                                       json::object({{"authid", "alice"}, {"authrole", "user"},
+                                                     {"authmethod", "cryptosign"},
+                                                     {"roles", json::object({{"broker", json::object()},
+                                                                             {"dealer", json::object()}})}})})));
+    }
+
+    SECTION("GOODBYE / ABORT / CHALLENGE / AUTHENTICATE") {
+        REQUIRE(serialize_goodbye(GoodbyeMessage{{}, "wamp.close.normal"}) ==
+                reference(json::array({6, json::object(), "wamp.close.normal"})));
+        REQUIRE(serialize_abort(AbortMessage{{}, "wamp.error.not_authorized"}) ==
+                reference(json::array({3, json::object(), "wamp.error.not_authorized"})));
+        REQUIRE(serialize_challenge(ChallengeMessage{"cryptosign", {{"challenge", "ab12"}, {"channel_binding", "x"}}}) ==
+                reference(json::array({4, "cryptosign", json::object({{"challenge", "ab12"}, {"channel_binding", "x"}})})));
+        REQUIRE(serialize_authenticate(AuthenticateMessage{"sig", {}}) ==
+                reference(json::array({5, "sig", json::object()})));
+    }
+}
+
+TEST_CASE("Session handshake deserializers read nlohmann-produced CBOR", "[cbor][serializer]") {
+    auto hello = deserialize_hello(reference(json::array({1, "realm1",
+        json::object({{"authid", "alice"}, {"authmethods", json::array({"cryptosign", 7, "ticket"})},
+                      {"roles", json::object({{"caller", json::object({{"features", json::object()}})}})},
+                      {"agent", "ignored"}, {"transport", json::object({{"a", 1}})}})})));
+    REQUIRE(hello.has_value());
+    REQUIRE(hello->realm == "realm1");
+    REQUIRE(hello->authid == std::optional<std::string>{"alice"});
+    REQUIRE(hello->authmethods == std::optional<std::vector<std::string>>{{"cryptosign", "ticket"}});
+    REQUIRE(hello->roles.size() == 1);
+    REQUIRE(hello->roles[0].name == "caller");
+
+    // details that are not a map, or a wrongly typed authid, are ignored as before
+    auto odd = deserialize_hello(reference(json::array({1, "r", json::array()})));
+    REQUIRE(odd.has_value());
+    REQUIRE_FALSE(odd->authid.has_value());
+    auto wrong = deserialize_hello(reference(json::array({1, "r", json::object({{"authid", 5}, {"authmethods", json::array()}})})));
+    REQUIRE(wrong.has_value());
+    REQUIRE_FALSE(wrong->authid.has_value());
+    REQUIRE_FALSE(wrong->authmethods.has_value());
+
+    auto welcome = deserialize_welcome(reference(json::array({2, 99,
+        json::object({{"authid", "bob"}, {"authrole", "admin"}, {"authmethod", "cryptosign"},
+                      {"roles", json::object({{"broker", json::object()}})}})})));
+    REQUIRE(welcome.has_value());
+    REQUIRE(welcome->session_id == 99);
+    REQUIRE(welcome->authrole == std::optional<std::string>{"admin"});
+    REQUIRE(welcome->roles.size() == 1);
+
+    REQUIRE(deserialize_goodbye(reference(json::array({6, json::object(), "bye"})))->reason == "bye");
+    REQUIRE(deserialize_abort(reference(json::array({3, json::object({{"message", "x"}}), "why"})))->reason == "why");
+
+    auto challenge = deserialize_challenge(reference(json::array({4, "cryptosign",
+        json::object({{"challenge", "ab"}, {"n", 5}})})));
+    REQUIRE(challenge.has_value());
+    REQUIRE(challenge->extra == std::map<std::string, std::string>{{"challenge", "ab"}});  // non-text values dropped
+
+    auto auth = deserialize_authenticate(reference(json::array({5, "sig", json::object()})));
+    REQUIRE(auth.has_value());
+    REQUIRE(auth->signature == "sig");
+
+    // too short / wrong type
+    REQUIRE(deserialize_hello(reference(json::array({1, "r"}))).error() == SerializationError::MALFORMED_MESSAGE);
+    REQUIRE(deserialize_welcome(reference(json::array({2, "x", json::object()}))).error() ==
+            SerializationError::CBOR_DECODE_ERROR);
+}
+
 TEST_CASE("Hot-path deserializers read nlohmann-produced CBOR", "[cbor][serializer]") {
     SECTION("integers of every width in id fields") {
         for (uint64_t id : {0ULL, 23ULL, 24ULL, 255ULL, 256ULL, 65536ULL, 4294967296ULL, (1ULL << 53) - 1}) {
@@ -380,6 +471,10 @@ TEST_CASE("Deserializers survive truncated and corrupted input", "[cbor][seriali
         serialize_error(ErrorMessage{MessageType::CALL, 11, {{"k", int64_t{1}}}, "e", kArgs, kKw}),
         serialize_interrupt(InterruptMessage{12, {{"mode", std::string{"kill"}}}}),
         serialize_unsubscribe(UnsubscribeMessage{13, 14}),
+        serialize_hello(HelloMessage::create_client("realm")),
+        serialize_welcome(WelcomeMessage::create_router(5, "realm")),
+        serialize_challenge(ChallengeMessage{"cryptosign", {{"challenge", "ab"}}}),
+        serialize_authenticate(AuthenticateMessage{"sig", {}}),
     };
 
     auto run_all = [](const std::vector<uint8_t>& data) {
@@ -398,6 +493,12 @@ TEST_CASE("Deserializers survive truncated and corrupted input", "[cbor][seriali
         (void)deserialize_error(data);
         (void)deserialize_interrupt(data);
         (void)deserialize_unsubscribe(data);
+        (void)deserialize_hello(data);
+        (void)deserialize_welcome(data);
+        (void)deserialize_challenge(data);
+        (void)deserialize_authenticate(data);
+        (void)deserialize_goodbye(data);
+        (void)deserialize_abort(data);
         (void)deserialize_unregister(data);
     };
 

@@ -17,11 +17,11 @@
 
 // Minimal CBOR (RFC 8949) reader and writer for WAMP messages.
 //
-// The router's hot path used to build an nlohmann::json tree for every message in both directions. This
-// codec reads values straight into the WAMP structs and writes straight into the output buffer: no
-// intermediate tree, no per-node allocation. It covers what WAMP needs (unsigned/negative integers,
-// text strings, arrays, maps, booleans, null, floats, tags, indefinite-length containers) and writes the
-// same shortest-form encoding nlohmann does, so the wire format is unchanged.
+// Messages are read straight into the WAMP structs and written straight into the output buffer: no
+// intermediate tree, no per-node allocation (a JSON-tree library used to sit here and cost a third of the
+// CPU). It covers what WAMP needs (unsigned/negative integers, text strings, arrays, maps, booleans, null,
+// floats, tags, indefinite-length containers) and writes the shortest-form encoding with map keys in
+// order, so the bytes are deterministic.
 
 #include <cmath>
 #include <cstdint>
