@@ -47,9 +47,9 @@ struct ShardConfig {
 class Shard {
 public:
     explicit Shard(ShardConfig config = {})
-        : call_timeout(config.call_timeout)
-        , invocations(config.max_pending_invocations)
+        : invocations(config.max_pending_invocations)
         , realms(*this)
+        , call_timeout(config.call_timeout)
     {
         channels.configure(config.events);
     }

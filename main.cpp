@@ -16,6 +16,7 @@
 #include "include/wamp_server.hpp"
 #include "include/config.hpp"
 #include "include/procedure_handler.hpp"
+#include "include/cpu_limits.hpp"
 #include <fmt/core.h>
 #include <spdlog/spdlog.h>
 #include <filesystem>
@@ -68,6 +69,10 @@ int main(int argc, char* argv[]) {
         fmt::print("  Max Pending Invocations: {}\n",
             config.max_pending_invocations);
         fmt::print("  Call Timeout: {} ms\n", config.call_timeout.count());
+        {
+            const auto cpus = wamp::detect_cpu_limits();
+            fmt::print("  CPUs available: {} (hardware {}, limited by {})\n", cpus.available, cpus.hardware, cpus.source);
+        }
         fmt::print("  Event Queue: {} per session, overflow={}, backpressure timeout={} ms, slow subscriber limit={}\n",
             config.events.size,
             config.events.overflow == wamp::OverflowPolicy::BACKPRESSURE ? "backpressure" : "drop",
