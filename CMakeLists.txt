@@ -7,7 +7,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find packages installed by vcpkg
 find_package(Boost REQUIRED COMPONENTS system)
-find_package(fmt CONFIG REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)  # tests only: the independent CBOR oracle
 find_package(Catch2 3 CONFIG REQUIRED)
@@ -24,7 +23,6 @@ target_include_directories(wamp_router PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(wamp_router PRIVATE
     Boost::system
     Boost::boost  # Header-only Boost.Asio
-    fmt::fmt
     spdlog::spdlog
     toml11::toml11
     OpenSSL::SSL
@@ -74,7 +72,6 @@ target_include_directories(wamp_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(wamp_tests PRIVATE
     Boost::system
     Boost::boost
-    fmt::fmt
     spdlog::spdlog
     nlohmann_json::nlohmann_json
     Catch2::Catch2WithMain
@@ -102,7 +99,6 @@ target_include_directories(wamp_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(wamp_bench PRIVATE
     Boost::system
     Boost::boost
-    fmt::fmt
     spdlog::spdlog
     Catch2::Catch2WithMain
     toml11::toml11
@@ -121,7 +117,6 @@ target_include_directories(wamp_load PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(wamp_load PRIVATE
     Boost::system
     Boost::boost
-    fmt::fmt
     spdlog::spdlog
     toml11::toml11
     OpenSSL::SSL
@@ -140,7 +135,6 @@ target_include_directories(wamp_profile_router PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(wamp_profile_router PRIVATE
     Boost::system
     Boost::boost
-    fmt::fmt
     spdlog::spdlog
     toml11::toml11
     OpenSSL::SSL

@@ -17,7 +17,7 @@
 #include "include/config.hpp"
 #include "include/procedure_handler.hpp"
 #include "include/cpu_limits.hpp"
-#include <fmt/core.h>
+#include <print>
 #include <spdlog/spdlog.h>
 #include <filesystem>
 
@@ -28,21 +28,21 @@ int main(int argc, char* argv[]) {
             if (std::string{argv[1]} == "--config" && argc > 2) {
                 config_path = argv[2];
             } else if (std::string{argv[1]} == "--help" || std::string{argv[1]} == "-h") {
-                fmt::print("Usage: {} [--config <path>]\n", argv[0]);
-                fmt::print("  Default config: config.toml\n");
-                fmt::print("  --config <path>  Specify custom configuration file\n");
-                fmt::print("  --help, -h       Show this help message\n");
+                std::print("Usage: {} [--config <path>]\n", argv[0]);
+                std::print("  Default config: config.toml\n");
+                std::print("  --config <path>  Specify custom configuration file\n");
+                std::print("  --help, -h       Show this help message\n");
                 return 0;
             } else {
-                fmt::print(stderr, "Unknown option: {}\n", argv[1]);
-                fmt::print(stderr, "Use --help for usage information\n");
+                std::print(stderr, "Unknown option: {}\n", argv[1]);
+                std::print(stderr, "Use --help for usage information\n");
                 return 1;
             }
         }
 
         auto config_result = wamp::Config::load(config_path);
         if (!config_result.has_value()) {
-            fmt::print(stderr, "Failed to load configuration from {}: {}\n",
+            std::print(stderr, "Failed to load configuration from {}: {}\n",
                 config_path.string(), config_result.error().message());
             return 1;
         }
@@ -51,39 +51,39 @@ int main(int argc, char* argv[]) {
         spdlog::set_level(config.log_level);
         spdlog::set_pattern("[%Y-%m-%d %H:%M:%S] [%^%l%$] %v");
 
-        fmt::print("\n");
-        fmt::print("╔════════════════════════════════════════╗\n");
-        fmt::print("║   WAMP Router (RawSocket + CBOR)      ║\n");
-        fmt::print("╚════════════════════════════════════════╝\n");
-        fmt::print("\n");
-        fmt::print("Configuration:\n");
-        fmt::print("  Port: {}\n", config.port);
-        fmt::print("  TLS Certificate: {}\n", config.tls.cert_path.string());
-        fmt::print("  TLS Key: {}\n", config.tls.key_path.string());
+        std::print("\n");
+        std::print("╔════════════════════════════════════════╗\n");
+        std::print("║   WAMP Router (RawSocket + CBOR)      ║\n");
+        std::print("╚════════════════════════════════════════╝\n");
+        std::print("\n");
+        std::print("Configuration:\n");
+        std::print("  Port: {}\n", config.port);
+        std::print("  TLS Certificate: {}\n", config.tls.cert_path.string());
+        std::print("  TLS Key: {}\n", config.tls.key_path.string());
         if (config.tls.ca_path) {
-            fmt::print("  TLS CA: {}\n", config.tls.ca_path->string());
+            std::print("  TLS CA: {}\n", config.tls.ca_path->string());
         }
         if (config.tls.require_client_cert) {
-            fmt::print("  Client Cert Required: yes\n");
+            std::print("  Client Cert Required: yes\n");
         }
-        fmt::print("  Max Pending Invocations: {}\n",
+        std::print("  Max Pending Invocations: {}\n",
             config.max_pending_invocations);
-        fmt::print("  Call Timeout: {} ms\n", config.call_timeout.count());
+        std::print("  Call Timeout: {} ms\n", config.call_timeout.count());
         {
             const auto cpus = wamp::detect_cpu_limits();
-            fmt::print("  CPUs available: {} (hardware {}, limited by {})\n", cpus.available, cpus.hardware, cpus.source);
+            std::print("  CPUs available: {} (hardware {}, limited by {})\n", cpus.available, cpus.hardware, cpus.source);
         }
-        fmt::print("  Event Queue: {} per session, overflow={}, backpressure timeout={} ms, slow subscriber limit={}\n",
+        std::print("  Event Queue: {} per session, overflow={}, backpressure timeout={} ms, slow subscriber limit={}\n",
             config.events.size,
             config.events.overflow == wamp::OverflowPolicy::BACKPRESSURE ? "backpressure" : "drop",
             config.events.backpressure_timeout.count(),
             config.events.slow_subscriber_limit);
-        fmt::print("  Log Level: {}\n",
+        std::print("  Log Level: {}\n",
             spdlog::level::to_string_view(config.log_level));
-        fmt::print("  Authentication Keys: {}\n",
+        std::print("  Authentication Keys: {}\n",
             config.auth_keys.size());
-        fmt::print("\n");
-        fmt::print("Press Ctrl+C to stop\n\n");
+        std::print("\n");
+        std::print("Press Ctrl+C to stop\n\n");
 
         boost::asio::io_context io_context;
 
