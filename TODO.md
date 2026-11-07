@@ -20,7 +20,7 @@ Outstanding work, as of 2026-11-05. Check items off as they land.
 - [ ] Log the clean-disconnect "Operation canceled" read-loop error at debug, not error.
 - [ ] Integration tests (`tests/test_integration.cpp`): graceful server shutdown instead of detach; timing-dependent tests.
 - [ ] Resolve the TODO at `include/wamp_session.hpp:35` ("in process client support, fix names").
-- [ ] Re-verify the Docker build (`./scripts/cmake-build.sh`).
+- [x] Docker build re-verified (Clang 18 + libc++): builds cleanly and all 112 tests pass in the container.
 - [ ] Add `test_crypto_utils.cpp` to the test list in `CLAUDE.md`.
 
 ## Performance
