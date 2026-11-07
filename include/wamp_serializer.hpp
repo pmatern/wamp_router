@@ -1029,6 +1029,22 @@ deserialize_unregistered(const std::vector<uint8_t>& cbor_data) {
         });
 }
 
+// Format: [69, INVOCATION.Request|id, Options|dict]
+inline std::vector<uint8_t> serialize_interrupt(const InterruptMessage& msg) {
+    json j = json::array({static_cast<int>(MessageType::INTERRUPT), msg.request_id,
+                          serialize_dict(msg.options)});
+    return json::to_cbor(j);
+}
+
+inline std::expected<InterruptMessage, std::error_code>
+deserialize_interrupt(const std::vector<uint8_t>& cbor_data) {
+    return deserialize_message<InterruptMessage>(
+        cbor_data, 2, MessageType::INTERRUPT, "INTERRUPT",
+        [](const json& j) {
+            return InterruptMessage{j[1].get<uint64_t>(), extract_dict(j, 2)};
+        });
+}
+
 // ============================================================================
 // EventTemplate - serialize an EVENT once, stamp the subscription id per subscriber
 // ============================================================================

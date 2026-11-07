@@ -9,8 +9,8 @@ Outstanding work, as of 2026-11-05. Check items off as they land.
 - [x] PUBLISH `acknowledge` was already correct; added `exclude_me` (defaults to true per spec).
 - [x] Fail pending calls with `wamp.error.callee_failure` when the callee disconnects.
 - [x] Call timeouts: `[server.rpc] call_timeout_ms` (default 30000, 0 disables) and the CALL `timeout` option; a 50 ms sweeper fails overdue calls with `wamp.error.timeout`.
-- [ ] Send INTERRUPT to the callee when a call times out (needs callee-side cancellation in `WampClient`, and the `call_canceling` feature announced in WELCOME), so a stuck handler stops running.
-- [ ] Add a `timeout` option to `WampClient::call`/`call_result` (sent in CALL options, milliseconds) and a test.
+- [x] Router sends INTERRUPT (`mode: killnowait`) to the callee when a call times out; `WampClient` cancels the running handler and replies `wamp.error.canceled`. The `call_canceling` feature is not yet announced in WELCOME/HELLO (role features are still stubbed as empty).
+- [x] `WampClient::call`/`call_result` take a `timeout` (sent as the CALL `timeout` option).
 - [x] `WampClient` now supports unsubscribe, unregister, args on `call`/`call_result`/`publish` (plus `exclude_me`), args on received events/invocations, and `WampException` for ERROR replies and for handlers that want to return an ERROR.
 
 ## Code quality and tests

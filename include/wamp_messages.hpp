@@ -49,6 +49,7 @@ enum class MessageType : uint8_t {
     UNREGISTER = 66,
     UNREGISTERED = 67,
     INVOCATION = 68,
+    INTERRUPT = 69,
     YIELD = 70
 };
 
@@ -595,6 +596,20 @@ struct UnregisteredMessage {
 };
 
 // ============================================================================
+// INTERRUPT Message: [69, INVOCATION.Request|id, Options|dict]
+// ============================================================================
+// Router -> callee: stop working on an invocation (the call timed out or was canceled)
+struct InterruptMessage {
+    static constexpr MessageType TYPE = MessageType::INTERRUPT;
+
+    uint64_t request_id{};  // The INVOCATION request id
+    WampDict options{};
+
+    InterruptMessage(uint64_t req_id, WampDict opts = {})
+        : request_id(req_id), options(std::move(opts)) {}
+};
+
+// ============================================================================
 // ERROR Message: [8, REQUEST.Type|int, REQUEST.Request|id, Details|dict, Error|uri]
 // ============================================================================
 // Generic error response for failed requests
@@ -643,6 +658,12 @@ struct ErrorMessage {
         return ErrorMessage{MessageType::CALL, request_id, details, "wamp.error.no_such_procedure"};
     }
 
+    static ErrorMessage create_canceled(uint64_t request_type_request_id, const std::string& reason) {
+        WampDict details;
+        details["message"] = reason;
+        return ErrorMessage{MessageType::INVOCATION, request_type_request_id, details, "wamp.error.canceled"};
+    }
+
     static ErrorMessage create_timeout(uint64_t request_id, const std::string& reason) {
         WampDict details;
         details["message"] = reason;
@@ -679,6 +700,7 @@ using WampMessage = std::variant<
     UnsubscribedMessage,
     UnregisterMessage,
     UnregisteredMessage,
+    InterruptMessage,
     ErrorMessage
 >;
 

@@ -78,6 +78,15 @@ public:
             // Runs from a timer, so it cannot wait for queue space
             (void)EventChannelRegistry::deliver(pending.caller_session_id,
                 EventToSend{pending.caller_session_id, data}, /*may_defer=*/false);
+
+            // Tell the callee to stop working on it
+            if (pending.callee_session_id != 0) {
+                auto interrupt = InterruptMessage{pending.invocation_id, {{"mode", std::string{"killnowait"}}}};
+                auto idata = std::make_shared<std::vector<uint8_t>>(
+                    rawsocket::create_wamp_message(serialize_interrupt(interrupt)));
+                (void)EventChannelRegistry::deliver(pending.callee_session_id,
+                    EventToSend{pending.callee_session_id, idata}, /*may_defer=*/false);
+            }
         }
         return expired.size();
     }
@@ -253,7 +262,7 @@ public:
         auto deadline = timeout.count() > 0 ? std::chrono::steady_clock::now() + timeout
                                             : std::chrono::steady_clock::time_point::max();
         invocation_tracker.track(invocation_id,
-            PendingCall{caller_session_id, call.request_id, callee_session_id, deadline});
+            PendingCall{caller_session_id, call.request_id, callee_session_id, deadline, invocation_id});
 
         spdlog::debug("Tracking invocation_id={} -> caller_session={}, call_request_id={} ({} pending)",
                      invocation_id, caller_session_id, call.request_id,

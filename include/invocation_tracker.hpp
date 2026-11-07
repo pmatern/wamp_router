@@ -31,14 +31,17 @@ struct PendingCall {
     uint64_t call_request_id;     // Original request_id from CALL message
     uint64_t callee_session_id;   // Who was sent the INVOCATION (0 if unknown)
     std::chrono::steady_clock::time_point deadline;  // time_point::max() = no timeout
+    uint64_t invocation_id;       // The INVOCATION request id sent to the callee (0 if unknown)
 
     PendingCall(uint64_t caller_id, uint64_t request_id, uint64_t callee_id = 0,
                 std::chrono::steady_clock::time_point call_deadline =
-                    std::chrono::steady_clock::time_point::max())
+                    std::chrono::steady_clock::time_point::max(),
+                uint64_t inv_id = 0)
         : caller_session_id(caller_id)
         , call_request_id(request_id)
         , callee_session_id(callee_id)
         , deadline(call_deadline)
+        , invocation_id(inv_id)
     {}
 };
 

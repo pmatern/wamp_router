@@ -376,8 +376,12 @@ public:
         co_return co_await call(std::move(procedure), WampList{}, WampDict{});
     }
 
-    awaitable<nlohmann::json> call(std::string procedure, WampList args, WampDict args_kw = {}) {
-        const auto result = co_await call_result(std::move(procedure), std::move(args), std::move(args_kw));
+    // `timeout` (if non-zero) is sent as the CALL `timeout` option; the router fails the call with
+    // wamp.error.timeout (thrown as WampException) if the callee has not answered in time.
+    awaitable<nlohmann::json> call(std::string procedure, WampList args, WampDict args_kw = {},
+                                   std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
+        const auto result = co_await call_result(std::move(procedure), std::move(args),
+                                                 std::move(args_kw), timeout);
 
         // Extract result: prefer keyword arguments, then positional arguments
         if (!result.arguments_kw.empty()) {
@@ -395,13 +399,18 @@ public:
     }
 
     // Call a procedure and return the complete RESULT message (arguments and keyword arguments).
-    awaitable<ResultMessage> call_result(std::string procedure, WampList args = {}, WampDict args_kw = {}) {
+    awaitable<ResultMessage> call_result(std::string procedure, WampList args = {}, WampDict args_kw = {},
+                                         std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
         if (state_ != State::ESTABLISHED) {
             throw std::runtime_error("Not connected");
         }
 
         uint64_t request_id = next_request_id();
-        CallMessage msg{request_id, {}, procedure, std::move(args), std::move(args_kw)};
+        WampDict options;
+        if (timeout.count() > 0) {
+            options["timeout"] = static_cast<int64_t>(timeout.count());
+        }
+        CallMessage msg{request_id, std::move(options), procedure, std::move(args), std::move(args_kw)};
 
         auto channel = std::make_shared<ResultChannel>(io_, 1);
         pending_calls_[request_id] = channel;
@@ -588,6 +597,10 @@ private:
                 handle_invocation(cbor_payload);
                 break;
 
+            case MessageType::INTERRUPT:
+                handle_interrupt(cbor_payload);
+                break;
+
             case MessageType::RESULT:
                 handle_result(cbor_payload);
                 break;
@@ -760,18 +773,51 @@ private:
 
             // Spawn coroutine to handle invocation
             auto handler = it->second;
-            co_spawn(io_, handle_invocation_async(handler, invocation), detached);
+            auto signal = std::make_shared<boost::asio::cancellation_signal>();
+            running_invocations_[invocation.request_id] = signal;
+            co_spawn(io_, handle_invocation_async(handler, invocation, signal),
+                     boost::asio::bind_cancellation_slot(signal->slot(), detached));
         } else {
             spdlog::warn("Received INVOCATION for unknown registration_id={}", invocation.registration_id);
         }
     }
 
-    awaitable<void> handle_invocation_async(InvocationHandler handler, InvocationMessage invocation) {
+    // INTERRUPT: cancel the handler's pending operation; it then answers with wamp.error.canceled
+    void handle_interrupt(const std::vector<uint8_t>& cbor_payload) {
+        auto interrupt = deserialize_interrupt(cbor_payload);
+        if (!interrupt.has_value()) {
+            spdlog::error("Failed to deserialize INTERRUPT");
+            return;
+        }
+        auto it = running_invocations_.find(interrupt->request_id);
+        if (it == running_invocations_.end()) {
+            spdlog::debug("INTERRUPT for finished invocation {}", interrupt->request_id);
+            return;
+        }
+        spdlog::debug("INTERRUPT: canceling invocation {}", interrupt->request_id);
+        auto signal = it->second;  // the handler may finish and erase the entry while emitting
+        signal->emit(boost::asio::cancellation_type::terminal);
+    }
+
+    // `signal` is a parameter so it outlives the coroutine, whose cancellation slot refers to it
+    awaitable<void> handle_invocation_async(InvocationHandler handler, InvocationMessage invocation,
+                                            std::shared_ptr<boost::asio::cancellation_signal> signal) {
+        (void)signal;
         std::optional<ErrorMessage> error;
+        bool canceled = false;
 
         try {
             auto yield = co_await handler(invocation);
+            running_invocations_.erase(invocation.request_id);
             co_await send_wamp_message(yield);
+        } catch (const boost::system::system_error& e) {
+            if (e.code() != boost::asio::error::operation_aborted) {
+                spdlog::error("Invocation handler error: {}", e.what());
+                error = ErrorMessage{MessageType::INVOCATION, invocation.request_id,
+                                     {{"message", std::string{e.what()}}}, "wamp.error.callee_failure"};
+            } else {
+                canceled = true;
+            }
         } catch (const WampException& e) {
             // Handler chose the error URI/payload to send back to the caller
             spdlog::debug("Invocation handler raised {}", e.error_uri);
@@ -783,6 +829,12 @@ private:
                                  {{"message", std::string{e.what()}}}, "wamp.error.callee_failure"};
         }
 
+        running_invocations_.erase(invocation.request_id);
+        if (canceled) {
+            // Awaiting again would throw while the cancellation state is set
+            co_await boost::asio::this_coro::reset_cancellation_state();
+            error = ErrorMessage::create_canceled(invocation.request_id, "Invocation interrupted");
+        }
         if (error.has_value()) {
             co_await send_wamp_message(*error);
         }
@@ -1161,6 +1213,7 @@ private:
     std::unordered_map<uint64_t, EventCallback> event_handlers_;
     std::unordered_map<std::string, uint64_t> topic_to_subscription_id_;
     std::unordered_map<uint64_t, InvocationHandler> invocation_handlers_;
+    std::unordered_map<uint64_t, std::shared_ptr<boost::asio::cancellation_signal>> running_invocations_;
     std::unordered_map<std::string, uint64_t> uri_to_registration_id_;
 };
 

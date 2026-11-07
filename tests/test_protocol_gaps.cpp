@@ -401,6 +401,14 @@ TEST_CASE("WampSession handles frames split across reads", "[protocol][session]"
 // Call timeouts
 // ============================================================================
 
+TEST_CASE("INTERRUPT round-trips", "[protocol][serializer]") {
+    auto msg = deserialize_interrupt(serialize_interrupt(
+        InterruptMessage{77, {{"mode", std::string{"killnowait"}}}}));
+    REQUIRE(msg.has_value());
+    REQUIRE(msg->request_id == 77);
+    REQUIRE(msg->options.at("mode") == WampDict::mapped_type{std::string{"killnowait"}});
+}
+
 TEST_CASE("Unanswered calls time out", "[protocol][rpc][timeout]") {
     using namespace std::chrono;
     Sessions s;
@@ -425,6 +433,12 @@ TEST_CASE("Unanswered calls time out", "[protocol][rpc][timeout]") {
         REQUIRE(pop_frame(*ch_caller).empty());
 
         REQUIRE(ProcedureHandler::expire_calls(steady_clock::now() + 1s) == 1);
+
+        // The callee is told to stop
+        auto interrupt = deserialize_interrupt(payload_of(pop_frame(*ch_callee)));
+        REQUIRE(interrupt.has_value());
+        REQUIRE(interrupt->request_id == invocation->request_id);
+
         auto err = deserialize_error(payload_of(pop_frame(*ch_caller)));
         REQUIRE(err.has_value());
         REQUIRE(err->request_type == MessageType::CALL);

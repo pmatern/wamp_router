@@ -607,6 +607,56 @@ TEST_CASE("DROP policy accounts for every event", "[wamp_client][events]") {
     REQUIRE(delivered + dropped == kBurst);
 }
 
+TEST_CASE("WampClient - Call timeout interrupts the callee", "[wamp_client][timeout]") {
+    io_context io;
+    ServerConfig config;
+    config.call_timeout = std::chrono::milliseconds{0};  // only the client's per-call timeout applies
+    uint16_t port = find_available_port();
+
+    WampServer server{io, port, config};
+    server.start();
+
+    WampClient callee{io};
+    WampClient caller{io};
+    std::string error_uri;
+    bool handler_interrupted = false;
+    bool handler_finished = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await callee.connect("127.0.0.1", port, "test.realm");
+        co_await caller.connect("127.0.0.1", port, "test.realm");
+
+        co_await callee.register_procedure(
+            "com.example.hang",
+            [&](const InvocationMessage& invocation) -> awaitable<YieldMessage> {
+                boost::asio::steady_timer t{io};
+                t.expires_after(std::chrono::seconds(5));
+                auto [ec] = co_await t.async_wait(boost::asio::as_tuple(use_awaitable));
+                handler_interrupted = (ec == boost::asio::error::operation_aborted);
+                handler_finished = true;
+                if (ec) throw boost::system::system_error{ec};
+                co_return YieldMessage{invocation.request_id, {}};
+            });
+
+        try {
+            co_await caller.call("com.example.hang", {}, {}, std::chrono::milliseconds{200});
+        } catch (const WampException& e) {
+            error_uri = e.error_uri;
+        }
+
+        // Give the INTERRUPT time to reach the callee
+        boost::asio::steady_timer wait{io};
+        wait.expires_after(std::chrono::milliseconds(300));
+        co_await wait.async_wait(use_awaitable);
+        io.stop();
+    }, detached);
+
+    io.run_for(std::chrono::seconds(3));
+    REQUIRE(error_uri == "wamp.error.timeout");
+    REQUIRE(handler_finished);
+    REQUIRE(handler_interrupted);
+}
+
 TEST_CASE("WampClient - Call to an unresponsive callee times out", "[wamp_client][timeout]") {
     io_context io;
     ServerConfig config;
