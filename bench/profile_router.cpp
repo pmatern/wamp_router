@@ -22,6 +22,7 @@
 // processes and the profile contains only router work.
 
 #include "include/config.hpp"
+#include "include/cpu_limits.hpp"
 #include "include/wamp_server.hpp"
 #include <boost/asio.hpp>
 #include <spdlog/spdlog.h>
@@ -59,7 +60,9 @@ int main(int argc, char** argv) {
     boost::asio::io_context io;
     WampServer server{io, port, config};
     server.start();
-    std::printf("wamp_profile_router listening on %u (pid %d)\n", server.port(), static_cast<int>(getpid()));
+    const auto cpus = detect_cpu_limits();
+    std::printf("wamp_profile_router listening on %u (pid %d); CPUs available %u (hardware %u, limited by %s)\n",
+                server.port(), static_cast<int>(getpid()), cpus.available, cpus.hardware, cpus.source.c_str());
     std::fflush(stdout);
     io.run();
 }

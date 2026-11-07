@@ -261,6 +261,7 @@ wamp_router/
 ├── include/                   # Header-only implementation
 │   ├── config.hpp            # TOML configuration loader with auth keys support
 │   ├── authorizer.hpp        # Role permissions (Action, Permissions): exact/prefix URI rules
+│   ├── cpu_limits.hpp        # Container-aware CPU budget (cgroup quota, affinity, ECS task metadata)
 │   ├── shard.hpp             # Shard: all routing state one thread owns (channels, pending calls, realms, ids)
 │   ├── realm.hpp             # Realm (per-realm subscriptions + registrations), RealmRegistry
 │   ├── crypto_utils.hpp      # Ed25519 signature verification, challenge generation
@@ -496,6 +497,7 @@ Tests use Catch2 framework with CTest integration:
 - **test_protocol_gaps.cpp**: UNSUBSCRIBE/UNREGISTER, payload forwarding, callee errors, pipelined frames
 - **test_event_queue.cpp**: Event queue sizing, drop/backpressure policies, timeout
 - **test_authorization.cpp**: Permissions matching, role enforcement in the session, no restrictions without auth
+- **test_cpu_limits.cpp**: cgroup/ECS limit parsing and CPU budget
 - **test_cbor.cpp**: Direct CBOR codec vs nlohmann (byte-identical output, decoding, malformed/fuzzed input)
 - **test_realms.cpp**: Realm isolation of topics and procedures
 - **test_crypto_utils.cpp**: Ed25519 signature verification and challenge generation

@@ -67,3 +67,32 @@ TEST_CASE("Detection returns a usable budget on this machine", "[cpu_limits]") {
     REQUIRE(l.available >= 1);
     REQUIRE(l.available <= std::max(l.hardware, 1u));
 }
+
+TEST_CASE("ECS task metadata CPU limit", "[cpu_limits]") {
+    // shape of GET $ECS_CONTAINER_METADATA_URI_V4/task on Fargate
+    const std::string task_first =
+        R"({"Cluster":"c","TaskARN":"arn","Family":"f","Limits":{"CPU":0.5,"Memory":1024},"PullStartedAt":"x",)"
+        R"("Containers":[{"Name":"wamp","Limits":{"CPU":2},"Image":"[brackets] in \"strings\""}]})";
+    REQUIRE(parse_ecs_task_cpu_limit(task_first) == 0.5);
+
+    // task-level Limits after the Containers array, container limit larger
+    const std::string task_last =
+        R"({"Containers":[{"Name":"a","Limits":{"CPU":4}},{"Name":"b","Limits":{"CPU":4}}],"Limits":{"CPU":1,"Memory":2048}})";
+    REQUIRE(parse_ecs_task_cpu_limit(task_last) == 1.0);
+
+    // only container limits present: no task limit
+    REQUIRE(parse_ecs_task_cpu_limit(R"({"Containers":[{"Limits":{"CPU":2}}]})") == std::nullopt);
+    REQUIRE(parse_ecs_task_cpu_limit("") == std::nullopt);
+    REQUIRE(parse_ecs_task_cpu_limit(R"({"Limits":{"Memory":512}})") == std::nullopt);
+}
+
+TEST_CASE("ECS task CPU limit lowers the budget (Fargate shows 2 CPUs to small tasks)", "[cpu_limits]") {
+    auto half = combine_cpu_limits(2, 2u, std::nullopt, 0.5);
+    REQUIRE(half.available == 1);
+    REQUIRE(half.source == "ECS task CPU limit");
+    REQUIRE(combine_cpu_limits(2, 2u, std::nullopt, 1.0).available == 1);
+    REQUIRE(combine_cpu_limits(2, 2u, std::nullopt, 2.0).available == 2);
+    REQUIRE(combine_cpu_limits(4, 4u, std::nullopt, 4.0).available == 4);
+    // a task limit above what the VM shows changes nothing
+    REQUIRE(combine_cpu_limits(2, 2u, std::nullopt, 16.0).available == 2);
+}

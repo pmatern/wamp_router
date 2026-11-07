@@ -158,6 +158,28 @@ per `process()` call. Whole-run A/B on identical load (14.4M events delivered, 3
 Remaining user-space targets visible in the profile: asio overhead (about 20-28%), `EventChannelRegistry::find` once per
 delivered event (about 1%, cacheable in the session), per-frame `shared_ptr<vector>` allocation (about 4%).
 
+## Containers: ECS Fargate
+
+`bench/container/` builds a test image (router, profiling router, `wamp_load`) that was run on Fargate (platform 1.4.0, x86_64,
+us-west-2). What the container sees, by task size:
+
+| Task size | `nproc` / `lscpu` | cgroup CFS quota | Task metadata `Limits.CPU` | `detect_cpu_limits()` |
+|---|---|---|---|---|
+| 0.5 vCPU | 2 (1 core, 2 threads) | none (-1) | 0.5 | 1 |
+| 1 vCPU | 2 | none (-1) | 1 | 1 |
+| 2 vCPU | 2 | none (-1) | 2 | 2 |
+| 4 vCPU | 4 | none (-1) | 4 | 4 |
+
+* **Fargate does not put its limit in the container's cgroup**, and a task smaller than 2 vCPU still sees 2 CPUs. Sizing a thread
+  pool from `hardware_concurrency()` or the cgroup would start 2 threads on a 0.5 or 1 vCPU task. The authoritative source is the ECS
+  task metadata endpoint (`$ECS_CONTAINER_METADATA_URI_V4/task`, `"Limits":{"CPU":0.5,...}`); `include/cpu_limits.hpp` reads it
+  (plus cgroup v1/v2 quotas and CPU affinity for plain Docker/Kubernetes) and takes the minimum. The router prints the result at startup.
+* **Throughput** (one 1 vCPU router task, three 2 vCPU load-generator tasks in one AZ; plain TCP, 10-argument messages): RPC
+  about 51k calls/s in total (p50 0.7-1.6 ms), fan-out to 10 subscribers about 310k events/s in total, 0 lost. That is a single
+  shared vCPU doing roughly half of what a full c7i core does (100-118k calls/s), as expected for a 2.5 GHz hyperthread.
+* Fargate offers no `perf`, no capabilities and no choice of CPU generation (we saw Xeon 8259CL, 8175M and 8488C), so it is for
+  checking container behaviour, not for profiling.
+
 ## Recommended design
 
 ### Stage 0: single-thread fixes first (independent of threading)
@@ -233,7 +255,7 @@ unit tests independent of process-wide state). It is the prerequisite for everyt
 
 * **Thread count:** the number of cores the container may actually use, from the cgroup (`cpu.max` on cgroup v2,
   `cpu.cfs_quota_us` on v1; `hardware_concurrency()` ignores quotas), overridable in config (`[server] threads`).
-  Pin threads to CPUs only when the container has a `cpuset`; do not busy-poll under a CFS quota (throttling ruins tail latency).
+  Take it from `detect_cpu_limits()` (cgroup quota, affinity, ECS task metadata). Pin threads to CPUs only when the container has a `cpuset`; do not busy-poll under a CFS quota (throttling ruins tail latency).
 * **Accepting:** one acceptor assigns each new socket to the least-loaded shard and `post`s it there; the TLS handshake and the
   whole session then run on that shard's thread. An accept is 11-25 us against a 0.5-1.1 ms handshake, so a single acceptor is not
   a bottleneck, and it balances better than `SO_REUSEPORT` hashing, which can leave cores idle when connections are few and long

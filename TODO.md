@@ -40,6 +40,7 @@ Do the protocol gaps (arguments forwarding in particular) first so benchmarks me
 - [x] Re-profiled on AWS EC2 (c7i.2xlarge router core + 1-3 load-generator instances, results in docs/threading-analysis.md): RPC 100-118k calls/s and about 4.8 us per delivered event on one core. Found and fixed a quadratic buffer erase in `WampSession` (-20% fan-out CPU). `wamp_load --instance N` lets several processes share one router.
 - [ ] Cheap user-space follow-ups from the EC2 profile: cache the event channel in the session instead of `EventChannelRegistry::find` per delivery; reduce asio overhead on the delivery path (coroutine resumes, channel operations).
 - [x] Stage 1 of the thread-per-core plan: `Shard` (include/shard.hpp) owns the event channels, pending-call tracker, realms and id generators; no process-wide mutable state remains; each server has its own shard.
+- [x] Container-aware CPU budget (`include/cpu_limits.hpp`: cgroup v1/v2 quota, affinity, ECS task metadata) and its Fargate validation; Fargate hides its limit from the cgroup and shows 2 CPUs to 0.5/1 vCPU tasks, so the metadata endpoint is required (docs/threading-analysis.md).
 - [ ] Thread-per-core, shared-nothing router (remaining stages: N shards with an acceptor and SPSC lanes; replicated interest/registration tables with cross-shard pub/sub and RPC; per-shard metrics and logging). Needs Stage 0 and the bare-metal profile first.
 
 ## Backlog

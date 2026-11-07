@@ -193,3 +193,4 @@ site/
 .Spotlight-V100
 .Trashes
 ehthumbs_vista.db
+bench/container/bin/
