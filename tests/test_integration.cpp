@@ -26,6 +26,8 @@
 #include <condition_variable>
 #include <future>
 #include <fstream>
+#include <poll.h>
+#include <cerrno>
 
 using namespace wamp;
 using namespace std::chrono_literals;
@@ -44,6 +46,29 @@ static ServerConfig create_test_config() {
     return config;
 }
 
+// Read exactly buf.size() bytes, giving up at `deadline`. The test clients are purely blocking;
+// without this a missing reply would hang the test instead of failing it.
+static bool read_exact(tcp::socket& socket, std::span<uint8_t> buf,
+                       std::chrono::steady_clock::time_point deadline) {
+    size_t got = 0;
+    while (got < buf.size()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return false;
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+
+        pollfd pfd{socket.native_handle(), POLLIN, 0};
+        const int ready = ::poll(&pfd, 1, static_cast<int>(std::max<int64_t>(1, remaining.count())));
+        if (ready < 0 && errno == EINTR) continue;
+        if (ready <= 0) return false;
+
+        boost::system::error_code ec;
+        const size_t n = socket.read_some(asio::buffer(buf.data() + got, buf.size() - got), ec);
+        if (ec) return false;
+        got += n;
+    }
+    return true;
+}
+
 // ============================================================================
 // WampTestClient - Synchronous blocking client for integration tests
 // ============================================================================
@@ -52,11 +77,9 @@ public:
     explicit WampTestClient(asio::io_context& io, const ServerConfig& config)
         : io_(io)
         , socket_(io)
-        , session_(io, config)
         , session_id_(0)
-        , receive_buffer_(8192)
-        , stopped_(false)
     {
+        (void)config;
     }
 
     ~WampTestClient() {
@@ -94,9 +117,6 @@ public:
             auto hello_frame = rawsocket::create_wamp_message(hello_cbor);
             asio::write(socket_, asio::buffer(hello_frame));
 
-            // Start receiving messages in background
-            start_receive_loop();
-
             // Wait for WELCOME message
             auto welcome_msg = wait_for_message<WelcomeMessage>(timeout);
             if (!welcome_msg.has_value()) {
@@ -113,7 +133,6 @@ public:
     }
 
     void disconnect() {
-        stopped_ = true;
         if (socket_.is_open()) {
             boost::system::error_code ec;
             socket_.close(ec);
@@ -226,39 +245,6 @@ public:
     }
 
 private:
-    void start_receive_loop() {
-        do_receive();
-    }
-
-    void do_receive() {
-        if (stopped_) return;
-
-        socket_.async_read_some(asio::buffer(receive_buffer_),
-            [this](const boost::system::error_code& ec, std::size_t bytes_read) {
-                if (ec || stopped_) {
-                    return;
-                }
-
-                // Process received data through session
-                auto result = session_.process(std::span{receive_buffer_.data(), bytes_read});
-                if (result.has_value() && !result->empty()) {
-                    // Response from session (not used in tests, server handles responses)
-                }
-
-                // Extract any messages from session for test consumption
-                process_incoming_messages();
-
-                // Continue receiving
-                do_receive();
-            });
-    }
-
-    void process_incoming_messages() {
-        // This is a simplified version - in reality we'd need to track
-        // what messages the session has processed and make them available
-        // For now, we rely on the message queue populated by wait_for_message
-    }
-
     template<typename T>
     std::optional<T> wait_for_message(std::chrono::milliseconds timeout) {
         // This is simplified - we're doing blocking reads instead of proper async
@@ -269,17 +255,14 @@ private:
         while (std::chrono::steady_clock::now() < deadline) {
             // Read frame header (4 bytes)
             std::vector<uint8_t> header_buf(4);
-            boost::system::error_code ec;
-            asio::read(socket_, asio::buffer(header_buf), ec);
-            if (ec) break;
+            if (!read_exact(socket_, header_buf, deadline)) break;
 
             auto header = rawsocket::decode_frame_header(header_buf);
             if (!header.has_value()) break;
 
             // Read payload
             std::vector<uint8_t> payload(header->payload_length);
-            asio::read(socket_, asio::buffer(payload), ec);
-            if (ec) break;
+            if (!read_exact(socket_, payload, deadline)) break;
 
             // Get message type
             auto msg_type = get_message_type_from_cbor(payload);
@@ -334,133 +317,55 @@ private:
 
     asio::io_context& io_;
     tcp::socket socket_;
-    WampSession session_;
     uint64_t session_id_;
-    std::vector<uint8_t> receive_buffer_;
-    std::atomic<bool> stopped_;
 };
 
 // ============================================================================
 // Test Fixture - Manages server lifecycle
 // ============================================================================
-class WampServerFixture {
+class RouterFixture {
 public:
-    WampServerFixture()
-        : port_(0)
-        , server_running_(false)
-        , server_io_(nullptr)
+    explicit RouterFixture(const ServerConfig& config)
+        : config_(config)
+        , server_(server_io_, 0, config_)
     {
-        start_server();
-        start_client_io();
+        // The acceptor is already bound and listening, so connections queue until the loop runs
+        port_ = server_.port();
+        server_.start();
+        server_thread_ = std::thread([this] { server_io_.run(); });
+        spdlog::debug("Test router listening on port {}", port_);
     }
 
-    ~WampServerFixture() {
-        stop_client_io();
-        stop_server();
+    ~RouterFixture() {
+        // io_context::stop() is thread-safe; the io_context and server outlive the thread
+        server_io_.stop();
+        if (server_thread_.joinable()) server_thread_.join();
     }
+
+    RouterFixture(const RouterFixture&) = delete;
+    RouterFixture& operator=(const RouterFixture&) = delete;
 
     unsigned short port() const { return port_; }
-
     asio::io_context& io_context() { return client_io_; }
 
 private:
-    void start_server() {
-        // Promise/future to communicate port back from server thread
-        std::promise<unsigned short> port_promise;
-        auto port_future = port_promise.get_future();
-
-        server_thread_ = std::thread([this, port_promise = std::move(port_promise)]() mutable {
-            try {
-                asio::io_context server_io;
-                server_io_ = &server_io;
-
-                // Create server with port 0 to get OS-assigned port
-                auto config = create_test_config();
-                WampServer server(server_io, 0, config);
-
-                // Get actual bound port and signal to main thread
-                unsigned short bound_port = server.port();
-                port_promise.set_value(bound_port);
-
-                server.start();
-                server_running_ = true;
-                spdlog::info("Test server started on port {}", bound_port);
-
-                server_io.run();
-                spdlog::debug("Server io_context stopped");
-            } catch (const std::exception& e) {
-                spdlog::error("Server error: {}", e.what());
-                try {
-                    port_promise.set_exception(std::current_exception());
-                } catch (...) {
-                    // Promise already satisfied
-                }
-            }
-        });
-
-        // Wait for server to bind and get the port
-        try {
-            port_ = port_future.get();
-            spdlog::debug("Test fixture got server port: {}", port_);
-
-            // Give server a moment to start accepting
-            std::this_thread::sleep_for(50ms);
-        } catch (const std::exception& e) {
-            spdlog::error("Failed to start test server: {}", e.what());
-            throw;
-        }
-    }
-
-    void stop_server() {
-        server_running_ = false;
-        // Gracefully stop the server io_context
-        if (server_io_) {
-            server_io_->stop();
-        }
-        if (server_thread_.joinable()) {
-            server_thread_.join();
-        }
-    }
-
-    void start_client_io() {
-        // Run client io_context in background thread
-        client_thread_ = std::thread([this]() {
-            spdlog::debug("Client io_context thread started");
-            client_io_.run();
-            spdlog::debug("Client io_context stopped");
-        });
-
-        // Give client io thread a moment to start
-        std::this_thread::sleep_for(10ms);
-    }
-
-    void stop_client_io() {
-        // Gracefully stop the client io_context
-        client_io_.stop();
-        if (client_thread_.joinable()) {
-            client_thread_.join();
-        }
-    }
-
+    ServerConfig config_;  // WampServer keeps a reference to its config
+    asio::io_context server_io_;
+    asio::io_context client_io_;  // only used by the blocking test clients (resolver, sockets)
+    WampServer server_;
+    unsigned short port_{0};
     std::thread server_thread_;
-    std::thread client_thread_;
-    unsigned short port_;
-    std::atomic<bool> server_running_;
-    asio::io_context* server_io_;  // Pointer to server io_context (owned by server thread)
-    asio::io_context client_io_;
+};
+
+// Router with the default test configuration
+class WampServerFixture : public RouterFixture {
+public:
+    WampServerFixture() : RouterFixture(create_test_config()) {}
 };
 
 // ============================================================================
 // Integration Tests
 // ============================================================================
-
-// NOTE: Integration tests are functional but need refinement
-// Remaining issues:
-// 1. ✅ Port extraction - FIXED: Server now exposes bound port
-// 2. TODO: Graceful server shutdown mechanism (currently uses detach)
-// 3. TODO: Tests may need sequential execution depending on timing
-//
-// To enable these tests, remove the [.] prefix from the tags
 
 TEST_CASE("Integration: Client connects and establishes session", "[integration]") {
     WampServerFixture fixture;
@@ -692,89 +597,11 @@ static ServerConfig create_auth_server_config(const std::string& authid, const s
     return config;
 }
 
-// Server fixture that supports authentication
-class WampAuthServerFixture {
+// Router that requires Cryptosign for the given authid
+class WampAuthServerFixture : public RouterFixture {
 public:
     WampAuthServerFixture(const std::string& authid, const std::string& public_key_hex)
-        : port_(0)
-        , server_running_(false)
-        , server_io_(nullptr)
-    {
-        start_server(authid, public_key_hex);
-        start_client_io();
-    }
-
-    ~WampAuthServerFixture() {
-        stop_client_io();
-        stop_server();
-    }
-
-    unsigned short port() const { return port_; }
-    asio::io_context& io_context() { return client_io_; }
-
-private:
-    void start_server(const std::string& authid, const std::string& public_key_hex) {
-        std::promise<unsigned short> port_promise;
-        auto port_future = port_promise.get_future();
-
-        server_thread_ = std::thread([this, authid, public_key_hex, port_promise = std::move(port_promise)]() mutable {
-            try {
-                asio::io_context server_io;
-                server_io_ = &server_io;
-
-                auto config = create_auth_server_config(authid, public_key_hex);
-                WampServer server(server_io, 0, config);
-
-                unsigned short bound_port = server.port();
-                port_promise.set_value(bound_port);
-
-                server.start();
-                server_running_ = true;
-                spdlog::info("Auth test server started on port {}", bound_port);
-
-                server_io.run();
-            } catch (const std::exception& e) {
-                spdlog::error("Server error: {}", e.what());
-                try {
-                    port_promise.set_exception(std::current_exception());
-                } catch (...) {}
-            }
-        });
-
-        port_ = port_future.get();
-        std::this_thread::sleep_for(50ms);
-    }
-
-    void stop_server() {
-        server_running_ = false;
-        if (server_io_) {
-            server_io_->stop();
-        }
-        if (server_thread_.joinable()) {
-            server_thread_.join();
-        }
-    }
-
-    void start_client_io() {
-        client_thread_ = std::thread([this]() {
-            client_io_.run();
-        });
-        std::this_thread::sleep_for(10ms);
-    }
-
-    void stop_client_io() {
-        client_io_.stop();
-        if (client_thread_.joinable()) {
-            client_thread_.join();
-        }
-    }
-
-    std::thread server_thread_;
-    std::thread client_thread_;
-    unsigned short port_;
-    std::atomic<bool> server_running_;
-    asio::io_context* server_io_;
-    asio::io_context client_io_;
+        : RouterFixture(create_auth_server_config(authid, public_key_hex)) {}
 };
 
 // Auth-aware test client that can perform cryptosign authentication
@@ -786,7 +613,6 @@ public:
         , priv_key_path_(priv_key_path)
         , authid_(authid)
         , session_id_(0)
-        , stopped_(false)
     {}
 
     ~WampAuthTestClient() {
@@ -877,7 +703,6 @@ public:
     }
 
     void disconnect() {
-        stopped_ = true;
         if (socket_.is_open()) {
             boost::system::error_code ec;
             socket_.close(ec);
@@ -888,22 +713,19 @@ public:
 
 private:
     std::optional<std::vector<uint8_t>> read_wamp_message(std::chrono::milliseconds timeout) {
-        (void)timeout;  // For now, we use blocking reads
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
 
         try {
             // Read frame header
             std::vector<uint8_t> header_buf(4);
-            boost::system::error_code ec;
-            asio::read(socket_, asio::buffer(header_buf), ec);
-            if (ec) return std::nullopt;
+            if (!read_exact(socket_, header_buf, deadline)) return std::nullopt;
 
             auto header = rawsocket::decode_frame_header(header_buf);
             if (!header.has_value()) return std::nullopt;
 
             // Read payload
             std::vector<uint8_t> payload(header->payload_length);
-            asio::read(socket_, asio::buffer(payload), ec);
-            if (ec) return std::nullopt;
+            if (!read_exact(socket_, payload, deadline)) return std::nullopt;
 
             return payload;
         } catch (...) {
@@ -916,7 +738,6 @@ private:
     std::string priv_key_path_;
     std::string authid_;
     uint64_t session_id_;
-    std::atomic<bool> stopped_;
 };
 
 TEST_CASE("Integration: Authenticated client connects successfully", "[integration][auth]") {

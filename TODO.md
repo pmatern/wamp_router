@@ -18,7 +18,7 @@ Outstanding work, as of 2026-11-05. Check items off as they land.
 - [x] Flaky test "WampClient - Register procedure and handle call": the integration test fixture stopped its server before it saw the client EOF, so `WampSession` never ran `on_disconnect()` and `com.example.add` stayed registered in the process-wide registry. `WampSession` now cleans up in its destructor.
 - [x] Fixed `-Wunused-result` and unused-variable warnings in `tests/test_wamp_session.cpp`.
 - [x] Clean-disconnect "Operation canceled" read errors (client read loop, server read) are logged at debug; also stopped logging a cancelled event-channel receive (the loser of the read/event race) as an error.
-- [ ] Integration tests (`tests/test_integration.cpp`): graceful server shutdown instead of detach; timing-dependent tests.
+- [x] Integration tests: one `RouterFixture` owns the io_context/server and stops it thread-safely (no pointer into the server thread's stack, no startup sleeps); the test clients are purely blocking with real deadlines (`read_exact` + `poll`). Removed the async receive loop that raced the blocking reads for the same socket bytes (the actual source of the flakiness and of hangs when a reply never came).
 - [x] Removed the stale TODO at `include/wamp_session.hpp:35` (in-process use is already covered: tests drive `WampSession::process()` directly without sockets).
 - [x] Docker build re-verified (Clang 18 + libc++): builds cleanly and all 112 tests pass in the container.
 - [x] `test_crypto_utils.cpp` is in the `CLAUDE.md` test list.
