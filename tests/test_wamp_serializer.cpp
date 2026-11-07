@@ -579,3 +579,50 @@ TEST_CASE("Message type detection from CBOR", "[wamp_serializer]") {
         REQUIRE(!msg_type.has_value());
     }
 }
+
+TEST_CASE("EventTemplate frames match full EVENT serialization", "[serializer][event_template]") {
+    const WampList args{std::string{"hello"}, int64_t{42}, true};
+    const WampDict kw{{"unit", std::string{"ms"}}, {"count", int64_t{3}}};
+
+    struct Payload { const char* name; WampList args; WampDict kw; };
+    const std::vector<Payload> payloads{
+        {"no payload", {}, {}},
+        {"args only", args, {}},
+        {"args and kw", args, kw},
+        {"kw only", {}, kw},
+    };
+
+    // Subscription ids on both sides of every CBOR integer width boundary
+    const std::vector<uint64_t> ids{
+        0, 1, 23, 24, 255, 256, 65535, 65536, 0xFFFFFFFFull, 0x100000000ull,
+        9007199254740991ull, 0xFFFFFFFFFFFFFFFFull};
+
+    for (const auto& payload : payloads) {
+        DYNAMIC_SECTION(payload.name) {
+            const EventTemplate tmpl{EventMessage{0, 123456789, {}, payload.args, payload.kw}};
+            for (auto id : ids) {
+                const auto expected = rawsocket::create_wamp_message(
+                    serialize_event(EventMessage{id, 123456789, {}, payload.args, payload.kw}));
+                INFO("subscription_id=" << id);
+                REQUIRE(tmpl.frame_for(id) == expected);
+            }
+        }
+    }
+}
+
+TEST_CASE("EventTemplate frames deserialize back to the event", "[serializer][event_template]") {
+    const WampList args{std::string{"x"}, int64_t{7}};
+    const EventTemplate tmpl{EventMessage{0, 99, {}, args, {}}};
+
+    const auto frame = tmpl.frame_for(1234567);
+    auto header = rawsocket::decode_frame_header(frame);
+    REQUIRE(header.has_value());
+    REQUIRE(header->payload_length == frame.size() - rawsocket::FRAME_HEADER_SIZE);
+
+    std::vector<uint8_t> payload{frame.begin() + rawsocket::FRAME_HEADER_SIZE, frame.end()};
+    auto event = deserialize_event(payload);
+    REQUIRE(event.has_value());
+    REQUIRE(event->subscription_id == 1234567);
+    REQUIRE(event->publication_id == 99);
+    REQUIRE(event->arguments == args);
+}

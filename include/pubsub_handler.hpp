@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <span>
 #include <memory>
+#include <optional>
 
 namespace wamp {
 
@@ -117,44 +118,42 @@ public:
             }
         }
 
-        auto subscribers = sub_manager.get_subscribers(publish.topic);
-        spdlog::debug("Topic '{}' has {} subscribers", publish.topic, subscribers.size());
+        // Serialize the EVENT once; each subscriber only needs its subscription id stamped in
+        std::optional<EventTemplate> event_template;
+        size_t subscriber_count = 0;
+        size_t sent_count = 0;
 
-        if (!subscribers.empty()) {
-            size_t sent_count = 0;
-            for (uint64_t subscription_id : subscribers) {
-                auto sub_info = sub_manager.get_subscription(subscription_id);
-                if (!sub_info.has_value()) {
-                    spdlog::warn("Subscription {} not found for topic {}",
-                                subscription_id, publish.topic);
-                    continue;
+        sub_manager.for_each_subscriber(publish.topic,
+            [&](uint64_t subscription_id, uint64_t subscriber_session) {
+                ++subscriber_count;
+
+                if (exclude_me && subscriber_session == session_id) {
+                    return;
                 }
 
-                if (exclude_me && sub_info->session_id == session_id) {
-                    continue;
+                if (!event_template) {
+                    event_template.emplace(EventMessage{0, publication_id, {},
+                                                        publish.arguments, publish.arguments_kw});
                 }
 
-                auto event = EventMessage{subscription_id, publication_id, {},
-                                          publish.arguments, publish.arguments_kw};
-                auto event_cbor = serialize_event(event);
-                auto event_frame = rawsocket::create_wamp_message(event_cbor);
+                auto event_data = std::make_shared<std::vector<uint8_t>>(
+                    event_template->frame_for(subscription_id));
 
-                // Share event data (flyweight pattern)
-                auto event_data = std::make_shared<std::vector<uint8_t>>(std::move(event_frame));
-
-                if (accepted(EventChannelRegistry::deliver(sub_info->session_id,
-                    EventToSend{sub_info->session_id, event_data}))) {
-                    sent_count++;
+                if (accepted(EventChannelRegistry::deliver(subscriber_session,
+                    EventToSend{subscriber_session, std::move(event_data)}))) {
+                    ++sent_count;
                     spdlog::debug("Sent EVENT to session {} via channel (subscription_id={})",
-                                sub_info->session_id, subscription_id);
+                                subscriber_session, subscription_id);
                 } else {
                     spdlog::debug("EVENT for session {} not delivered (queue full or session gone)",
-                                sub_info->session_id);
+                                subscriber_session);
                 }
-            }
+            });
 
+        spdlog::debug("Topic '{}' has {} subscribers", publish.topic, subscriber_count);
+        if (subscriber_count > 0) {
             spdlog::info("Sent {}/{} EVENT messages for publication_id={}, topic={}",
-                        sent_count, subscribers.size(), publication_id, publish.topic);
+                        sent_count, subscriber_count, publication_id, publish.topic);
         }
 
         bool acknowledge = false;

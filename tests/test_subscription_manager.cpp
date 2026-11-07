@@ -14,6 +14,8 @@
 
 
 #include <catch2/catch_test_macros.hpp>
+#include <algorithm>
+#include <map>
 #include "include/subscription_manager.hpp"
 #include <algorithm>
 
@@ -191,5 +193,40 @@ TEST_CASE("SubscriptionManager topic isolation", "[subscription_manager]") {
         REQUIRE(sub2.size() == 1);
         REQUIRE(std::count(sub1.begin(), sub1.end(), 1) == 1);
         REQUIRE(std::count(sub2.begin(), sub2.end(), 2) == 1);
+    }
+}
+
+TEST_CASE("SubscriptionManager for_each_subscriber", "[subscription_manager]") {
+    SubscriptionManager manager;
+    manager.subscribe(1, "topic.a", 100);
+    manager.subscribe(2, "topic.a", 200);
+    manager.subscribe(3, "topic.b", 300);
+
+    auto collect = [&](const std::string& topic) {
+        std::map<uint64_t, uint64_t> seen;
+        manager.for_each_subscriber(topic, [&](uint64_t sub, uint64_t session) { seen[sub] = session; });
+        return seen;
+    };
+
+    SECTION("visits every subscription with its session") {
+        REQUIRE(collect("topic.a") == std::map<uint64_t, uint64_t>{{1, 100}, {2, 200}});
+        REQUIRE(collect("topic.b") == std::map<uint64_t, uint64_t>{{3, 300}});
+    }
+
+    SECTION("unknown topic visits nothing") {
+        REQUIRE(collect("topic.none").empty());
+    }
+
+    SECTION("unsubscribed ids are no longer visited") {
+        manager.unsubscribe(1);
+        REQUIRE(collect("topic.a") == std::map<uint64_t, uint64_t>{{2, 200}});
+        manager.unsubscribe_session(200);
+        REQUIRE(collect("topic.a").empty());
+    }
+
+    SECTION("get_subscribers still returns the ids") {
+        auto ids = manager.get_subscribers("topic.a");
+        std::sort(ids.begin(), ids.end());
+        REQUIRE(ids == std::vector<uint64_t>{1, 2});
     }
 }

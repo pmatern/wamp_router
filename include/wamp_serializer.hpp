@@ -16,7 +16,9 @@
 #pragma once
 
 #include "wamp_messages.hpp"
+#include "raw_socket.hpp"
 #include <nlohmann/json.hpp>
+#include <stdexcept>
 #include <vector>
 #include <cstdint>
 #include <expected>
@@ -1026,5 +1028,65 @@ deserialize_unregistered(const std::vector<uint8_t>& cbor_data) {
             return UnregisteredMessage{j[1].get<uint64_t>()};
         });
 }
+
+// ============================================================================
+// EventTemplate - serialize an EVENT once, stamp the subscription id per subscriber
+// ============================================================================
+// Only Subscription|id differs between the EVENTs of one publication. The CBOR array
+//   [36, Subscription|id, Publication|id, Details|dict, Arguments|list?, ArgumentsKw|dict?]
+// is encoded once with a placeholder subscription id (0, a single CBOR byte); frame_for() then
+// splices the real id into the shared prefix/suffix and adds the RawSocket header, avoiding a
+// full JSON build and CBOR encode per subscriber.
+class EventTemplate {
+public:
+    // msg.subscription_id is ignored
+    explicit EventTemplate(const EventMessage& msg) {
+        const auto bytes = serialize_event(EventMessage{0, msg.publication_id, msg.details,
+                                                         msg.arguments, msg.arguments_kw});
+        // [array header][0x18 0x24 = 36][0x00 = placeholder id][rest...]
+        constexpr size_t kPrefix = 3;
+        if (bytes.size() < kPrefix + 1 || bytes[1] != 0x18 || bytes[2] != static_cast<uint8_t>(MessageType::EVENT) ||
+            bytes[kPrefix] != 0x00) {
+            throw std::logic_error("unexpected CBOR layout for EVENT template");
+        }
+        prefix_.assign(bytes.begin(), bytes.begin() + kPrefix);
+        suffix_.assign(bytes.begin() + kPrefix + 1, bytes.end());
+    }
+
+    // Complete RawSocket frame for one subscriber
+    [[nodiscard]] std::vector<uint8_t> frame_for(uint64_t subscription_id) const {
+        uint8_t id_bytes[9];
+        const size_t id_len = encode_cbor_uint(subscription_id, id_bytes);
+        const auto payload_len = static_cast<uint32_t>(prefix_.size() + id_len + suffix_.size());
+
+        std::vector<uint8_t> frame;
+        frame.reserve(rawsocket::FRAME_HEADER_SIZE + payload_len);
+        const auto header = rawsocket::encode_frame_header(
+            {.type = rawsocket::FrameType::REGULAR, .payload_length = payload_len});
+        frame.insert(frame.end(), header.begin(), header.end());
+        frame.insert(frame.end(), prefix_.begin(), prefix_.end());
+        frame.insert(frame.end(), id_bytes, id_bytes + id_len);
+        frame.insert(frame.end(), suffix_.begin(), suffix_.end());
+        return frame;
+    }
+
+private:
+    // Shortest-form CBOR unsigned integer (RFC 8949 major type 0); returns bytes written
+    static size_t encode_cbor_uint(uint64_t v, uint8_t* out) {
+        if (v < 24) {
+            out[0] = static_cast<uint8_t>(v);
+            return 1;
+        }
+        const int extra = v <= 0xFF ? 1 : v <= 0xFFFF ? 2 : v <= 0xFFFFFFFF ? 4 : 8;
+        out[0] = static_cast<uint8_t>(0x18 + (extra == 1 ? 0 : extra == 2 ? 1 : extra == 4 ? 2 : 3));
+        for (int i = 0; i < extra; ++i) {
+            out[1 + i] = static_cast<uint8_t>(v >> (8 * (extra - 1 - i)));
+        }
+        return 1 + static_cast<size_t>(extra);
+    }
+
+    std::vector<uint8_t> prefix_;
+    std::vector<uint8_t> suffix_;
+};
 
 } // namespace wamp

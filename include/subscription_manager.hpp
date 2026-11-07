@@ -48,7 +48,7 @@ public:
 
     // Returns subscription_id (caller provides this from ID generator)
     void subscribe(uint64_t subscription_id, const std::string& topic, uint64_t session_id) {
-        topic_subscriptions_[topic].insert(subscription_id);
+        topic_subscriptions_[topic].emplace(subscription_id, session_id);
 
         // Store reverse lookup: subscription_id -> info
         subscriptions_.emplace(subscription_id, SubscriptionInfo{subscription_id, topic, session_id});
@@ -94,14 +94,32 @@ public:
         }
     }
 
-    // Returns empty vector if no subscribers
+    // Returns empty vector if no subscribers (copies the ids; use for_each_subscriber on hot paths)
     [[nodiscard]] std::vector<uint64_t> get_subscribers(const std::string& topic) const {
         auto it = topic_subscriptions_.find(topic);
         if (it == topic_subscriptions_.end()) {
             return {};
         }
 
-        return std::vector<uint64_t>{it->second.begin(), it->second.end()};
+        std::vector<uint64_t> ids;
+        ids.reserve(it->second.size());
+        for (const auto& [subscription_id, session_id] : it->second) {
+            ids.push_back(subscription_id);
+        }
+        return ids;
+    }
+
+    // Calls fn(subscription_id, session_id) for each subscription to `topic`, in place:
+    // no copy of the subscriber set and no per-subscriber lookup. fn must not modify this manager.
+    template<typename Fn>
+    void for_each_subscriber(const std::string& topic, Fn&& fn) const {
+        auto it = topic_subscriptions_.find(topic);
+        if (it == topic_subscriptions_.end()) {
+            return;
+        }
+        for (const auto& [subscription_id, session_id] : it->second) {
+            fn(subscription_id, session_id);
+        }
     }
 
     [[nodiscard]] std::optional<SubscriptionInfo> get_subscription(uint64_t subscription_id) const {
@@ -113,8 +131,9 @@ public:
     }
 
 private:
-    // topic -> set of subscription IDs (O(1) lookup by topic)
-    std::unordered_map<std::string, std::unordered_set<uint64_t>> topic_subscriptions_;
+    // topic -> (subscription ID -> owning session ID); O(1) lookup by topic, and iterating yields
+    // everything needed to deliver an event without a second lookup
+    std::unordered_map<std::string, std::unordered_map<uint64_t, uint64_t>> topic_subscriptions_;
 
     // subscription_id -> subscription info (O(1) reverse lookup)
     std::unordered_map<uint64_t, SubscriptionInfo> subscriptions_;

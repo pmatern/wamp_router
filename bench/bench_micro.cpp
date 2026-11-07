@@ -88,6 +88,20 @@ TEST_CASE("bench: serialize", "[bench][serializer]") {
     BENCHMARK("ERROR (10 args + kw)") { return serialize_error(error_args); };
 }
 
+TEST_CASE("bench: EVENT per subscriber", "[bench][serializer]") {
+    const WampList args = make_args(10);
+    const WampDict kw = make_kw();
+    const EventMessage event{10, 20, {}, args, kw};
+    const EventTemplate tmpl{event};
+
+    // What the router did per subscriber before EventTemplate, and what it does now
+    BENCHMARK("serialize_event + frame (per subscriber, old)") {
+        return rawsocket::create_wamp_message(serialize_event(event));
+    };
+    BENCHMARK("EventTemplate::frame_for (per subscriber, new)") { return tmpl.frame_for(12345); };
+    BENCHMARK("EventTemplate build (once per publish)") { return EventTemplate{event}; };
+}
+
 TEST_CASE("bench: deserialize", "[bench][serializer]") {
     const WampList args = make_args(10);
     const WampDict kw = make_kw();
@@ -145,6 +159,11 @@ TEST_CASE("bench: subscription manager", "[bench][routing]") {
         };
         BENCHMARK("get_subscription (by id), " + std::to_string(n) + " subscribers") {
             return manager.get_subscription(n);
+        };
+        BENCHMARK("for_each_subscriber, " + std::to_string(n) + " subscribers") {
+            uint64_t sum = 0;
+            manager.for_each_subscriber(kTopic, [&](uint64_t sub, uint64_t session) { sum += sub ^ session; });
+            return sum;
         };
     }
 

@@ -322,13 +322,15 @@ Baseline (Release, Intel i7-1068NG7 @ 2.3 GHz, single thread, mean of 50 samples
 | Serialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 1.9 – 2.8 µs |
 | Deserialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 4.5 – 5.1 µs |
 | RawSocket frame 128 B / 16 KiB | 52 ns / 146 ns |
-| `get_subscribers`, 1 / 100 / 10,000 subscribers | 62 ns / 383 ns / 31 µs |
+| `for_each_subscriber` (in place), 1 / 100 / 10,000 subscribers | 25 ns / 198 ns / 19 µs |
+| `get_subscribers` (copies the id set), 1 / 100 / 10,000 subscribers | 59 ns / 274 ns / 26 µs |
 | `find_callee` (1,000 registrations) | 32 ns |
 | Invocation tracker track + retrieve | 87 ns |
-| PUBLISH fan-out to 1 / 10 / 100 subscribers (incl. drain) | 3.1 µs / 28 µs / 279 µs |
-| CALL → INVOCATION → YIELD → RESULT through the handlers (no socket I/O) | 12 µs |
+| EVENT per subscriber: full serialize + frame / `EventTemplate::frame_for` | 2.6 µs / 55 ns |
+| PUBLISH fan-out to 1 / 10 / 100 subscribers (incl. drain) | 3.1 µs / 4.7 µs / 18.8 µs (was 3.1 / 28 / 279 µs) |
+| CALL → INVOCATION → YIELD → RESULT through the handlers (no socket I/O) | 12.5 µs |
 
-These are in-process numbers: they exclude socket I/O and TLS. The cost is dominated by CBOR (de)serialization through nlohmann::json; PUBLISH fan-out is roughly 2.8 µs per subscriber because each EVENT is serialized separately.
+These are in-process numbers: they exclude socket I/O and TLS. The cost is dominated by CBOR (de)serialization through nlohmann::json. PUBLISH fan-out serializes the EVENT once and stamps in each subscriber's subscription id (`EventTemplate`), so it costs about 0.15 µs per subscriber instead of 2.8 µs.
 
 ### Load test
 
@@ -350,11 +352,11 @@ Baseline (Release, same machine as above, embedded router, 10 positional argumen
 | RPC, 50 callers x 200 calls | 12.1k calls/s, p50 3.4 ms, p99 11.7 ms |
 | PubSub, 10 subscribers, 2,000 events/s | 0 lost, p50 0.20 ms, p99 4.4 ms |
 | PubSub, 10 subscribers, 5,000 events/s | 0 lost, p50 0.18 ms, p99 7.4 ms |
-| PubSub, 100 subscribers, 1,000 events/s | 0 lost, p50 1.9 ms, p99 39 ms |
+| PubSub, 100 subscribers, 1,000 events/s | 0 lost, p50 1.6 ms, p99 2.6 ms (was p99 39 ms) |
 | PubSub, 10 subscribers, unpaced (`--rate 0`), backpressure | 0 lost; publisher throttled to ~19k msg/s |
 | PubSub, 10 subscribers, unpaced, `--overflow drop` | 98% lost |
 
-RPC rows above were measured before the event-queue work; a rerun gives 18.2k calls/s with 10 callers (p50 0.55 ms, p99 0.78 ms).
+RPC rows above were measured before the event-queue work; a rerun gives about 18k calls/s with 10 callers (p50 0.55 ms, p99 0.8–1.1 ms).
 
 ### Event queue and backpressure
 
