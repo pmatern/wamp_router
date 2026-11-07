@@ -460,3 +460,69 @@ TEST_CASE("ConfigError error category", "[config]") {
             == "TLS private key file not found");
     }
 }
+
+TEST_CASE("Config::load() event queue settings", "[config][events]") {
+    TempCertFile cert("cert");
+    TempCertFile key("key");
+
+    auto load = [&](const std::string& events_section) {
+        std::string content = R"(
+[server]
+port = 8080
+[server.tls]
+cert = ")" + cert.path().string() + R"("
+key = ")" + key.path().string() + R"("
+)" + events_section;
+        TempConfigFile config(content);
+        return wamp::Config::load(config.path());
+    };
+
+    SECTION("defaults when [server.events] is absent") {
+        auto result = load("");
+        REQUIRE(result.has_value());
+        CHECK(result->events.size == 100);
+        CHECK(result->events.overflow == wamp::OverflowPolicy::BACKPRESSURE);
+        CHECK(result->events.backpressure_timeout == std::chrono::milliseconds{1000});
+    }
+
+    SECTION("all settings") {
+        auto result = load(R"(
+[server.events]
+queue_size = 5000
+overflow = "drop"
+backpressure_timeout_ms = 250
+)");
+        REQUIRE(result.has_value());
+        CHECK(result->events.size == 5000);
+        CHECK(result->events.overflow == wamp::OverflowPolicy::DROP);
+        CHECK(result->events.backpressure_timeout == std::chrono::milliseconds{250});
+    }
+
+    SECTION("partial settings keep defaults") {
+        auto result = load(R"(
+[server.events]
+queue_size = 7
+)");
+        REQUIRE(result.has_value());
+        CHECK(result->events.size == 7);
+        CHECK(result->events.overflow == wamp::OverflowPolicy::BACKPRESSURE);
+    }
+
+    SECTION("zero queue_size is rejected") {
+        auto result = load("[server.events]\nqueue_size = 0\n");
+        REQUIRE(!result.has_value());
+        CHECK(result.error() == wamp::ConfigError::INVALID_VALUE);
+    }
+
+    SECTION("unknown overflow policy is rejected") {
+        auto result = load("[server.events]\noverflow = \"block\"\n");
+        REQUIRE(!result.has_value());
+        CHECK(result.error() == wamp::ConfigError::INVALID_VALUE);
+    }
+
+    SECTION("zero backpressure timeout is rejected") {
+        auto result = load("[server.events]\nbackpressure_timeout_ms = 0\n");
+        REQUIRE(!result.has_value());
+        CHECK(result.error() == wamp::ConfigError::INVALID_VALUE);
+    }
+}

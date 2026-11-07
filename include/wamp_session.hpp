@@ -109,6 +109,8 @@ public:
     [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> process(std::span<const uint8_t> data) {
         buffer_.insert(buffer_.end(), data.begin(), data.end());
         output_buffer_.clear();
+        // Sends parked by earlier callers that never flushed them must not leak into this session's turn
+        EventChannelRegistry::clear_blocked();
 
         spdlog::debug("Received {} bytes, buffer now {} bytes in state {}",
                      data.size(), buffer_.size(), state_name());

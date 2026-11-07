@@ -348,12 +348,29 @@ Baseline (Release, same machine as above, embedded router, 10 positional argumen
 | RPC, 1 caller, 5,000 calls | 4.3k calls/s, p50 0.22 ms, p99 0.39 ms |
 | RPC, 10 callers x 1,000 calls | 13.6k calls/s, p50 0.66 ms, p99 1.4 ms |
 | RPC, 50 callers x 200 calls | 12.1k calls/s, p50 3.4 ms, p99 11.7 ms |
-| PubSub, 10 subscribers, 2,000 events/s | 0.4% lost, p50 0.22 ms, p99 26 ms |
-| PubSub, 10 subscribers, 5,000 events/s | 4.8% lost, p50 0.24 ms, p99 38 ms |
-| PubSub, 100 subscribers, 1,000 events/s | 10% lost, p50 2.3 ms, p99 175 ms |
-| PubSub, 10 subscribers, unpaced (`--rate 0`) | 98% lost |
+| PubSub, 10 subscribers, 2,000 events/s | 0 lost, p50 0.20 ms, p99 4.4 ms |
+| PubSub, 10 subscribers, 5,000 events/s | 0 lost, p50 0.18 ms, p99 7.4 ms |
+| PubSub, 100 subscribers, 1,000 events/s | 0 lost, p50 1.9 ms, p99 39 ms |
+| PubSub, 10 subscribers, unpaced (`--rate 0`), backpressure | 0 lost; publisher throttled to ~19k msg/s |
+| PubSub, 10 subscribers, unpaced, `--overflow drop` | 98% lost |
 
-Events are lost because each session's delivery queue holds 100 events and the router drops an event when a subscriber's queue is full. Bursts overflow it: the router handles a whole batch of PUBLISH messages before the subscriber sessions get to drain their queues.
+RPC rows above were measured before the event-queue work; a rerun gives 18.2k calls/s with 10 callers (p50 0.55 ms, p99 0.78 ms).
+
+### Event queue and backpressure
+
+Each session has a bounded queue of messages waiting to be written to its client (EVENT, INVOCATION, RESULT, ERROR). Size and overflow behaviour are configurable:
+
+```toml
+[server.events]
+queue_size = 100                 # events queued per session
+overflow = "backpressure"        # or "drop"
+backpressure_timeout_ms = 1000   # longest a sender waits for queue space
+```
+
+- **`backpressure` (default):** when a subscriber's queue is full, the session that triggered the delivery (the publisher, or the callee sending a YIELD) stops reading its socket until the subscriber catches up, so TCP flow control slows the sender. Nothing is lost. A slow subscriber therefore slows every publisher to its topics; `backpressure_timeout_ms` bounds that stall, after which the event is dropped and counted. It also breaks wait cycles between sessions that publish to each other.
+- **`drop`:** the event is discarded and counted. The publisher is never slowed.
+
+Dropped events are counted (`EventChannelRegistry::dropped_count()`) and logged at warning level: the first drop, then every 1,000th. Use `wamp_load --queue-size N --overflow drop|backpressure` to compare the policies.
 
 ## Architecture
 

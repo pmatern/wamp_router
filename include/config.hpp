@@ -17,6 +17,7 @@
 
 #include <toml.hpp>
 #include <filesystem>
+#include <chrono>
 #include <expected>
 #include <system_error>
 #include <string>
@@ -94,12 +95,27 @@ struct TlsConfig {
 };
 
 // ============================================================================
+// EventQueueConfig - Per-session delivery queue (router -> client) settings
+// ============================================================================
+enum class OverflowPolicy {
+    BACKPRESSURE,  // Suspend the sending session until the queue drains (bounded by timeout)
+    DROP           // Drop the event and count it
+};
+
+struct EventQueueConfig {
+    size_t size{100};                                       // Events queued per session
+    OverflowPolicy overflow{OverflowPolicy::BACKPRESSURE};
+    std::chrono::milliseconds backpressure_timeout{1000};   // Max wait before dropping under BACKPRESSURE
+};
+
+// ============================================================================
 // ServerConfig - Complete server configuration
 // ============================================================================
 struct ServerConfig {
     unsigned short port{};
     TlsConfig tls{};
     size_t max_pending_invocations{};
+    EventQueueConfig events{};
     spdlog::level::level_enum log_level{};
 
     // Authentication: authid → Ed25519 public key (hex-encoded, 64 chars = 32 bytes)
@@ -153,6 +169,41 @@ public:
                     toml::find<size_t>(rpc, "max_pending_invocations");
             } else {
                 config.max_pending_invocations = 10000; // Default
+            }
+
+            if (server.contains("events")) {
+                const auto& events = toml::find(server, "events");
+
+                if (events.contains("queue_size")) {
+                    const auto size = toml::find<size_t>(events, "queue_size");
+                    if (size == 0) {
+                        spdlog::error("[server.events] queue_size must be greater than 0");
+                        return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                    }
+                    config.events.size = size;
+                }
+
+                if (events.contains("overflow")) {
+                    const auto overflow = toml::find<std::string>(events, "overflow");
+                    if (overflow == "backpressure") {
+                        config.events.overflow = OverflowPolicy::BACKPRESSURE;
+                    } else if (overflow == "drop") {
+                        config.events.overflow = OverflowPolicy::DROP;
+                    } else {
+                        spdlog::error("[server.events] overflow must be \"backpressure\" or \"drop\", got \"{}\"",
+                                      overflow);
+                        return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                    }
+                }
+
+                if (events.contains("backpressure_timeout_ms")) {
+                    const auto ms = toml::find<size_t>(events, "backpressure_timeout_ms");
+                    if (ms == 0) {
+                        spdlog::error("[server.events] backpressure_timeout_ms must be greater than 0");
+                        return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                    }
+                    config.events.backpressure_timeout = std::chrono::milliseconds{ms};
+                }
             }
 
             if (config_data.contains("logging")) {

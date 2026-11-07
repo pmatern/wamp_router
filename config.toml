@@ -22,6 +22,19 @@ key = "/path/to/key.pem"
 # Controls how many concurrent CALL operations can be in flight
 max_pending_invocations = 10000
 
+[server.events]
+# Per-session queue of events/invocations/results waiting to be written to a client
+queue_size = 100
+
+# What to do when a client's queue is full:
+#   "backpressure" - pause reading from the session that is sending until the client catches up
+#                    (lossless; bounded by backpressure_timeout_ms)
+#   "drop"         - discard the event and count it
+overflow = "backpressure"
+
+# Longest a sender waits for queue space before the event is dropped
+backpressure_timeout_ms = 1000
+
 [logging]
 # Log level: trace, debug, info, warn, error, critical
 level = "info"

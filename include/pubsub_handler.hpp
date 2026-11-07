@@ -142,13 +142,13 @@ public:
                 // Share event data (flyweight pattern)
                 auto event_data = std::make_shared<std::vector<uint8_t>>(std::move(event_frame));
 
-                if (EventChannelRegistry::try_send(sub_info->session_id,
-                    EventToSend{sub_info->session_id, event_data})) {
+                if (accepted(EventChannelRegistry::deliver(sub_info->session_id,
+                    EventToSend{sub_info->session_id, event_data}))) {
                     sent_count++;
                     spdlog::debug("Sent EVENT to session {} via channel (subscription_id={})",
                                 sub_info->session_id, subscription_id);
                 } else {
-                    spdlog::warn("Failed to send EVENT to session {} (channel full or closed)",
+                    spdlog::debug("EVENT for session {} not delivered (queue full or session gone)",
                                 sub_info->session_id);
                 }
             }

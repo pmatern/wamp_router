@@ -57,6 +57,8 @@ struct Options {
     size_t messages = 10000;     // events published
     size_t calls = 1000;         // calls per caller
     size_t payload_args = 10;
+    size_t queue_size = 100;     // embedded router: per-session event queue size
+    std::string overflow = "backpressure";  // embedded router: backpressure | drop
     size_t rate = 2000;          // events/s, 0 = unpaced (stress: the router drops events when subscriber queues fill)
     bool verbose = false;
 };
@@ -71,6 +73,8 @@ void usage() {
         "  --callers N              rpc: concurrent caller clients (default 10)\n"
         "  --calls N                rpc: calls per caller (default 1000)\n"
         "  --payload-args N         positional arguments per message (default 10)\n"
+        "  --queue-size N           embedded router: per-session event queue size (default 100)\n"
+        "  --overflow P             embedded router: backpressure | drop (default backpressure)\n"
         "  --host H --port P        target an external plain-TCP router (default: embedded)\n"
         "  --verbose                keep router/client logging on\n");
 }
@@ -94,6 +98,8 @@ bool parse(int argc, char** argv, Options& o) {
         else if (a == "--callers") { if (!number(o.callers)) return false; }
         else if (a == "--messages") { if (!number(o.messages)) return false; }
         else if (a == "--calls") { if (!number(o.calls)) return false; }
+        else if (a == "--queue-size") { if (!number(o.queue_size)) return false; }
+        else if (a == "--overflow") { const char* v = next(); if (!v) return false; o.overflow = v; }
         else if (a == "--rate") { if (!number(o.rate)) return false; }
         else if (a == "--payload-args") { if (!number(o.payload_args)) return false; }
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(); return false; }
@@ -102,7 +108,11 @@ bool parse(int argc, char** argv, Options& o) {
         std::fprintf(stderr, "invalid --mode: %s\n", o.mode.c_str());
         return false;
     }
-    if (o.subscribers == 0 || o.callers == 0 || o.messages == 0 || o.calls == 0) {
+    if (o.overflow != "backpressure" && o.overflow != "drop") {
+        std::fprintf(stderr, "invalid --overflow: %s\n", o.overflow.c_str());
+        return false;
+    }
+    if (o.queue_size == 0 || o.subscribers == 0 || o.callers == 0 || o.messages == 0 || o.calls == 0) {
         std::fprintf(stderr, "counts must be greater than zero\n");
         return false;
     }
@@ -112,12 +122,11 @@ bool parse(int argc, char** argv, Options& o) {
 // Router on its own thread/io_context so it doesn't share an event loop with the clients.
 class EmbeddedRouter {
 public:
-    EmbeddedRouter() {
+    explicit EmbeddedRouter(ServerConfig config) {
         std::promise<std::pair<uint16_t, boost::asio::io_context*>> ready;
         auto future = ready.get_future();
-        thread_ = std::thread([ready = std::move(ready)]() mutable {
+        thread_ = std::thread([ready = std::move(ready), config = std::move(config)]() mutable {
             boost::asio::io_context io;
-            ServerConfig config;
             WampServer server{io, 0, config};
             ready.set_value({server.port(), &io});
             server.start();
@@ -208,7 +217,8 @@ double seconds(Clock::time_point a, Clock::time_point b) {
 // ----------------------------------------------------------------------------
 // PubSub: 1 publisher -> N subscribers
 // ----------------------------------------------------------------------------
-awaitable<void> run_pubsub(boost::asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port) {
+awaitable<void> run_pubsub(boost::asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port,
+                           bool embedded) {
     constexpr const char* kTopic = "load.pubsub";
 
     // Event callbacks can fire after this coroutine returns, so they share ownership of the stats
@@ -269,6 +279,10 @@ awaitable<void> run_pubsub(boost::asio::io_context& io, ClientPool& pool, const 
     std::printf("%-16s %.0f events/s\n", "delivery rate",
                 static_cast<double>(delivered) / std::max(seconds(start, end), 1e-9));
     state->latency.print("latency");
+    if (embedded) {
+        std::printf("%-16s %llu\n", "router drops",
+                    static_cast<unsigned long long>(EventChannelRegistry::dropped_count()));
+    }
 
     co_await disconnect_quietly(publisher);
     for (auto& sub : subs) {
@@ -353,9 +367,14 @@ int main(int argc, char** argv) {
     std::unique_ptr<EmbeddedRouter> router;
     uint16_t port = opts.port;
     if (port == 0) {
-        router = std::make_unique<EmbeddedRouter>();
+        ServerConfig config;
+        config.events.size = opts.queue_size;
+        config.events.overflow = opts.overflow == "drop" ? OverflowPolicy::DROP : OverflowPolicy::BACKPRESSURE;
+        EventChannelRegistry::reset_dropped_count();
+        router = std::make_unique<EmbeddedRouter>(std::move(config));
         port = router->port();
-        std::printf("embedded router on 127.0.0.1:%u (shares CPUs with the load clients)\n", port);
+        std::printf("embedded router on 127.0.0.1:%u (shares CPUs with the load clients), "
+                    "event queue %zu, overflow=%s\n", port, opts.queue_size, opts.overflow.c_str());
     } else {
         std::printf("target router %s:%u\n", opts.host.c_str(), port);
     }
@@ -366,7 +385,7 @@ int main(int argc, char** argv) {
     co_spawn(io, [&]() -> awaitable<void> {
         try {
             if (opts.mode == "pubsub" || opts.mode == "both") {
-                co_await run_pubsub(io, pool, opts, opts.host, port);
+                co_await run_pubsub(io, pool, opts, opts.host, port, router != nullptr);
             }
             if (opts.mode == "rpc" || opts.mode == "both") {
                 co_await run_rpc(io, pool, opts, opts.host, port);

@@ -68,8 +68,9 @@ public:
                 pending.call_request_id, "Callee session disconnected");
             auto frame = rawsocket::create_wamp_message(serialize_error(error));
             auto data = std::make_shared<std::vector<uint8_t>>(std::move(frame));
-            if (!EventChannelRegistry::try_send(pending.caller_session_id,
-                EventToSend{pending.caller_session_id, data})) {
+            // Cleanup runs during disconnect and cannot wait for queue space
+            if (!accepted(EventChannelRegistry::deliver(pending.caller_session_id,
+                EventToSend{pending.caller_session_id, data}, /*may_defer=*/false))) {
                 spdlog::debug("Caller session {} gone; dropped callee_failure for request_id={}",
                              pending.caller_session_id, pending.call_request_id);
             }
@@ -193,8 +194,8 @@ public:
 
         auto invocation_data = std::make_shared<std::vector<uint8_t>>(std::move(invocation_frame));
 
-        if (!EventChannelRegistry::try_send(callee_session_id,
-            EventToSend{callee_session_id, invocation_data})) {
+        if (!accepted(EventChannelRegistry::deliver(callee_session_id,
+            EventToSend{callee_session_id, invocation_data}))) {
             spdlog::error("Failed to send INVOCATION to callee session {} (channel full or closed)",
                          callee_session_id);
 
@@ -264,8 +265,8 @@ public:
 
         auto result_data = std::make_shared<std::vector<uint8_t>>(std::move(result_frame));
 
-        if (!EventChannelRegistry::try_send(caller_session_id,
-            EventToSend{caller_session_id, result_data})) {
+        if (!accepted(EventChannelRegistry::deliver(caller_session_id,
+            EventToSend{caller_session_id, result_data}))) {
             spdlog::error("Failed to send RESULT to caller session {} (channel full or closed)",
                          caller_session_id);
             // Caller may have disconnected or channel is full
@@ -306,8 +307,8 @@ public:
         auto frame = rawsocket::create_wamp_message(serialize_error(forwarded));
         auto data = std::make_shared<std::vector<uint8_t>>(std::move(frame));
 
-        if (!EventChannelRegistry::try_send(pending_call->caller_session_id,
-            EventToSend{pending_call->caller_session_id, data})) {
+        if (!accepted(EventChannelRegistry::deliver(pending_call->caller_session_id,
+            EventToSend{pending_call->caller_session_id, data}))) {
             spdlog::error("Failed to send ERROR to caller session {} (channel full or closed)",
                          pending_call->caller_session_id);
             return std::vector<uint8_t>{};

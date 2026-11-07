@@ -461,12 +461,13 @@ gdb ./build/wamp_router
 The router uses TOML configuration files (config.toml or test_config.toml) for all settings:
 - Server port, TLS certificate paths, logging level
 - `max_pending_invocations` - limits pending RPC calls (set via `ProcedureHandler::set_max_pending_invocations()`)
+- `[server.events]` - `queue_size`, `overflow` (`backpressure` | `drop`), `backpressure_timeout_ms`
 - Optional authentication keys for WAMP-Cryptosign
 
 ### Performance Considerations
 - **Single-threaded**: Currently runs on single io_context thread. For multi-threading, create thread pool calling `io_context.run()`
 - **Buffer sizes**: 8KB buffers in handle_wamp_session. Adjust for large payloads
-- **Event channels**: One channel per session, capacity 100 (`EventChannelRegistry::get_or_create`). An event is dropped when the subscriber's queue is full; see TODO.md
+- **Event channels**: One bounded channel per session (`[server.events] queue_size`, default 100). When a queue is full, `overflow = "backpressure"` (default) suspends the sending session until the subscriber drains it (bounded by `backpressure_timeout_ms`), `"drop"` discards and counts the event. See `EventChannelRegistry` in `event_channel.hpp`.
 - **ID generation**: Atomic counters, lock-free
 
 ## Testing
@@ -482,6 +483,7 @@ Tests use Catch2 framework with CTest integration:
 - **test_wamp_client.cpp**: WAMP client functionality
 - **test_integration.cpp**: End-to-end scenarios with mock sockets
 - **test_protocol_gaps.cpp**: UNSUBSCRIBE/UNREGISTER, payload forwarding, callee errors, pipelined frames
+- **test_event_queue.cpp**: Event queue sizing, drop/backpressure policies, timeout
 - **test_crypto_utils.cpp**: Ed25519 signature verification and challenge generation
 
 ### Benchmarks

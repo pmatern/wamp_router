@@ -60,6 +60,7 @@ add_executable(wamp_tests
     tests/test_config.cpp
     tests/test_wamp_client.cpp
     tests/test_protocol_gaps.cpp
+    tests/test_event_queue.cpp
     tests/test_crypto_utils.cpp
 )
 

@@ -70,6 +70,10 @@ int main(int argc, char* argv[]) {
         }
         fmt::print("  Max Pending Invocations: {}\n",
             config.max_pending_invocations);
+        fmt::print("  Event Queue: {} per session, overflow={}, backpressure timeout={} ms\n",
+            config.events.size,
+            config.events.overflow == wamp::OverflowPolicy::BACKPRESSURE ? "backpressure" : "drop",
+            config.events.backpressure_timeout.count());
         fmt::print("  Log Level: {}\n",
             spdlog::level::to_string_view(config.log_level));
         fmt::print("  Authentication Keys: {}\n",

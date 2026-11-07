@@ -305,6 +305,7 @@ TEST_CASE("WampClient - RPC arguments round trip", "[wamp_client][payload]") {
 
         co_await callee.disconnect();
         co_await caller.disconnect();
+        io.stop();
     }, detached);
 
     io.run_for(std::chrono::seconds(3));
@@ -357,6 +358,7 @@ TEST_CASE("WampClient - PubSub payload, unsubscribe and exclude_me", "[wamp_clie
 
         co_await sub.disconnect();
         co_await pub.disconnect();
+        io.stop();
     }, detached);
 
     io.run_for(std::chrono::seconds(3));
@@ -403,6 +405,7 @@ TEST_CASE("WampClient - unregister removes the procedure", "[wamp_client][payloa
 
         co_await callee.disconnect();
         co_await caller.disconnect();
+        io.stop();
     }, detached);
 
     io.run_for(std::chrono::seconds(3));
@@ -467,6 +470,7 @@ TEST_CASE("WampClient - callee errors reach the caller", "[wamp_client][payload]
 
         co_await callee.disconnect();
         co_await caller.disconnect();
+        io.stop();
     }, detached);
 
     io.run_for(std::chrono::seconds(3));
@@ -532,6 +536,7 @@ TEST_CASE("WampClient - many concurrent callers share one callee", "[wamp_client
         for (auto& caller : callers) {
             co_await caller->disconnect();
         }
+        io.stop();
     }, detached);
 
     io.run_for(std::chrono::seconds(10));
@@ -539,4 +544,65 @@ TEST_CASE("WampClient - many concurrent callers share one callee", "[wamp_client
     REQUIRE(running == 0);
     REQUIRE(failed == 0);
     REQUIRE(ok == kCallers * kCallsEach);
+}
+
+namespace {
+
+// Unpaced burst of fire-and-forget PUBLISHes into a tiny subscriber queue.
+// Returns {delivered, dropped}.
+std::pair<size_t, uint64_t> run_burst(OverflowPolicy policy, size_t queue_size, size_t burst) {
+    io_context io;
+    ServerConfig config;
+    config.events.size = queue_size;
+    config.events.overflow = policy;
+    config.events.backpressure_timeout = std::chrono::milliseconds{3000};
+    uint16_t port = find_available_port();
+    WampServer server{io, port, config};   // applies config.events to the channel registry
+    server.start();
+    EventChannelRegistry::reset_dropped_count();
+
+    WampClient sub{io};
+    WampClient pub{io};
+    size_t delivered = 0;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await sub.connect("127.0.0.1", port, "test.realm");
+        co_await pub.connect("127.0.0.1", port, "test.realm");
+        co_await sub.subscribe("proto.client.burst", [&](const EventMessage&) { ++delivered; });
+        co_await sleep_ms(io, 50);
+
+        for (size_t i = 0; i < burst; ++i) {
+            (void)co_await pub.publish("proto.client.burst", WampList{int64_t(i)});
+        }
+
+        // Every event ends up either delivered or counted as dropped
+        for (int i = 0; i < 300 && delivered + EventChannelRegistry::dropped_count() < burst; ++i) {
+            co_await sleep_ms(io, 10);
+        }
+        co_await pub.disconnect();
+        co_await sub.disconnect();
+        io.stop();
+    }, detached);
+
+    io.run_for(std::chrono::seconds(8));
+    auto result = std::make_pair(delivered, EventChannelRegistry::dropped_count());
+    EventChannelRegistry::configure({});
+    return result;
+}
+
+}  // namespace
+
+TEST_CASE("Backpressure delivers every event through a tiny queue", "[wamp_client][events]") {
+    constexpr size_t kBurst = 2000;
+    auto [delivered, dropped] = run_burst(OverflowPolicy::BACKPRESSURE, 4, kBurst);
+
+    REQUIRE(dropped == 0);
+    REQUIRE(delivered == kBurst);
+}
+
+TEST_CASE("DROP policy accounts for every event", "[wamp_client][events]") {
+    constexpr size_t kBurst = 2000;
+    auto [delivered, dropped] = run_burst(OverflowPolicy::DROP, 4, kBurst);
+
+    REQUIRE(delivered + dropped == kBurst);
 }
