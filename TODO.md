@@ -44,3 +44,6 @@ Do the protocol gaps (arguments forwarding in particular) first so benchmarks me
 - [x] Realm support: Cryptosign signs the raw challenge bytes as the spec does; subscriptions and registrations are isolated per realm (`Realm` in `include/realm.hpp`, one pair of managers per realm, cached by the session; the invocation tracker and event channels stay global); `[auth.realms]` lists the realms each authid may join; `[auth.roles]` may give a role per realm. For the threading review: a `Realm` is the natural shard unit.
 - [ ] WebSocket transport; JSON and MessagePack serializers.
 - [ ] Pattern-based subscriptions/registrations, call cancellation, progressive results.
+
+## Dependencies (after Stage 0)
+- [ ] Prefer the C++23 standard library where it can replace a dependency: port HELLO/WELCOME/GOODBYE/ABORT/CHALLENGE/AUTHENTICATE to `cbor.hpp` and drop `nlohmann-json` (hot path already does not use it; `WampClient::call` returns `nlohmann::json` and needs a plain return type; tests may keep it as an oracle); replace `fmt` with `std::format`/`std::print` (spdlog `SPDLOG_USE_STD_FORMAT`); switch from Boost.Asio to standalone Asio (`std::error_code`, `std::system_error`; mechanical rename, drops Boost). Sockets, TLS and coroutine executors have no standard replacement (no networking in C++23).
