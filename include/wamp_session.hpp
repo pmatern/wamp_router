@@ -32,8 +32,6 @@
 #include <system_error>
 #include <cstdint>
 
-// TODO - in process client support, fix names.
-
 namespace wamp {
 
 // RawSocket framing states

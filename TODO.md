@@ -17,11 +17,11 @@ Outstanding work, as of 2026-11-05. Check items off as they land.
 - [x] Found by the load test: `WampSession::process` handled one frame per socket read (pipelined messages sat in the buffer, and a partial 4-byte header spun forever); `handle_wamp_session` dropped an event or client bytes when the read and channel receive completed together; `WampClient` interleaved socket writes from concurrent invocation handlers; `WampClient::disconnect` used immediately-invoked coroutine lambdas (use-after-free in release builds).
 - [x] Flaky test "WampClient - Register procedure and handle call": the integration test fixture stopped its server before it saw the client EOF, so `WampSession` never ran `on_disconnect()` and `com.example.add` stayed registered in the process-wide registry. `WampSession` now cleans up in its destructor.
 - [x] Fixed `-Wunused-result` and unused-variable warnings in `tests/test_wamp_session.cpp`.
-- [ ] Log the clean-disconnect "Operation canceled" read-loop error at debug, not error.
+- [x] Clean-disconnect "Operation canceled" read errors (client read loop, server read) are logged at debug; also stopped logging a cancelled event-channel receive (the loser of the read/event race) as an error.
 - [ ] Integration tests (`tests/test_integration.cpp`): graceful server shutdown instead of detach; timing-dependent tests.
-- [ ] Resolve the TODO at `include/wamp_session.hpp:35` ("in process client support, fix names").
+- [x] Removed the stale TODO at `include/wamp_session.hpp:35` (in-process use is already covered: tests drive `WampSession::process()` directly without sockets).
 - [x] Docker build re-verified (Clang 18 + libc++): builds cleanly and all 112 tests pass in the container.
-- [ ] Add `test_crypto_utils.cpp` to the test list in `CLAUDE.md`.
+- [x] `test_crypto_utils.cpp` is in the `CLAUDE.md` test list.
 
 ## Performance
 Do the protocol gaps (arguments forwarding in particular) first so benchmarks measure realistic payloads.

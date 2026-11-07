@@ -464,6 +464,15 @@ private:
             }
 
             spdlog::debug("Read loop terminated");
+        } catch (const boost::system::system_error& e) {
+            // Closing the socket (disconnect) or the peer going away ends the loop; not an error
+            if (e.code() == boost::asio::error::operation_aborted || e.code() == boost::asio::error::eof) {
+                spdlog::debug("Read loop ended: {}", e.what());
+            } else {
+                spdlog::error("Read loop error: {}", e.what());
+            }
+            socket_.close();
+            state_ = State::CLOSED;
         } catch (const std::exception& e) {
             spdlog::error("Read loop error: {}", e.what());
             socket_.close();

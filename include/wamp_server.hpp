@@ -79,6 +79,12 @@ handle_socket_read_completion(
         co_return std::unexpected{ec_read};
     }
 
+    if (ec_read == boost::asio::error::operation_aborted) {
+        spdlog::debug("Read from {} canceled", remote_address);
+        protocol.on_disconnect();
+        co_return std::unexpected{ec_read};
+    }
+
     if (ec_read) {
         spdlog::error("Read error from {}: {}", remote_address, ec_read.message());
         protocol.on_disconnect();
@@ -177,7 +183,10 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
             // wait_for_one cancels the loser, but the loser may already have completed; its result
             // is still in the tuple and must not be dropped (that would lose an event or client bytes).
             const bool read_done = order[0] == 0 || ec_read != boost::asio::error::operation_aborted;
-            const bool event_done = order[0] == 1 || ec_channel != boost::asio::error::operation_aborted;
+            // (a cancelled channel receive reports channel_cancelled rather than operation_aborted)
+            const bool event_done = order[0] == 1 ||
+                (ec_channel != boost::asio::error::operation_aborted &&
+                 ec_channel != boost::asio::experimental::error::channel_cancelled);
 
             if (event_done) {
                 if (ec_channel) {
