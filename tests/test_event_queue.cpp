@@ -179,3 +179,61 @@ TEST_CASE("deliver_blocked drops after the backpressure timeout", "[event_queue]
     REQUIRE(receive_tag(*fx.channel) == 0);   // the queued event is still there
     REQUIRE(!receive_tag(*fx.channel).has_value());
 }
+
+TEST_CASE("Stalled subscribers are skipped after repeated timeouts", "[event_queue]") {
+    QueueConfigGuard guard{1, OverflowPolicy::BACKPRESSURE, 40ms};
+    EventChannelRegistry::configure({1, OverflowPolicy::BACKPRESSURE, 40ms, 2});
+    ChannelFixture fx;
+
+    REQUIRE(EventChannelRegistry::deliver(kSession, make_event(0)) == DeliveryResult::QUEUED);
+
+    auto flush = [&] {
+        bool done = false;
+        boost::asio::co_spawn(fx.io, [&]() -> boost::asio::awaitable<void> {
+            co_await EventChannelRegistry::deliver_blocked(EventChannelRegistry::take_blocked());
+            done = true;
+        }, boost::asio::detached);
+        fx.io.restart();
+        fx.io.run_for(2s);
+        REQUIRE(done);
+    };
+
+    // Two timeouts in a row mark the subscriber slow
+    REQUIRE(EventChannelRegistry::deliver(kSession, make_event(1)) == DeliveryResult::DEFERRED);
+    flush();
+    REQUIRE(!EventChannelRegistry::is_slow(kSession));
+    REQUIRE(EventChannelRegistry::deliver(kSession, make_event(2)) == DeliveryResult::DEFERRED);
+    flush();
+    REQUIRE(EventChannelRegistry::is_slow(kSession));
+
+    // Now publishers no longer wait on it
+    REQUIRE(EventChannelRegistry::deliver(kSession, make_event(3)) == DeliveryResult::DROPPED_FULL);
+    REQUIRE(EventChannelRegistry::take_blocked().empty());
+
+    // Once it drains, delivery works again and the mark clears
+    REQUIRE(receive_tag(*fx.channel) == 0);
+    REQUIRE(EventChannelRegistry::deliver(kSession, make_event(4)) == DeliveryResult::QUEUED);
+    REQUIRE(!EventChannelRegistry::is_slow(kSession));
+    REQUIRE(EventChannelRegistry::deliver(kSession, make_event(5)) == DeliveryResult::DEFERRED);
+    EventChannelRegistry::clear_blocked();
+}
+
+TEST_CASE("slow_subscriber_limit 0 never skips", "[event_queue]") {
+    QueueConfigGuard guard{1, OverflowPolicy::BACKPRESSURE, 30ms};
+    EventChannelRegistry::configure({1, OverflowPolicy::BACKPRESSURE, 30ms, 0});
+    ChannelFixture fx;
+
+    REQUIRE(EventChannelRegistry::deliver(kSession, make_event(0)) == DeliveryResult::QUEUED);
+    for (int i = 0; i < 3; ++i) {
+        REQUIRE(EventChannelRegistry::deliver(kSession, make_event(1)) == DeliveryResult::DEFERRED);
+        bool done = false;
+        boost::asio::co_spawn(fx.io, [&]() -> boost::asio::awaitable<void> {
+            co_await EventChannelRegistry::deliver_blocked(EventChannelRegistry::take_blocked());
+            done = true;
+        }, boost::asio::detached);
+        fx.io.restart();
+        fx.io.run_for(2s);
+        REQUIRE(done);
+    }
+    REQUIRE(!EventChannelRegistry::is_slow(kSession));
+}

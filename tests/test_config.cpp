@@ -483,6 +483,7 @@ key = ")" + key.path().string() + R"("
         CHECK(result->events.size == 100);
         CHECK(result->events.overflow == wamp::OverflowPolicy::BACKPRESSURE);
         CHECK(result->events.backpressure_timeout == std::chrono::milliseconds{1000});
+        CHECK(result->events.slow_subscriber_limit == 3);
     }
 
     SECTION("all settings") {
@@ -491,11 +492,13 @@ key = ")" + key.path().string() + R"("
 queue_size = 5000
 overflow = "drop"
 backpressure_timeout_ms = 250
+slow_subscriber_limit = 5
 )");
         REQUIRE(result.has_value());
         CHECK(result->events.size == 5000);
         CHECK(result->events.overflow == wamp::OverflowPolicy::DROP);
         CHECK(result->events.backpressure_timeout == std::chrono::milliseconds{250});
+        CHECK(result->events.slow_subscriber_limit == 5);
     }
 
     SECTION("partial settings keep defaults") {

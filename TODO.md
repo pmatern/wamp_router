@@ -28,7 +28,7 @@ Do the protocol gaps (arguments forwarding in particular) first so benchmarks me
 - [x] Catch2 `BENCHMARK` micro-benchmarks in `bench/bench_micro.cpp` (target `wamp_bench`, not built by default). Baseline numbers are in the README.
 - [x] End-to-end load tool `wamp_load` (`bench/load_test.cpp`, not built by default). Baseline numbers are in the README.
 - [x] Event loss under load: queue size, overflow policy (`backpressure` default | `drop`) and backpressure timeout are configurable under `[server.events]`; drops are counted and logged. Unpaced publishing is now lossless.
-- [ ] Backpressure only throttles the session that triggered the delivery; a stalled subscriber still holds up publishers for up to `backpressure_timeout_ms` per publish. Consider per-subscriber disconnect/skip after repeated timeouts.
+- [x] Slow subscribers: after `[server.events] slow_subscriber_limit` (default 3, 0 = off) consecutive backpressure timeouts a subscriber is skipped (events dropped immediately while its queue is full) until it makes room again. Not done: disconnecting chronically stalled subscribers.
 - [x] Serialize each EVENT once per PUBLISH (`EventTemplate`): per-subscriber cost 2.6 µs → 55 ns; 100-subscriber fan-out 279 µs → 19 µs.
 - [x] `SubscriptionManager::for_each_subscriber` iterates in place (no vector copy, no per-subscriber lookup); the publish path uses it. At 10,000 subscribers the remaining cost is walking the hash map (19 µs); a flat vector of subscriptions per topic would be the next step if that matters.
 - [ ] After the load tool exists, revisit the single-threaded design and unbounded per-session channels (`include/event_channel.hpp`).

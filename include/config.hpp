@@ -106,6 +106,7 @@ struct EventQueueConfig {
     size_t size{100};                                       // Events queued per session
     OverflowPolicy overflow{OverflowPolicy::BACKPRESSURE};
     std::chrono::milliseconds backpressure_timeout{1000};   // Max wait before dropping under BACKPRESSURE
+    size_t slow_subscriber_limit{3};                        // Consecutive timeouts before a subscriber is skipped (0 = never)
 };
 
 // ============================================================================
@@ -208,6 +209,11 @@ public:
                         return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
                     }
                     config.events.backpressure_timeout = std::chrono::milliseconds{ms};
+                }
+
+                if (events.contains("slow_subscriber_limit")) {
+                    config.events.slow_subscriber_limit =
+                        toml::find<size_t>(events, "slow_subscriber_limit");
                 }
             }
 

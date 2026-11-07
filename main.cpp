@@ -71,10 +71,11 @@ int main(int argc, char* argv[]) {
         fmt::print("  Max Pending Invocations: {}\n",
             config.max_pending_invocations);
         fmt::print("  Call Timeout: {} ms\n", config.call_timeout.count());
-        fmt::print("  Event Queue: {} per session, overflow={}, backpressure timeout={} ms\n",
+        fmt::print("  Event Queue: {} per session, overflow={}, backpressure timeout={} ms, slow subscriber limit={}\n",
             config.events.size,
             config.events.overflow == wamp::OverflowPolicy::BACKPRESSURE ? "backpressure" : "drop",
-            config.events.backpressure_timeout.count());
+            config.events.backpressure_timeout.count(),
+            config.events.slow_subscriber_limit);
         fmt::print("  Log Level: {}\n",
             spdlog::level::to_string_view(config.log_level));
         fmt::print("  Authentication Keys: {}\n",

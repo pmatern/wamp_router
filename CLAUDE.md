@@ -462,7 +462,7 @@ The router uses TOML configuration files (config.toml or test_config.toml) for a
 - Server port, TLS certificate paths, logging level
 - `max_pending_invocations` - limits pending RPC calls (set via `ProcedureHandler::set_max_pending_invocations()`)
 - `call_timeout_ms` (`[server.rpc]`) - callee answer deadline, 0 disables; CALL `timeout` option overrides
-- `[server.events]` - `queue_size`, `overflow` (`backpressure` | `drop`), `backpressure_timeout_ms`
+- `[server.events]` - `queue_size`, `overflow` (`backpressure` | `drop`), `backpressure_timeout_ms`, `slow_subscriber_limit`
 - Optional authentication keys for WAMP-Cryptosign
 
 ### Performance Considerations

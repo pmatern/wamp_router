@@ -64,6 +64,9 @@ using EventChannel = boost::asio::experimental::channel<void(boost::system::erro
 //                   catches up (TCP then pushes back on the sender). The wait is bounded by
 //                   backpressure_timeout, after which the event is dropped and counted; this also
 //                   breaks wait cycles between sessions that publish to each other.
+// A subscriber whose waits time out slow_subscriber_limit times in a row is marked slow: while its
+// queue is full, further events for it are dropped immediately instead of making publishers wait.
+// Any successful delivery to it (it made room again) clears the mark.
 
 // Result of EventChannelRegistry::deliver
 enum class DeliveryResult {
@@ -124,6 +127,7 @@ public:
         if (it != channels.end()) {
             it->second->close();
             channels.erase(it);
+            strikes().erase(session_id);
             spdlog::debug("Removed event channel for session {}", session_id);
         }
     }
@@ -148,7 +152,13 @@ public:
         }
 
         if (channel->try_send(boost::system::error_code{}, event)) {
+            clear_strikes(session_id);
             return DeliveryResult::QUEUED;
+        }
+
+        if (is_slow(session_id)) {
+            note_drop(session_id, "slow subscriber");
+            return DeliveryResult::DROPPED_FULL;
         }
 
         if (may_defer && settings().overflow == OverflowPolicy::BACKPRESSURE) {
@@ -200,8 +210,21 @@ public:
             if (ec_send) {
                 expired = expired || order[0] == 1;
                 note_drop(send.session_id, order[0] == 1 ? "backpressure timeout" : "channel closed");
+                if (order[0] == 1) {
+                    add_strike(send.session_id);
+                }
+            } else {
+                clear_strikes(send.session_id);
             }
         }
+    }
+
+    // True if the session has timed out slow_subscriber_limit waits in a row
+    [[nodiscard]] static bool is_slow(uint64_t session_id) {
+        const auto limit = settings().slow_subscriber_limit;
+        if (limit == 0) return false;
+        auto it = strikes().find(session_id);
+        return it != strikes().end() && it->second >= limit;
     }
 
     // Events dropped since startup (full queue under DROP, backpressure timeout, missing session)
@@ -214,6 +237,25 @@ public:
     }
 
 private:
+    static void add_strike(uint64_t session_id) {
+        const auto limit = settings().slow_subscriber_limit;
+        if (limit == 0) return;
+        if (++strikes()[session_id] == limit) {
+            spdlog::warn("Session {} is a slow subscriber ({} backpressure timeouts in a row); "
+                         "dropping its events while its queue is full", session_id, limit);
+        }
+    }
+
+    static void clear_strikes(uint64_t session_id) {
+        auto& s = strikes();
+        if (!s.empty()) s.erase(session_id);
+    }
+
+    static std::unordered_map<uint64_t, size_t>& strikes() {
+        static std::unordered_map<uint64_t, size_t> map;
+        return map;
+    }
+
     // Logs the first drop and then every 1000th so a stalled subscriber can't flood the log
     static void note_drop(uint64_t session_id, const char* reason) {
         const auto total = dropped().fetch_add(1, std::memory_order_relaxed) + 1;

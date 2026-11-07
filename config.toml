@@ -39,6 +39,11 @@ overflow = "backpressure"
 # Longest a sender waits for queue space before the event is dropped
 backpressure_timeout_ms = 1000
 
+# After this many consecutive backpressure timeouts a subscriber is treated as stalled: while its
+# queue is full its events are dropped immediately, so it stops slowing down publishers. Any
+# successful delivery clears the mark. 0 = never skip.
+slow_subscriber_limit = 3
+
 [logging]
 # Log level: trace, debug, info, warn, error, critical
 level = "info"
