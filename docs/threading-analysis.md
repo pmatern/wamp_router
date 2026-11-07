@@ -30,6 +30,10 @@ cmake --build build-local-release --target wamp_profile_router wamp_load wamp_ha
 ./build-local-release/wamp_tls_probe test_certs/cert.pem test_certs/key.pem
 ```
 
+**Profile after Stage 0.1-0.3 (Linux VM, share of router CPU):** kernel 74% (RPC) / 83% (fan-out), asio 10.6% / 10.5%, router
+logic 3.8% / 2.0%, std containers 3.1% / 1.7%, libc 2.5% / 2.9%, allocation 2.3% / 2.1%, logging 0.6% / 0.3%, CBOR 0.4% / 0.3%.
+What is left is the kernel (syscalls and TCP) and asio's own machinery.
+
 **Caveat that matters.** Inside Docker Desktop's VM, syscalls are very expensive (about 20 us each), so the kernel share there is
 80%; on macOS natively the router spends about one third of its CPU in the kernel. The *user-space* breakdown and the *syscall
 counts per message* are reliable; the absolute kernel share is not. Re-run on bare-metal or a real Linux VM before committing to the
@@ -157,9 +161,23 @@ messages are strictly request/response.
 3. **(done)** **Replace nlohmann CBOR** with a purpose-built reader/writer for the WAMP message shapes (decode straight into `WampList`/
    `WampDict`, encode straight into the frame buffer; no `json` tree): CBOR is a third of RPC user time, and the README shows
    4.5-5 us to decode a 10-argument message.
-4. Recycle frame buffers (pool) instead of `make_shared<vector>` per frame: allocation is 3-5% of CPU.
-5. Evaluate Asio's io_uring backend on Linux (`BOOST_ASIO_HAS_IO_URING`). Caveat: many container runtimes' default seccomp
-   profiles block `io_uring`, so keep epoll as the default and treat this as an opt-in.
+4. **(measured, skipped)** Recycle frame buffers (pool) instead of `make_shared<vector>` per frame. After the codec work the Linux
+   profile shows allocation at 2.3% (RPC) and 2.1% (fan-out) of router CPU, and the whole CBOR codec at 0.4% / 0.3% (it was 10% /
+   3%; nlohmann no longer appears on the hot path). A pool could win at most that 2%, and the pooled `shared_ptr` deleter would add
+   atomic work on the cross-core path the threaded design needs. Not worth the complexity; revisit if a later profile shows
+   allocation growing.
+5. **(measured, rejected)** Asio's io_uring backend (`BOOST_ASIO_HAS_IO_URING` + `BOOST_ASIO_DISABLE_EPOLL`, liburing, Linux 5.10
+   VM, router and load generator both built with it; needs `--ulimit memlock=-1` and a seccomp profile that allows io_uring):
+
+   | | epoll | io_uring |
+   |---|---|---|
+   | RPC, 10 callers: calls/s, router CPU (user + sys) | 11.3k, 0.79 + 3.15 s | 6.7k, 0.89 + 5.75 s |
+   | PubSub, 10 subscribers unpaced: events/s, router CPU | 27.2k, 1.7 + 7.4 s | 21.6k, 1.3 + 10.6 s |
+
+   io_uring was 40% slower on RPC and used 50-80% more kernel time. Asio submits one ring operation per socket read/write and does
+   not use the features that make io_uring pay off (multishot receive, registered buffers, batched submission across sockets), so
+   on many small messages it only adds ring overhead. Not worth enabling; revisit only with a hand-written io_uring transport
+   (not through Asio) and on a newer kernel and bare metal, where it could differ.
 
 ### Stage 1: a `Shard` object instead of process-wide statics
 

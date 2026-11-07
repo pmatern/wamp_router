@@ -35,7 +35,8 @@ Do the protocol gaps (arguments forwarding in particular) first so benchmarks me
 - [x] Stage 0.1: each established session now runs a reader coroutine and a writer coroutine; the writer coalesces queued frames into one gathered write (up to 64 frames / 256 KiB), a `WriteLock` serializes the two write paths. Fan-out throughput 46k -> 84k events/s, router CPU -26%, about 0.35 syscalls per delivered event (was 2.5). RPC unchanged.
 - [x] Stage 0.2: no per-session read buffer for plain sockets (wait for readability, read into a shared per-thread 64 KiB scratch; TLS keeps 4 KiB): idle session memory 11.0 KB -> 4.5 KB.
 - [x] Stage 0.3: direct CBOR codec (`include/cbor.hpp`) for the hot-path messages: byte-identical wire format, serialize 7x and deserialize 5.5x faster, RPC 17.8k -> 29k calls/s, router CPU -35% (RPC) / -65% (fan-out). Handshake/auth messages still use nlohmann (rare); could be ported to drop the dependency.
-- [ ] Rest of Stage 0: pool frame buffers; evaluate the Asio io_uring backend.
+- [x] Stage 0.4 (frame buffer pooling): measured and skipped. After the codec, allocation is about 2% of router CPU, so a pool cannot win more than that (profile in docs/threading-analysis.md).
+- [x] Stage 0.5: Asio io_uring backend evaluated and rejected (40% slower on RPC, 50-80% more kernel CPU in the Linux VM; see docs/threading-analysis.md). Stage 0 is finished.
 - [ ] Reproduce the profile on bare-metal/normal Linux (Docker Desktop's VM inflates syscall cost) and make `wamp_load` multi-threaded/multi-process so it is not the bottleneck.
 - [ ] Thread-per-core, shared-nothing router (staged: `Shard` object replacing the process-wide statics; N shards with an acceptor and SPSC lanes; replicated interest/registration tables with cross-shard pub/sub and RPC; per-shard metrics and logging). Needs Stage 0 and the bare-metal profile first.
 
