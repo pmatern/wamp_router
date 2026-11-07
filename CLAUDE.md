@@ -258,6 +258,7 @@ wamp_router/
 │   └── public.pem            # Ed25519 public key
 ├── include/                   # Header-only implementation
 │   ├── config.hpp            # TOML configuration loader with auth keys support
+│   ├── authorizer.hpp        # Role permissions (Action, Permissions): exact/prefix URI rules
 │   ├── crypto_utils.hpp      # Ed25519 signature verification, challenge generation
 │   ├── wamp_server.hpp       # WampServer (plain TCP for tests), WampTlsServer (TLS 1.3)
 │   ├── wamp_session.hpp      # Protocol state machine, buffering, authentication
@@ -463,7 +464,7 @@ The router uses TOML configuration files (config.toml or test_config.toml) for a
 - `max_pending_invocations` - limits pending RPC calls (set via `ProcedureHandler::set_max_pending_invocations()`)
 - `call_timeout_ms` (`[server.rpc]`) - callee answer deadline, 0 disables; CALL `timeout` option overrides
 - `[server.events]` - `queue_size`, `overflow` (`backpressure` | `drop`), `backpressure_timeout_ms`, `slow_subscriber_limit`
-- Optional authentication keys for WAMP-Cryptosign
+- Optional authentication keys for WAMP-Cryptosign, plus `[auth.roles]` / `[[roles.<name>.rules]]` authorization (default-deny once keys exist; see `include/authorizer.hpp`)
 
 ### Performance Considerations
 - **Single-threaded**: Currently runs on single io_context thread. For multi-threading, create thread pool calling `io_context.run()`
@@ -485,6 +486,7 @@ Tests use Catch2 framework with CTest integration:
 - **test_integration.cpp**: End-to-end scenarios with mock sockets
 - **test_protocol_gaps.cpp**: UNSUBSCRIBE/UNREGISTER, payload forwarding, callee errors, pipelined frames
 - **test_event_queue.cpp**: Event queue sizing, drop/backpressure policies, timeout
+- **test_authorization.cpp**: Permissions matching, role enforcement in the session, no restrictions without auth
 - **test_crypto_utils.cpp**: Ed25519 signature verification and challenge generation
 
 ### Benchmarks

@@ -658,6 +658,13 @@ struct ErrorMessage {
         return ErrorMessage{MessageType::CALL, request_id, details, "wamp.error.no_such_procedure"};
     }
 
+    static ErrorMessage create_not_authorized(MessageType request_type, uint64_t request_id,
+                                              const std::string& action, const std::string& uri) {
+        WampDict details;
+        details["message"] = "Not authorized to " + action + " " + uri;
+        return ErrorMessage{request_type, request_id, details, "wamp.error.not_authorized"};
+    }
+
     static ErrorMessage create_canceled(uint64_t request_type_request_id, const std::string& reason) {
         WampDict details;
         details["message"] = reason;

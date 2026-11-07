@@ -23,6 +23,7 @@
 #include "procedure_handler.hpp"
 #include "event_channel.hpp"
 #include "config.hpp"
+#include "authorizer.hpp"
 #include "crypto_utils.hpp"
 #include <boost/asio/io_context.hpp>
 #include <spdlog/spdlog.h>
@@ -521,9 +522,21 @@ private:
 
         EventChannelRegistry::get_or_create(session_id_, io_);
 
+        // Resolve the authid's permissions; an authid without a role may connect but do nothing
+        static const Permissions no_permissions;
+        authid_ = pending_authid_;
+        role_name_ = "none";
+        role_ = &no_permissions;
+        if (auto role_it = config_.auth_roles.find(authid_); role_it != config_.auth_roles.end()) {
+            if (auto def = config_.roles.find(role_it->second); def != config_.roles.end()) {
+                role_name_ = role_it->second;
+                role_ = &def->second;
+            }
+        }
+
         auto welcome = WelcomeMessage::create_router(session_id_, realm_);
         welcome.authid = pending_authid_;
-        welcome.authrole = "user";
+        welcome.authrole = role_name_;
         welcome.authmethod = "cryptosign";
 
         auto welcome_cbor = serialize_welcome(welcome);
@@ -532,6 +545,23 @@ private:
         pending_authid_.clear();
         pending_challenge_.clear();
 
+        return std::span<const uint8_t>(response_buffer_);
+    }
+
+    // True if this session may perform `action` on `uri`; logs the denial otherwise
+    [[nodiscard]] bool is_authorized(Action action, const std::string& uri) const {
+        if (role_ == nullptr || role_->allows(action, uri)) {
+            return true;
+        }
+        spdlog::warn("Denied {} on '{}' for authid={} role={}", to_string(action), uri, authid_, role_name_);
+        return false;
+    }
+
+    // wamp.error.not_authorized for a denied request
+    std::span<const uint8_t> deny(MessageType request_type, uint64_t request_id, Action action,
+                                  const std::string& uri) {
+        response_buffer_ = rawsocket::create_wamp_message(serialize_error(
+            ErrorMessage::create_not_authorized(request_type, request_id, to_string(action), uri)));
         return std::span<const uint8_t>(response_buffer_);
     }
 
@@ -578,6 +608,11 @@ private:
                     return std::span<const uint8_t>{};
                 }
 
+                if (!is_authorized(Action::SUBSCRIBE, subscribe_result->topic)) {
+                    return deny(MessageType::SUBSCRIBE, subscribe_result->request_id,
+                                Action::SUBSCRIBE, subscribe_result->topic);
+                }
+
                 response_buffer_ = PubSubHandler::handle_subscribe(
                     *subscribe_result,
                     session_id_
@@ -593,6 +628,17 @@ private:
                 if (!publish_result.has_value()) {
                     spdlog::error("Failed to deserialize PUBLISH");
                     return std::span<const uint8_t>{};
+                }
+
+                if (!is_authorized(Action::PUBLISH, publish_result->topic)) {
+                    // WAMP: an unacknowledged publish gets no response, not even an error
+                    const auto ack = publish_result->options.find("acknowledge");
+                    const auto* flag = ack != publish_result->options.end() ? std::get_if<bool>(&ack->second) : nullptr;
+                    if (flag == nullptr || !*flag) {
+                        return std::span<const uint8_t>{};
+                    }
+                    return deny(MessageType::PUBLISH, publish_result->request_id,
+                                Action::PUBLISH, publish_result->topic);
                 }
 
                 response_buffer_ = PubSubHandler::handle_publish(
@@ -682,6 +728,11 @@ private:
                     return std::span<const uint8_t>{};
                 }
 
+                if (!is_authorized(Action::REGISTER, register_result->procedure)) {
+                    return deny(MessageType::REGISTER, register_result->request_id,
+                                Action::REGISTER, register_result->procedure);
+                }
+
                 auto handle_result = ProcedureHandler::handle_register(
                     *register_result,
                     session_id_
@@ -703,6 +754,11 @@ private:
                 if (!call_result.has_value()) {
                     spdlog::error("Failed to deserialize CALL");
                     return std::span<const uint8_t>{};
+                }
+
+                if (!is_authorized(Action::CALL, call_result->procedure)) {
+                    return deny(MessageType::CALL, call_result->request_id,
+                                Action::CALL, call_result->procedure);
                 }
 
                 auto handle_result = ProcedureHandler::handle_call(
@@ -797,6 +853,11 @@ private:
     std::string pending_authid_;      // authid from HELLO message (during auth)
     std::string pending_challenge_;   // Challenge sent to client (hex-encoded)
     bool expect_authenticate_{false}; // True when expecting AUTHENTICATE message
+
+    // Authorization state: role_ is null while authentication is off (everything allowed)
+    std::string authid_;
+    std::string role_name_;
+    const Permissions* role_{nullptr};
 };
 
 } // namespace wamp

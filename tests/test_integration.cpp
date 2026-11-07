@@ -594,6 +594,12 @@ static ServerConfig create_auth_server_config(const std::string& authid, const s
     config.max_pending_invocations = 1000;
     config.log_level = spdlog::level::warn;
     config.auth_keys[authid] = public_key_hex;
+
+    // The authenticated user may only subscribe below "allowed."
+    Permissions limited;
+    limited.add_rule(Action::SUBSCRIBE, "allowed.", true);
+    config.roles.emplace("limited", std::move(limited));
+    config.auth_roles[authid] = "limited";
     return config;
 }
 
@@ -711,6 +717,13 @@ public:
 
     uint64_t session_id() const { return session_id_; }
 
+    // Send one WAMP message and return the router's reply payload
+    std::optional<std::vector<uint8_t>> request(const std::vector<uint8_t>& cbor,
+                                                std::chrono::milliseconds timeout = 2s) {
+        asio::write(socket_, asio::buffer(rawsocket::create_wamp_message(cbor)));
+        return read_wamp_message(timeout);
+    }
+
 private:
     std::optional<std::vector<uint8_t>> read_wamp_message(std::chrono::milliseconds timeout) {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -780,4 +793,30 @@ TEST_CASE("Integration: Invalid signature rejected", "[integration][auth]") {
 
     std::remove(priv_path1.c_str());
     std::remove(priv_path2.c_str());
+}
+
+TEST_CASE("Integration: Role permissions are enforced end to end", "[integration][auth][authz]") {
+    auto [priv_path, public_key_hex] = create_integration_test_keypair();
+
+    WampAuthServerFixture fixture("testuser", public_key_hex);
+    WampAuthTestClient client(fixture.io_context(), priv_path, "testuser");
+    REQUIRE(client.connect(fixture.port(), 5s));
+
+    auto allowed = client.request(serialize_subscribe(SubscribeMessage{1, {}, "allowed.topic"}));
+    REQUIRE(allowed.has_value());
+    REQUIRE(get_message_type_from_cbor(*allowed) == MessageType::SUBSCRIBED);
+
+    auto denied = client.request(serialize_subscribe(SubscribeMessage{2, {}, "secret.topic"}));
+    REQUIRE(denied.has_value());
+    auto error = deserialize_error(*denied);
+    REQUIRE(error.has_value());
+    REQUIRE(error->error_uri == "wamp.error.not_authorized");
+    REQUIRE(error->request_id == 2);
+
+    // Publishing was never granted
+    auto publish = client.request(serialize_publish(PublishMessage{3, {{"acknowledge", true}}, "allowed.topic"}));
+    REQUIRE(publish.has_value());
+    REQUIRE(deserialize_error(*publish)->error_uri == "wamp.error.not_authorized");
+
+    std::remove(priv_path.c_str());
 }

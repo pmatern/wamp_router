@@ -558,3 +558,66 @@ max_pending_invocations = 100
         CHECK(result->call_timeout == std::chrono::milliseconds{0});
     }
 }
+
+TEST_CASE("Config::load() roles and authorization", "[config][authz]") {
+    TempCertFile cert("cert");
+    TempCertFile key("key");
+    const std::string pub(64, 'a');
+
+    auto load = [&](const std::string& extra) {
+        std::string content = R"(
+[server]
+port = 8080
+[server.tls]
+cert = ")" + cert.path().string() + R"("
+key = ")" + key.path().string() + R"("
+[auth.keys]
+alice = ")" + pub + R"("
+bob = ")" + pub + R"("
+)" + extra;
+        TempConfigFile config(content);
+        return wamp::Config::load(config.path());
+    };
+
+    SECTION("parses roles, rules and the authid mapping") {
+        auto result = load(R"(
+[auth.roles]
+alice = "publisher"
+
+[[roles.publisher.rules]]
+uri = "com.example."
+match = "prefix"
+allow = ["publish", "subscribe"]
+
+[[roles.publisher.rules]]
+uri = "com.example.add"
+allow = ["call"]
+)");
+        REQUIRE(result.has_value());
+        CHECK(result->auth_roles.at("alice") == "publisher");
+        CHECK_FALSE(result->auth_roles.contains("bob"));
+
+        const auto& role = result->roles.at("publisher");
+        CHECK(role.allows(wamp::Action::PUBLISH, "com.example.x"));
+        CHECK(role.allows(wamp::Action::SUBSCRIBE, "com.example.y"));
+        CHECK(role.allows(wamp::Action::CALL, "com.example.add"));
+        CHECK_FALSE(role.allows(wamp::Action::CALL, "com.example.add2"));   // exact by default
+        CHECK_FALSE(role.allows(wamp::Action::REGISTER, "com.example.add"));
+    }
+
+    SECTION("no roles configured") {
+        auto result = load("");
+        REQUIRE(result.has_value());
+        CHECK(result->roles.empty());
+        CHECK(result->auth_roles.empty());
+    }
+
+    SECTION("invalid configurations are rejected") {
+        CHECK_FALSE(load("[[roles.r.rules]]\nuri = \"a\"\nallow = [\"fly\"]\n").has_value());
+        CHECK_FALSE(load("[[roles.r.rules]]\nuri = \"a\"\nmatch = \"glob\"\nallow = [\"call\"]\n").has_value());
+        CHECK_FALSE(load("[[roles.r.rules]]\nuri = \"\"\nallow = [\"call\"]\n").has_value());
+        CHECK_FALSE(load("[[roles.r.rules]]\nuri = \"a\"\nallow = []\n").has_value());
+        CHECK_FALSE(load("[auth.roles]\nalice = \"missing\"\n").has_value());
+        CHECK_FALSE(load("[auth.roles]\nnobody = \"r\"\n[[roles.r.rules]]\nuri = \"a\"\nallow = [\"call\"]\n").has_value());
+    }
+}

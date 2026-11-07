@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "authorizer.hpp"
 #include <toml.hpp>
 #include <filesystem>
 #include <chrono>
@@ -122,6 +123,11 @@ struct ServerConfig {
 
     // Authentication: authid → Ed25519 public key (hex-encoded, 64 chars = 32 bytes)
     std::unordered_map<std::string, std::string> auth_keys;
+
+    // Authorization: authid → role name, and role name → permitted URIs per action.
+    // Only enforced when auth_keys is non-empty (then default-deny).
+    std::unordered_map<std::string, std::string> auth_roles;
+    std::unordered_map<std::string, Permissions> roles;
 };
 
 // ============================================================================
@@ -225,6 +231,48 @@ public:
                 config.log_level = spdlog::level::info; // Default
             }
 
+            if (config_data.contains("roles")) {
+                for (const auto& [role_name, role_value] : toml::find(config_data, "roles").as_table()) {
+                    Permissions role;
+                    if (role_value.contains("rules")) {
+                        for (const auto& rule : toml::find(role_value, "rules").as_array()) {
+                            const auto uri = toml::find<std::string>(rule, "uri");
+                            if (uri.empty()) {
+                                spdlog::error("[roles.{}] rule has an empty uri", role_name);
+                                return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                            }
+
+                            bool prefix = false;
+                            if (rule.contains("match")) {
+                                const auto match = toml::find<std::string>(rule, "match");
+                                if (match != "exact" && match != "prefix") {
+                                    spdlog::error("[roles.{}] match must be \"exact\" or \"prefix\", got \"{}\"",
+                                                  role_name, match);
+                                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                                }
+                                prefix = match == "prefix";
+                            }
+
+                            const auto allow = toml::find<std::vector<std::string>>(rule, "allow");
+                            if (allow.empty()) {
+                                spdlog::error("[roles.{}] rule for '{}' allows no actions", role_name, uri);
+                                return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                            }
+                            for (const auto& name : allow) {
+                                const auto action = parse_action(name);
+                                if (!action) {
+                                    spdlog::error("[roles.{}] unknown action \"{}\" (call, register, publish, subscribe)",
+                                                  role_name, name);
+                                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                                }
+                                role.add_rule(*action, uri, prefix);
+                            }
+                        }
+                    }
+                    config.roles.emplace(role_name, std::move(role));
+                }
+            }
+
             if (config_data.contains("auth")) {
                 const auto& auth = toml::find(config_data, "auth");
                 if (auth.contains("keys")) {
@@ -257,6 +305,28 @@ public:
                     }
 
                     spdlog::info("Loaded {} authentication key(s)", config.auth_keys.size());
+                }
+
+                if (auth.contains("roles")) {
+                    for (const auto& [authid, role_value] : toml::find(auth, "roles").as_table()) {
+                        const std::string role_name = role_value.as_string();
+                        if (!config.auth_keys.contains(authid)) {
+                            spdlog::error("[auth.roles] authid '{}' has no entry in [auth.keys]", authid);
+                            return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                        }
+                        if (!config.roles.contains(role_name)) {
+                            spdlog::error("[auth.roles] authid '{}' uses undefined role '{}'", authid, role_name);
+                            return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                        }
+                        config.auth_roles[authid] = role_name;
+                    }
+                }
+
+                for (const auto& [authid, key] : config.auth_keys) {
+                    if (!config.auth_roles.contains(authid)) {
+                        spdlog::warn("authid '{}' has no role in [auth.roles]; it can connect but not call, "
+                                     "register, publish or subscribe", authid);
+                    }
                 }
             }
 

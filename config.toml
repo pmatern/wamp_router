@@ -54,3 +54,21 @@ level = "info"
 # Extract public key hex: openssl pkey -in public.pem -pubin -text -noout
 "user1" = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
 "admin" = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
+
+# Authorization. Once [auth.keys] is non-empty, everything is denied unless a role allows it.
+# Each authid is assigned one role; a role is a list of rules. Actions: call, register,
+# publish, subscribe. match = "exact" (default) or "prefix" (also matches the prefix itself).
+# Denied requests get wamp.error.not_authorized. An authid without a role can connect but do nothing.
+[auth.roles]
+"user1" = "user"
+"admin" = "admin"
+
+[[roles.user.rules]]
+uri = "com.example."
+match = "prefix"
+allow = ["call", "publish", "subscribe"]
+
+[[roles.admin.rules]]
+uri = "com."
+match = "prefix"
+allow = ["call", "register", "publish", "subscribe"]

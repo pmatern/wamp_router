@@ -24,6 +24,7 @@
 #include <catch2/benchmark/catch_benchmark.hpp>
 #include <boost/asio/io_context.hpp>
 #include <spdlog/spdlog.h>
+#include "include/authorizer.hpp"
 #include "include/invocation_tracker.hpp"
 #include "include/procedure_handler.hpp"
 #include "include/pubsub_handler.hpp"
@@ -86,6 +87,20 @@ TEST_CASE("bench: serialize", "[bench][serializer]") {
     BENCHMARK("INVOCATION (10 args + kw)") { return serialize_invocation(invocation_args); };
     BENCHMARK("RESULT (10 args + kw)") { return serialize_result(result_args); };
     BENCHMARK("ERROR (10 args + kw)") { return serialize_error(error_args); };
+}
+
+TEST_CASE("bench: authorization check", "[bench][authz]") {
+    Permissions role;
+    for (int i = 0; i < 50; ++i) {
+        role.add_rule(Action::PUBLISH, "com.example.topic" + std::to_string(i), false);
+    }
+    for (int i = 0; i < 5; ++i) {
+        role.add_rule(Action::PUBLISH, "org.prefix" + std::to_string(i) + ".", true);
+    }
+
+    BENCHMARK("exact hit (50 exact + 5 prefix rules)") { return role.allows(Action::PUBLISH, "com.example.topic37"); };
+    BENCHMARK("prefix hit (5th prefix)") { return role.allows(Action::PUBLISH, "org.prefix4.a.b.c"); };
+    BENCHMARK("miss (scans all prefixes)") { return role.allows(Action::PUBLISH, "net.nothing.here.at.all"); };
 }
 
 TEST_CASE("bench: EVENT per subscriber", "[bench][serializer]") {

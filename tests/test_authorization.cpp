@@ -1,0 +1,235 @@
+// Copyright 2026 Pete Matern
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
+#include <catch2/catch_test_macros.hpp>
+#include <boost/asio/io_context.hpp>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include "include/authorizer.hpp"
+#include "include/wamp_session.hpp"
+
+using namespace wamp;
+
+TEST_CASE("Permissions: exact and prefix rules", "[authz]") {
+    Permissions p;
+    p.add_rule(Action::PUBLISH, "com.example.events", false);
+    p.add_rule(Action::SUBSCRIBE, "com.example.", true);
+
+    SECTION("exact matches only the exact URI") {
+        REQUIRE(p.allows(Action::PUBLISH, "com.example.events"));
+        REQUIRE_FALSE(p.allows(Action::PUBLISH, "com.example.events.more"));
+        REQUIRE_FALSE(p.allows(Action::PUBLISH, "com.example.event"));
+    }
+    SECTION("prefix matches itself and anything below it") {
+        REQUIRE(p.allows(Action::SUBSCRIBE, "com.example."));
+        REQUIRE(p.allows(Action::SUBSCRIBE, "com.example.a.b.c"));
+        REQUIRE_FALSE(p.allows(Action::SUBSCRIBE, "com.exampl"));
+        REQUIRE_FALSE(p.allows(Action::SUBSCRIBE, "org.example.x"));
+    }
+    SECTION("actions are independent and default is deny") {
+        REQUIRE_FALSE(p.allows(Action::CALL, "com.example.events"));
+        REQUIRE_FALSE(p.allows(Action::REGISTER, "com.example.x"));
+        REQUIRE(p.allows(Action::SUBSCRIBE, "com.example.events"));  // via prefix
+        REQUIRE_FALSE(Permissions{}.allows(Action::PUBLISH, "anything"));
+    }
+}
+
+TEST_CASE("Action names parse", "[authz]") {
+    REQUIRE(parse_action("call") == Action::CALL);
+    REQUIRE(parse_action("register") == Action::REGISTER);
+    REQUIRE(parse_action("publish") == Action::PUBLISH);
+    REQUIRE(parse_action("subscribe") == Action::SUBSCRIBE);
+    REQUIRE_FALSE(parse_action("Call").has_value());
+    REQUIRE_FALSE(parse_action("").has_value());
+}
+
+namespace {
+
+struct KeyPair {
+    std::string priv_path;
+    std::string public_hex;
+};
+
+KeyPair make_keypair() {
+    EVP_PKEY* pkey = nullptr;
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, nullptr);
+    REQUIRE(ctx != nullptr);
+    REQUIRE(EVP_PKEY_keygen_init(ctx) > 0);
+    REQUIRE(EVP_PKEY_keygen(ctx, &pkey) > 0);
+    EVP_PKEY_CTX_free(ctx);
+
+    size_t len = 32;
+    std::vector<uint8_t> pub(len);
+    EVP_PKEY_get_raw_public_key(pkey, pub.data(), &len);
+
+    KeyPair kp{"/tmp/wamp_authz_test_key.pem", bytes_to_hex(pub)};
+    FILE* f = fopen(kp.priv_path.c_str(), "w");
+    REQUIRE(f != nullptr);
+    PEM_write_PrivateKey(f, pkey, nullptr, nullptr, 0, nullptr, nullptr);
+    fclose(f);
+    EVP_PKEY_free(pkey);
+    return kp;
+}
+
+std::vector<uint8_t> payload_of(std::span<const uint8_t> frame) {
+    REQUIRE(frame.size() > 4);
+    return {frame.begin() + 4, frame.end()};
+}
+
+// Authorization config: "alice" is a publisher/subscriber under com.example., may call
+// com.example.add and register com.example.add only; "bob" has no role.
+ServerConfig authz_config(const std::string& public_hex) {
+    ServerConfig config;
+    config.port = 8080;
+    config.max_pending_invocations = 1000;
+    config.auth_keys["alice"] = public_hex;
+    config.auth_keys["bob"] = public_hex;
+
+    Permissions user;
+    user.add_rule(Action::PUBLISH, "com.example.", true);
+    user.add_rule(Action::SUBSCRIBE, "com.example.", true);
+    user.add_rule(Action::CALL, "com.example.add", false);
+    user.add_rule(Action::REGISTER, "com.example.add", false);
+    config.roles.emplace("user", std::move(user));
+    config.auth_roles["alice"] = "user";
+    return config;
+}
+
+// Runs the RawSocket handshake and Cryptosign flow; returns the WELCOME
+WelcomeMessage establish(WampSession& session, const KeyPair& kp, const std::string& authid) {
+    session.on_connect();
+
+    auto handshake = rawsocket::encode_handshake_request({
+        .max_length = rawsocket::MaxLengthCode::BYTES_16M,
+        .serializer = rawsocket::Serializer::CBOR});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
+
+    HelloMessage hello{"com.example.realm"};
+    hello.authid = authid;
+    hello.authmethods = std::vector<std::string>{"cryptosign"};
+    auto hello_frame = rawsocket::create_wamp_message(serialize_hello(hello));
+    auto challenge_frame = session.process(std::span{hello_frame.data(), hello_frame.size()});
+    REQUIRE(challenge_frame.has_value());
+    auto challenge = deserialize_challenge(payload_of(*challenge_frame));
+    REQUIRE(challenge.has_value());
+
+    auto key = load_ed25519_private_key_pem(kp.priv_path);
+    REQUIRE(key.has_value());
+    auto sig = sign_ed25519(challenge->extra.at("challenge") + "|0|" + authid + "|user", key->get());
+    REQUIRE(sig.has_value());
+
+    auto auth_frame = rawsocket::create_wamp_message(serialize_authenticate(AuthenticateMessage{*sig}));
+    auto welcome_frame = session.process(std::span{auth_frame.data(), auth_frame.size()});
+    REQUIRE(welcome_frame.has_value());
+    auto welcome = deserialize_welcome(payload_of(*welcome_frame));
+    REQUIRE(welcome.has_value());
+    return *welcome;
+}
+
+// Send a message and return the router's reply payload (empty if none)
+std::vector<uint8_t> send(WampSession& session, const std::vector<uint8_t>& cbor) {
+    auto frame = rawsocket::create_wamp_message(cbor);
+    auto reply = session.process(std::span{frame.data(), frame.size()});
+    REQUIRE(reply.has_value());
+    if (reply->empty()) return {};
+    return payload_of(*reply);
+}
+
+void require_not_authorized(const std::vector<uint8_t>& reply, MessageType request_type, uint64_t request_id) {
+    auto error = deserialize_error(reply);
+    REQUIRE(error.has_value());
+    REQUIRE(error->error_uri == "wamp.error.not_authorized");
+    REQUIRE(error->request_type == request_type);
+    REQUIRE(error->request_id == request_id);
+}
+
+}  // namespace
+
+TEST_CASE("Session enforces role permissions", "[authz][wamp_session]") {
+    auto kp = make_keypair();
+    boost::asio::io_context io;
+    auto config = authz_config(kp.public_hex);
+    WampSession session{io, config};
+
+    auto welcome = establish(session, kp, "alice");
+    REQUIRE(welcome.authrole == "user");
+
+    SECTION("subscribe") {
+        auto ok = send(session, serialize_subscribe(SubscribeMessage{1, {}, "com.example.news"}));
+        REQUIRE(get_message_type_from_cbor(ok) == MessageType::SUBSCRIBED);
+        require_not_authorized(send(session, serialize_subscribe(SubscribeMessage{2, {}, "org.other.news"})),
+                               MessageType::SUBSCRIBE, 2);
+    }
+
+    SECTION("publish: acknowledged denial gets an error, unacknowledged is silent") {
+        WampDict ack{{"acknowledge", true}};
+        auto ok = send(session, serialize_publish(PublishMessage{3, ack, "com.example.news"}));
+        REQUIRE(get_message_type_from_cbor(ok) == MessageType::PUBLISHED);
+
+        require_not_authorized(send(session, serialize_publish(PublishMessage{4, ack, "org.other.news"})),
+                               MessageType::PUBLISH, 4);
+        REQUIRE(send(session, serialize_publish(PublishMessage{5, {}, "org.other.news"})).empty());
+    }
+
+    SECTION("register") {
+        auto ok = send(session, serialize_register(RegisterMessage{6, {}, "com.example.add"}));
+        REQUIRE(get_message_type_from_cbor(ok) == MessageType::REGISTERED);
+        require_not_authorized(send(session, serialize_register(RegisterMessage{7, {}, "com.example.mul"})),
+                               MessageType::REGISTER, 7);
+    }
+
+    SECTION("call: allowed procedure reaches the dealer, others are denied first") {
+        auto passed = send(session, serialize_call(CallMessage{8, {}, "com.example.add"}));
+        auto err = deserialize_error(passed);
+        REQUIRE(err.has_value());
+        REQUIRE(err->error_uri == "wamp.error.no_such_procedure");  // authorized, but nobody registered it
+
+        require_not_authorized(send(session, serialize_call(CallMessage{9, {}, "com.example.mul"})),
+                               MessageType::CALL, 9);
+    }
+}
+
+TEST_CASE("Authid without a role can connect but do nothing", "[authz][wamp_session]") {
+    auto kp = make_keypair();
+    boost::asio::io_context io;
+    auto config = authz_config(kp.public_hex);
+    WampSession session{io, config};
+
+    auto welcome = establish(session, kp, "bob");
+    REQUIRE(welcome.authrole == "none");
+
+    require_not_authorized(send(session, serialize_subscribe(SubscribeMessage{1, {}, "com.example.news"})),
+                           MessageType::SUBSCRIBE, 1);
+    require_not_authorized(send(session, serialize_call(CallMessage{2, {}, "com.example.add"})),
+                           MessageType::CALL, 2);
+}
+
+TEST_CASE("Without auth keys nothing is restricted", "[authz][wamp_session]") {
+    boost::asio::io_context io;
+    ServerConfig config;
+    config.max_pending_invocations = 1000;
+    WampSession session{io, config};
+    session.on_connect();
+
+    auto handshake = rawsocket::encode_handshake_request({
+        .max_length = rawsocket::MaxLengthCode::BYTES_16M,
+        .serializer = rawsocket::Serializer::CBOR});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
+    auto hello_frame = rawsocket::create_wamp_message(serialize_hello(HelloMessage{"com.example.realm"}));
+    REQUIRE(session.process(std::span{hello_frame.data(), hello_frame.size()}).has_value());
+
+    auto ok = send(session, serialize_subscribe(SubscribeMessage{1, {}, "any.topic.at.all"}));
+    REQUIRE(get_message_type_from_cbor(ok) == MessageType::SUBSCRIBED);
+}
