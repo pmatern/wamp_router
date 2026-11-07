@@ -129,7 +129,22 @@ router cost, so the architecture is bound by per-session work, not by communicat
 | syscalls per delivered event (Linux, `strace -c`) | about 2.5 | about 0.35 (sends carry 4-5 frames each) |
 | syscalls per RPC call | 7.0 (2.0 sendto, 3.0 recvfrom, 2.0 epoll_wait) | 4.6 (1.3 sendmsg, 2.6 recvfrom, 0.7 epoll_wait) |
 
-The gain shows up where events queue up behind each other (fan-out, bursts). A paced publisher with one event per subscriber per
+**0.3 (direct CBOR codec) is also done** (`include/cbor.hpp`; the hot-path messages in `wamp_serializer.hpp` no longer build an
+`nlohmann::json` tree; HELLO/WELCOME/GOODBYE/ABORT/CHALLENGE/AUTHENTICATE still do, once per session). The bytes on the wire are
+identical to what nlohmann produced (tests compare them byte for byte; map keys are written sorted). Measured, same harness:
+
+| | before | after |
+|---|---|---|
+| serialize CALL/EVENT/RESULT, 10 args + kw | 1.9-2.8 us | 0.27-0.38 us |
+| deserialize the same | 4.5-5.1 us | 0.82-0.93 us |
+| CALL -> INVOCATION -> YIELD -> RESULT through the handlers | 12.5 us | 3.5 us |
+| RPC, 10 callers: throughput / router CPU | 17.8k calls/s / 2.20 s | 29.0k calls/s / 1.42 s (-35%) |
+| PubSub, 10 subscribers unpaced: router CPU | 1.66 s | 0.57 s (-65%) |
+| PubSub, 100 subscribers paced: router CPU, p50 | 6.9 s, 2.0 ms | 5.0 s, 0.41 ms |
+
+(The load generator uses the same codec in `WampClient`, so its own overhead also dropped; the router CPU rows are the reliable ones.)
+
+The reader/writer gain shows up where events queue up behind each other (fan-out, bursts). A paced publisher with one event per subscriber per
 millisecond has nothing to coalesce, so those workloads gain only the removed read cancel/re-arm. RPC is unchanged because its
 messages are strictly request/response.
 
@@ -139,7 +154,7 @@ messages are strictly request/response.
    small; the kernel half of the PubSub cost drops by roughly a third to a half under load. It also removes the `parallel_group`
    machinery (about 11% of PubSub CPU).
 2. **(done)** **Shrink the per-session buffer.** Plain sockets wait for readability and then read into one 64 KiB scratch buffer shared by the thread's sessions (TLS keeps a 4 KiB per-session buffer): idle session RSS 11.0 KB -> 4.5 KB (-59%, macOS, 5,000 sessions), and the failed speculative `recv` per read is gone (RPC router CPU 2.44 s -> 2.20 s).
-3. **Replace nlohmann CBOR** with a purpose-built reader/writer for the WAMP message shapes (decode straight into `WampList`/
+3. **(done)** **Replace nlohmann CBOR** with a purpose-built reader/writer for the WAMP message shapes (decode straight into `WampList`/
    `WampDict`, encode straight into the frame buffer; no `json` tree): CBOR is a third of RPC user time, and the README shows
    4.5-5 us to decode a 10-argument message.
 4. Recycle frame buffers (pool) instead of `make_shared<vector>` per frame: allocation is 3-5% of CPU.

@@ -267,6 +267,7 @@ wamp_router/
 │   ├── wamp_session.hpp      # Protocol state machine, buffering, authentication
 │   ├── wamp_client.hpp       # Coroutine-based WAMP client implementation
 │   ├── wamp_messages.hpp     # WAMP message types (HELLO, CHALLENGE, AUTHENTICATE, etc.)
+│   ├── cbor.hpp              # Minimal CBOR reader/writer used by the hot-path serializers
 │   ├── wamp_serializer.hpp   # CBOR serialization/deserialization
 │   ├── raw_socket.hpp        # RawSocket framing (4-byte header)
 │   ├── wamp_id.hpp           # ID generators (global, router-scoped)
@@ -417,7 +418,7 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 - **toml11**: TOML configuration file parsing
 - **fmt**: String formatting
 - **spdlog**: Structured logging
-- **nlohmann-json**: Used only for CBOR serialization (nlohmann-json's CBOR support)
+- **nlohmann-json**: CBOR for the session handshake/auth messages only; everything on the message hot path uses `include/cbor.hpp`
 - **Catch2**: Unit testing framework
 
 ### Important Build Details
@@ -488,6 +489,7 @@ Tests use Catch2 framework with CTest integration:
 - **test_protocol_gaps.cpp**: UNSUBSCRIBE/UNREGISTER, payload forwarding, callee errors, pipelined frames
 - **test_event_queue.cpp**: Event queue sizing, drop/backpressure policies, timeout
 - **test_authorization.cpp**: Permissions matching, role enforcement in the session, no restrictions without auth
+- **test_cbor.cpp**: Direct CBOR codec vs nlohmann (byte-identical output, decoding, malformed/fuzzed input)
 - **test_realms.cpp**: Realm isolation of topics and procedures
 - **test_crypto_utils.cpp**: Ed25519 signature verification and challenge generation
 

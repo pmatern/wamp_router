@@ -342,9 +342,9 @@ Baseline (Release, Intel i7-1068NG7 @ 2.3 GHz, single thread, mean of 50 samples
 
 | Benchmark | Mean |
 |---|---|
-| Serialize CALL / EVENT, no args | 0.62 µs / 0.50 µs |
-| Serialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 1.9 – 2.8 µs |
-| Deserialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 4.5 – 5.1 µs |
+| Serialize CALL / EVENT, no args | 60 ns / 47 ns (was 0.62 / 0.50 µs) |
+| Serialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 0.27 – 0.38 µs (was 1.9 – 2.8 µs) |
+| Deserialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 0.82 – 0.93 µs (was 4.5 – 5.1 µs); message type peek 13 ns |
 | RawSocket frame 128 B / 16 KiB | 52 ns / 146 ns |
 | `for_each_subscriber` (in place), 1 / 100 / 10,000 subscribers | 25 ns / 198 ns / 19 µs |
 | `get_subscribers` (copies the id set), 1 / 100 / 10,000 subscribers | 59 ns / 274 ns / 26 µs |
@@ -352,9 +352,9 @@ Baseline (Release, Intel i7-1068NG7 @ 2.3 GHz, single thread, mean of 50 samples
 | Invocation tracker track + retrieve | 87 ns |
 | EVENT per subscriber: full serialize + frame / `EventTemplate::frame_for` | 2.6 µs / 55 ns |
 | PUBLISH fan-out to 1 / 10 / 100 subscribers (incl. drain) | 3.1 µs / 4.7 µs / 18.8 µs (was 3.1 / 28 / 279 µs) |
-| CALL → INVOCATION → YIELD → RESULT through the handlers (no socket I/O) | 12.5 µs |
+| CALL → INVOCATION → YIELD → RESULT through the handlers (no socket I/O) | 3.5 µs (was 12.5 µs) |
 
-These are in-process numbers: they exclude socket I/O and TLS. The cost is dominated by CBOR (de)serialization through nlohmann::json. PUBLISH fan-out serializes the EVENT once and stamps in each subscriber's subscription id (`EventTemplate`), so it costs about 0.15 µs per subscriber instead of 2.8 µs.
+These are in-process numbers: they exclude socket I/O and TLS. Before the direct CBOR codec (`include/cbor.hpp`) the cost was dominated by (de)serialization through nlohmann::json. PUBLISH fan-out serializes the EVENT once and stamps in each subscriber's subscription id (`EventTemplate`), so it costs about 0.15 µs per subscriber instead of 2.8 µs.
 
 ### Load test
 
@@ -380,7 +380,7 @@ Baseline (Release, same machine as above, embedded router, 10 positional argumen
 | PubSub, 10 subscribers, unpaced (`--rate 0`), backpressure | 0 lost; publisher throttled to ~19k msg/s |
 | PubSub, 10 subscribers, unpaced, `--overflow drop` | 98% lost |
 
-The session reader/writer split later raised unpaced 10-subscriber fan-out from 46k to 84k events/s (see [docs/threading-analysis.md](docs/threading-analysis.md)). RPC rows above were measured before the event-queue work; a rerun gives about 18k calls/s with 10 callers (p50 0.55 ms, p99 0.8–1.1 ms).
+The direct CBOR codec raised the load-test rates again (RPC with 10 callers 17.8k -> 29k calls/s, router CPU -35%; unpaced 10-subscriber fan-out router CPU -65%). The session reader/writer split earlier raised unpaced 10-subscriber fan-out from 46k to 84k events/s (see [docs/threading-analysis.md](docs/threading-analysis.md)). RPC rows above were measured before the event-queue work; a rerun gives about 18k calls/s with 10 callers (p50 0.55 ms, p99 0.8–1.1 ms).
 
 ### Profiling and threading analysis
 
