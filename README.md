@@ -411,7 +411,7 @@ Dropped events are counted (`EventChannelRegistry::dropped_count()`) and logged 
 3. **WAMP-Cryptosign**: Ed25519 signature-based authentication (optional)
 4. **C++20 Coroutines**: Using `asio::awaitable` for clean async code
 5. **Event Channels**: `asio::experimental::channel` for efficient message delivery
-6. **Single-Threaded**: One `io_context` thread (can be extended to thread pool)
+6. **Thread per shard**: `[server] threads` runs that many shards, each with its own `io_context` and routing state (default 1); delivery between shards is not implemented yet, so keep it at 1 for normal routing (see docs/threading-analysis.md)
 7. **Session-per-Coroutine**: Each client connection is a coroutine
 8. **RawSocket Transport**: Binary TCP framing (4-byte header + payload)
 9. **CBOR Serialization**: Compact binary format via nlohmann-json

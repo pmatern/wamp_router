@@ -390,6 +390,51 @@ inline asio::awaitable<void> call_timeout_sweeper(std::shared_ptr<Shard> shard) 
     }
 }
 
+// TLS 1.3 only server context from the configuration (shared by WampTlsServer and Router)
+inline void configure_tls_context(ssl::context& ssl_context_, const TlsConfig& tls_config) {
+    // Set TLS 1.3 only (reject TLS 1.2 and earlier)
+    SSL_CTX_set_min_proto_version(
+        ssl_context_.native_handle(), TLS1_3_VERSION);
+    SSL_CTX_set_max_proto_version(
+        ssl_context_.native_handle(), TLS1_3_VERSION);
+
+    // Load certificate and private key
+    ssl_context_.use_certificate_chain_file(tls_config.cert_path.string());
+    ssl_context_.use_private_key_file(
+        tls_config.key_path.string(),
+        ssl::context::pem
+    );
+
+    // Optional: Load CA certificate for client verification
+    if (tls_config.ca_path) {
+        ssl_context_.load_verify_file(tls_config.ca_path->string());
+    }
+
+    // Optional: Require client certificates
+    if (tls_config.require_client_cert) {
+        ssl_context_.set_verify_mode(
+            ssl::verify_peer | ssl::verify_fail_if_no_peer_cert);
+    } else {
+        ssl_context_.set_verify_mode(ssl::verify_none);
+    }
+
+    // Set cipher suite preferences (TLS 1.3 ciphers)
+    SSL_CTX_set_ciphersuites(
+        ssl_context_.native_handle(),
+        "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+    );
+
+    spdlog::info("TLS context configured (TLS 1.3 only)");
+    spdlog::info("  Certificate: {}", tls_config.cert_path.string());
+    spdlog::info("  Private key: {}", tls_config.key_path.string());
+    if (tls_config.ca_path) {
+        spdlog::info("  CA cert: {}", tls_config.ca_path->string());
+    }
+    if (tls_config.require_client_cert) {
+        spdlog::info("  Client cert required: yes");
+    }
+}
+
 class WampServer {
 public:
     WampServer(asio::io_context& io_context, unsigned short port, const ServerConfig& config)
@@ -491,47 +536,7 @@ public:
 
 private:
     void setup_ssl_context(const TlsConfig& tls_config) {
-        // Set TLS 1.3 only (reject TLS 1.2 and earlier)
-        SSL_CTX_set_min_proto_version(
-            ssl_context_.native_handle(), TLS1_3_VERSION);
-        SSL_CTX_set_max_proto_version(
-            ssl_context_.native_handle(), TLS1_3_VERSION);
-
-        // Load certificate and private key
-        ssl_context_.use_certificate_chain_file(tls_config.cert_path.string());
-        ssl_context_.use_private_key_file(
-            tls_config.key_path.string(),
-            ssl::context::pem
-        );
-
-        // Optional: Load CA certificate for client verification
-        if (tls_config.ca_path) {
-            ssl_context_.load_verify_file(tls_config.ca_path->string());
-        }
-
-        // Optional: Require client certificates
-        if (tls_config.require_client_cert) {
-            ssl_context_.set_verify_mode(
-                ssl::verify_peer | ssl::verify_fail_if_no_peer_cert);
-        } else {
-            ssl_context_.set_verify_mode(ssl::verify_none);
-        }
-
-        // Set cipher suite preferences (TLS 1.3 ciphers)
-        SSL_CTX_set_ciphersuites(
-            ssl_context_.native_handle(),
-            "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
-        );
-
-        spdlog::info("TLS context configured (TLS 1.3 only)");
-        spdlog::info("  Certificate: {}", tls_config.cert_path.string());
-        spdlog::info("  Private key: {}", tls_config.key_path.string());
-        if (tls_config.ca_path) {
-            spdlog::info("  CA cert: {}", tls_config.ca_path->string());
-        }
-        if (tls_config.require_client_cert) {
-            spdlog::info("  Client cert required: yes");
-        }
+        configure_tls_context(ssl_context_, tls_config);
     }
 
     asio::awaitable<void> accept_loop() {

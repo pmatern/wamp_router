@@ -262,6 +262,7 @@ wamp_router/
 │   ├── config.hpp            # TOML configuration loader with auth keys support
 │   ├── authorizer.hpp        # Role permissions (Action, Permissions): exact/prefix URI rules
 │   ├── cpu_limits.hpp        # Container-aware CPU budget (cgroup quota, affinity, ECS task metadata)
+│   ├── router.hpp            # Router: N shards, one thread each, acceptor hands connections to the least-loaded shard
 │   ├── shard.hpp             # Shard: all routing state one thread owns (channels, pending calls, realms, ids)
 │   ├── realm.hpp             # Realm (per-realm subscriptions + registrations), RealmRegistry
 │   ├── crypto_utils.hpp      # Ed25519 signature verification, challenge generation
@@ -342,6 +343,10 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 - State transitions occur as data arrives, extracting complete WAMP messages for handling
 - Calls into PubSubHandler and ProcedureHandler for message dispatch
 - Manages session ID (generated on HELLO, sent in WELCOME)
+
+#### Router (router.hpp)
+- `Router(config, Transport::PLAIN|TLS, threads)` starts one acceptor thread and N worker threads, each with its own `io_context(1)` and `Shard`. The acceptor passes each accepted socket (as a native handle) to the shard with the fewest sessions; the TLS handshake and the whole session then run on that shard's thread. `main.cpp` uses it (`[server] threads`, default 1).
+- **Limitation:** sessions on different shards cannot reach each other yet (no cross-shard delivery), so more than one thread is only valid for workloads whose sessions are self-contained (`wamp_load --mode selfrpc|selfpubsub`) until the cross-shard stages land.
 
 #### Shard (shard.hpp)
 - Owns everything a router thread mutates: `EventChannelRegistry channels`, `InvocationTracker invocations`, `RealmRegistry realms`, the id generators and the default call timeout. There are no process-wide mutable statics.
@@ -470,6 +475,7 @@ gdb ./build/wamp_router
 ### Configuration
 The router uses TOML configuration files (config.toml or test_config.toml) for all settings:
 - Server port, TLS certificate paths, logging level
+- `threads` (`[server]`) - router threads / shards (default 1, `"auto"` = available CPUs); see the cross-shard limitation under Router
 - `max_pending_invocations` - limits pending RPC calls (set via `ProcedureHandler::set_max_pending_invocations()`)
 - `call_timeout_ms` (`[server.rpc]`) - callee answer deadline, 0 disables; CALL `timeout` option overrides
 - `[server.events]` - `queue_size`, `overflow` (`backpressure` | `drop`), `backpressure_timeout_ms`, `slow_subscriber_limit`
@@ -496,6 +502,7 @@ Tests use Catch2 framework with CTest integration:
 - **test_protocol_gaps.cpp**: UNSUBSCRIBE/UNREGISTER, payload forwarding, callee errors, pipelined frames
 - **test_event_queue.cpp**: Event queue sizing, drop/backpressure policies, timeout
 - **test_authorization.cpp**: Permissions matching, role enforcement in the session, no restrictions without auth
+- **test_router.cpp**: Multi-shard Router (spread, self-contained sessions, clean stop, threads = 1 routing)
 - **test_cpu_limits.cpp**: cgroup/ECS limit parsing and CPU budget
 - **test_cbor.cpp**: Direct CBOR codec vs nlohmann (byte-identical output, decoding, malformed/fuzzed input)
 - **test_realms.cpp**: Realm isolation of topics and procedures

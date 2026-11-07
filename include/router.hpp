@@ -1,0 +1,228 @@
+// Copyright 2026 Pete Matern
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+
+#pragma once
+
+#include "cpu_limits.hpp"
+#include "shard.hpp"
+#include "wamp_server.hpp"
+#include <asio.hpp>
+#include <asio/ssl.hpp>
+#include <atomic>
+#include <csignal>
+#include <memory>
+#include <thread>
+#include <vector>
+
+namespace wamp {
+
+// ============================================================================
+// Router - N shards, one thread each
+// ============================================================================
+// One acceptor thread takes new connections and hands each to the shard with the fewest sessions. From
+// then on the connection (TLS handshake included) lives entirely on that shard's thread, with that
+// shard's own io_context, event channels, realms and pending calls: no locks, no shared mutable state.
+//
+// LIMITATION: delivery between sessions on *different* shards is not implemented yet, so with more than
+// one thread a publish only reaches subscribers on the publisher's shard and a CALL only finds callees on
+// the caller's shard. That is correct for workloads whose sessions never talk to each other (and for
+// measuring how the router scales), not for general routing. threads = 1 behaves exactly like one
+// WampServer.
+class Router {
+public:
+    enum class Transport { PLAIN, TLS };
+
+    // threads == 0 means one per available CPU. config must outlive nothing: it is copied.
+    Router(ServerConfig config, Transport transport, unsigned threads)
+        : config_(std::move(config))
+        , transport_(transport)
+        , tls_context_(ssl::context::tlsv13)
+        , acceptor_(accept_io_, tcp::endpoint(tcp::v4(), config_.port))
+        , bound_port_(acceptor_.local_endpoint().port())
+    {
+        if (transport_ == Transport::TLS) {
+            configure_tls_context(tls_context_, config_.tls);
+        }
+        if (threads == 0) threads = detect_cpu_limits().available;
+        const auto shard_config = ShardConfig::from(config_);
+        for (unsigned i = 0; i < threads; ++i) {
+            workers_.push_back(std::make_unique<Worker>(shard_config));
+        }
+    }
+
+    ~Router() {
+        stop();
+    }
+
+    Router(const Router&) = delete;
+    Router& operator=(const Router&) = delete;
+
+    // Starts the shard threads and the acceptor thread; returns immediately
+    void start() {
+        if (started_.exchange(true)) return;
+        for (auto& worker : workers_) {
+            asio::co_spawn(worker->io, call_timeout_sweeper(worker->shard), asio::detached);
+            worker->thread = std::thread([w = worker.get()] { w->io.run(); });
+        }
+        asio::co_spawn(accept_io_, accept_loop(), asio::detached);
+        acceptor_thread_ = std::thread([this] { accept_io_.run(); });
+        spdlog::info("Router started with {} shard thread(s) on port {}", workers_.size(), bound_port_);
+    }
+
+    // Stops accepting and closes the sessions; safe to call from any thread, more than once
+    void stop() {
+        if (!started_.load() || stopped_.exchange(true)) return;
+        asio::post(accept_io_, [this] {
+            std::error_code ignored;
+            acceptor_.close(ignored);
+            accept_io_.stop();
+        });
+        if (acceptor_thread_.joinable() && acceptor_thread_.get_id() != std::this_thread::get_id()) {
+            acceptor_thread_.join();
+        }
+        for (auto& worker : workers_) {
+            worker->io.stop();
+        }
+        for (auto& worker : workers_) {
+            if (worker->thread.joinable()) worker->thread.join();
+        }
+    }
+
+    // Blocks until stop() has been called (by a signal handler or another thread)
+    void wait() {
+        if (acceptor_thread_.joinable()) acceptor_thread_.join();
+        stop();
+    }
+
+    // Stop on SIGINT / SIGTERM
+    void stop_on_signals() {
+        signals_.emplace(accept_io_, SIGINT, SIGTERM);
+        signals_->async_wait([this](const std::error_code& ec, int) {
+            if (!ec) {
+                spdlog::info("Shutting down");
+                acceptor_.close();
+                accept_io_.stop();
+            }
+        });
+    }
+
+    [[nodiscard]] unsigned short port() const { return bound_port_; }
+    [[nodiscard]] size_t shard_count() const { return workers_.size(); }
+
+    // Sessions assigned to each shard that have not ended yet (approximate while connections come and go)
+    [[nodiscard]] std::vector<size_t> sessions_per_shard() const {
+        std::vector<size_t> counts;
+        for (const auto& worker : workers_) counts.push_back(worker->sessions.load(std::memory_order_relaxed));
+        return counts;
+    }
+
+    // Connections handed to each shard since startup
+    [[nodiscard]] std::vector<uint64_t> accepted_per_shard() const {
+        std::vector<uint64_t> counts;
+        for (const auto& worker : workers_) counts.push_back(worker->accepted.load(std::memory_order_relaxed));
+        return counts;
+    }
+
+    // Events dropped on all shards (the counters are atomic, so this is safe to call from any thread)
+    [[nodiscard]] uint64_t dropped_events() const {
+        uint64_t total = 0;
+        for (const auto& worker : workers_) total += worker->shard->channels.dropped_count();
+        return total;
+    }
+
+private:
+    struct Worker {
+        explicit Worker(const ShardConfig& shard_config)
+            : io(1)  // concurrency hint 1: only this thread ever runs the io_context, so asio can skip its locking
+            , shard(std::make_shared<Shard>(shard_config))
+        {}
+
+        asio::io_context io;
+        std::shared_ptr<Shard> shard;
+        std::thread thread;
+        std::atomic<size_t> sessions{0};
+        std::atomic<uint64_t> accepted{0};
+    };
+
+    Worker& least_loaded() {
+        Worker* best = workers_.front().get();
+        for (auto& worker : workers_) {
+            if (worker->sessions.load(std::memory_order_relaxed) < best->sessions.load(std::memory_order_relaxed)) {
+                best = worker.get();
+            }
+        }
+        return *best;
+    }
+
+    template<typename Socket>
+    static asio::awaitable<void> run_session(Worker& worker, const ServerConfig& config, Socket socket) {
+        (void)co_await handle_wamp_session<Socket>(std::move(socket), worker.io, config, worker.shard);
+        worker.sessions.fetch_sub(1, std::memory_order_relaxed);
+    }
+
+    asio::awaitable<void> accept_loop() {
+        spdlog::info("WAMP router listening on port {} ({})", bound_port_,
+                     transport_ == Transport::TLS ? "TLS 1.3" : "plain TCP");
+        while (true) {
+            auto [ec, socket] = co_await acceptor_.async_accept(asio::as_tuple(asio::use_awaitable));
+            if (ec) {
+                if (ec == asio::error::operation_aborted) co_return;
+                spdlog::error("Accept error: {}", ec.message());
+                continue;
+            }
+
+            Worker& worker = least_loaded();
+            worker.sessions.fetch_add(1, std::memory_order_relaxed);
+            worker.accepted.fetch_add(1, std::memory_order_relaxed);
+
+            // Move the connection to the shard's thread by handing over the descriptor
+            const auto native = socket.release();
+            asio::post(worker.io, [this, &worker, native] {
+                tcp::socket adopted{worker.io};
+                std::error_code assign_ec;
+                adopted.assign(tcp::v4(), native, assign_ec);
+                if (assign_ec) {
+                    spdlog::error("Could not adopt connection on shard: {}", assign_ec.message());
+                    worker.sessions.fetch_sub(1, std::memory_order_relaxed);
+                    return;
+                }
+                if (transport_ == Transport::TLS) {
+                    ssl::stream<tcp::socket> tls{std::move(adopted), tls_context_};
+                    set_socket_options(tls);
+                    asio::co_spawn(worker.io, run_session<ssl::stream<tcp::socket>>(worker, config_, std::move(tls)),
+                                   asio::detached);
+                } else {
+                    set_socket_options(adopted);
+                    asio::co_spawn(worker.io, run_session<tcp::socket>(worker, config_, std::move(adopted)),
+                                   asio::detached);
+                }
+            });
+        }
+    }
+
+    ServerConfig config_;
+    Transport transport_;
+    asio::io_context accept_io_;
+    ssl::context tls_context_;
+    tcp::acceptor acceptor_;
+    unsigned short bound_port_;
+    std::vector<std::unique_ptr<Worker>> workers_;
+    std::thread acceptor_thread_;
+    std::optional<asio::signal_set> signals_;
+    std::atomic<bool> started_{false};
+    std::atomic<bool> stopped_{false};
+};
+
+} // namespace wamp

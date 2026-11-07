@@ -17,6 +17,7 @@
 #include "include/config.hpp"
 #include "include/procedure_handler.hpp"
 #include "include/cpu_limits.hpp"
+#include "include/router.hpp"
 #include <print>
 #include <spdlog/spdlog.h>
 #include <filesystem>
@@ -78,6 +79,7 @@ int main(int argc, char* argv[]) {
             config.events.overflow == wamp::OverflowPolicy::BACKPRESSURE ? "backpressure" : "drop",
             config.events.backpressure_timeout.count(),
             config.events.slow_subscriber_limit);
+        std::print("  Threads (shards): {}\n", config.threads == 0 ? std::string{"auto"} : std::to_string(config.threads));
         std::print("  Log Level: {}\n",
             spdlog::level::to_string_view(config.log_level));
         std::print("  Authentication Keys: {}\n",
@@ -85,12 +87,16 @@ int main(int argc, char* argv[]) {
         std::print("\n");
         std::print("Press Ctrl+C to stop\n\n");
 
-        asio::io_context io_context;
+        const unsigned threads = config.threads == 0 ? wamp::detect_cpu_limits().available : config.threads;
+        if (threads > 1) {
+            spdlog::warn("threads = {}: sessions on different shards cannot reach each other yet "
+                         "(cross-shard delivery is not implemented); use threads = 1 for normal routing", threads);
+        }
 
-        wamp::WampTlsServer server{io_context, config};
-        server.start();
-
-        io_context.run();
+        wamp::Router router{config, wamp::Router::Transport::TLS, threads};
+        router.stop_on_signals();
+        router.start();
+        router.wait();
 
     } catch (const std::exception& e) {
         spdlog::error("Fatal error: {}", e.what());

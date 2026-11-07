@@ -65,6 +65,7 @@ add_executable(wamp_tests
     tests/test_realms.cpp
     tests/test_cbor.cpp
     tests/test_cpu_limits.cpp
+    tests/test_router.cpp
 )
 
 # Add include directory for tests

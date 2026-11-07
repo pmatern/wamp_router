@@ -70,7 +70,9 @@ struct Options {
 void usage() {
     std::puts(
         "wamp_load [options]\n"
-        "  --mode pubsub|rpc|both|idle  scenarios to run (default both; idle opens connections and holds them)\n"
+        "  --mode pubsub|rpc|both|idle|selfrpc|selfpubsub  scenarios to run (default both; idle opens connections and\n"
+        "                           holds them; self* clients only use their own procedure/topic, so they work on\n"
+        "                           a router with several shards: --callers clients, --calls operations each)\n"
         "  --connections N          idle: connections to open (default 1000)\n"
         "  --instance N             suffix topic/procedure names with N, to run several wamp_load processes against one router\n"
         "  --hold S                 idle: seconds to keep them open (default 3)\n"
@@ -114,7 +116,8 @@ bool parse(int argc, char** argv, Options& o) {
         else if (a == "--payload-args") { if (!number(o.payload_args)) return false; }
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(); return false; }
     }
-    if (o.mode != "pubsub" && o.mode != "rpc" && o.mode != "both" && o.mode != "idle") {
+    if (o.mode != "pubsub" && o.mode != "rpc" && o.mode != "both" && o.mode != "idle" &&
+        o.mode != "selfrpc" && o.mode != "selfpubsub") {
         std::fprintf(stderr, "invalid --mode: %s\n", o.mode.c_str());
         return false;
     }
@@ -366,6 +369,82 @@ awaitable<void> run_rpc(asio::io_context& io, ClientPool& pool, const Options& o
 }
 
 // ----------------------------------------------------------------------------
+// Self-contained sessions: every client registers its own procedure and calls it itself (rpc), or
+// subscribes to its own topic and publishes to it (pubsub). No session ever needs another, so the
+// workload is valid on a router whose shards cannot reach each other.
+// ----------------------------------------------------------------------------
+awaitable<void> run_self(asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port,
+                         bool pubsub) {
+    std::vector<std::shared_ptr<WampClient>> clients;
+    for (size_t i = 0; i < o.callers; ++i) {
+        clients.push_back(std::make_shared<WampClient>(io));
+        pool.push_back(clients.back());
+    }
+    const std::string base = "self." + std::to_string(o.instance) + ".";
+    auto delivered = std::make_shared<size_t>(0);
+
+    for (size_t i = 0; i < clients.size(); ++i) {
+        co_await clients[i]->connect(host, port, "load.realm");
+        if (pubsub) {
+            co_await clients[i]->subscribe(base + std::to_string(i), [delivered](const EventMessage&) { ++*delivered; });
+        } else {
+            co_await clients[i]->register_procedure(base + std::to_string(i),
+                [](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                    co_return YieldMessage{inv.request_id, {}, inv.arguments, inv.arguments_kw};
+                });
+        }
+    }
+
+    Latencies latency;
+    size_t ok = 0;
+    size_t failed = 0;
+    size_t running = clients.size();
+    const auto args_template = make_payload(o.payload_args);
+
+    const auto start = Clock::now();
+    for (size_t i = 0; i < clients.size(); ++i) {
+        co_spawn(io, [&, i]() -> awaitable<void> {
+            auto args = args_template;
+            const std::string name = base + std::to_string(i);
+            for (size_t n = 0; n < o.calls; ++n) {
+                args[0] = now_ns();
+                try {
+                    if (pubsub) {
+                        (void)co_await clients[i]->publish(name, args, {}, /*acknowledge=*/true, /*exclude_me=*/false);
+                    } else {
+                        (void)co_await clients[i]->call_result(name, args);
+                    }
+                    latency.add(now_ns() - std::get<int64_t>(args[0]));
+                    ++ok;
+                } catch (const std::exception&) {
+                    ++failed;
+                }
+            }
+            --running;
+        }, detached);
+    }
+    while (running > 0) {
+        co_await sleep_for(io, std::chrono::milliseconds(5));
+    }
+    if (pubsub) {  // let the last events arrive
+        for (int i = 0; i < 200 && *delivered < ok; ++i) co_await sleep_for(io, std::chrono::milliseconds(5));
+    }
+    const auto end = Clock::now();
+
+    std::printf("\n== Self-contained %s: %zu clients x %zu, %zu args ==\n", pubsub ? "pubsub" : "rpc",
+                o.callers, o.calls, o.payload_args);
+    std::printf("%-16s %zu ok, %zu failed in %.2f s\n", pubsub ? "publishes" : "calls", ok, failed, seconds(start, end));
+    std::printf("%-16s %.0f %s/s\n", "throughput", static_cast<double>(ok) / std::max(seconds(start, end), 1e-9),
+                pubsub ? "publishes" : "calls");
+    if (pubsub) std::printf("%-16s %zu / %zu\n", "events received", *delivered, ok);
+    latency.print(pubsub ? "publish ack" : "round trip");
+
+    for (auto& client : clients) {
+        co_await disconnect_quietly(*client);
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Idle: open N sessions (RawSocket + HELLO/WELCOME), hold them, report the connect rate
 // ----------------------------------------------------------------------------
 awaitable<void> run_idle(asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port) {
@@ -439,6 +518,9 @@ int main(int argc, char** argv) {
             }
             if (opts.mode == "rpc" || opts.mode == "both") {
                 co_await run_rpc(io, pool, opts, opts.host, port);
+            }
+            if (opts.mode == "selfrpc" || opts.mode == "selfpubsub") {
+                co_await run_self(io, pool, opts, opts.host, port, opts.mode == "selfpubsub");
             }
             if (opts.mode == "idle") {
                 co_await run_idle(io, pool, opts, opts.host, port);

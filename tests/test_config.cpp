@@ -696,3 +696,38 @@ alice = { r1 = "reader", r2 = "writer" }
         CHECK_FALSE(load("[auth.realms]\nalice = [\"r1\"]\n[auth.roles]\nalice = { r1 = \"missing\" }\n").has_value());  // undefined role
     }
 }
+
+TEST_CASE("Config::load() threads", "[config][threads]") {
+    TempCertFile cert("cert");
+    TempCertFile key("key");
+    auto load = [&](const std::string& server_line) {
+        std::string content = "[server]\nport = 8080\n" + server_line + R"(
+[server.tls]
+cert = ")" + cert.path().string() + R"("
+key = ")" + key.path().string() + R"("
+)";
+        TempConfigFile config(content);
+        return wamp::Config::load(config.path());
+    };
+
+    SECTION("defaults to one thread") {
+        auto result = load("");
+        REQUIRE(result.has_value());
+        CHECK(result->threads == 1);
+    }
+    SECTION("explicit count and auto") {
+        auto four = load("threads = 4\n");
+        REQUIRE(four.has_value());
+        CHECK(four->threads == 4);
+        auto automatic = load("threads = \"auto\"\n");
+        REQUIRE(automatic.has_value());
+        CHECK(automatic->threads == 0);
+    }
+    SECTION("invalid values are rejected") {
+        CHECK_FALSE(load("threads = 0\n").has_value());
+        CHECK_FALSE(load("threads = -2\n").has_value());
+        CHECK_FALSE(load("threads = 5000\n").has_value());
+        CHECK_FALSE(load("threads = \"many\"\n").has_value());
+        CHECK_FALSE(load("threads = 1.5\n").has_value());
+    }
+}

@@ -136,6 +136,9 @@ struct AuthRole {
 // ============================================================================
 struct ServerConfig {
     unsigned short port{};
+    // Router threads, one shard each. 0 = one per available CPU (see cpu_limits.hpp). With more than one,
+    // sessions on different shards cannot reach each other yet (cross-shard delivery is not implemented).
+    unsigned threads{1};
     TlsConfig tls{};
     size_t max_pending_invocations{};
     std::chrono::milliseconds call_timeout{30000};  // 0 disables
@@ -187,6 +190,18 @@ public:
         try {
             const auto& server = toml::find(config_data, "server");
             config.port = toml::find<unsigned short>(server, "port");
+
+            if (server.contains("threads")) {
+                const auto& value = toml::find(server, "threads");
+                if (value.is_string() && value.as_string() == "auto") {
+                    config.threads = 0;
+                } else if (value.is_integer() && value.as_integer() >= 1 && value.as_integer() <= 1024) {
+                    config.threads = static_cast<unsigned>(value.as_integer());
+                } else {
+                    spdlog::error("[server] threads must be an integer from 1 to 1024 or \"auto\"");
+                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                }
+            }
 
             const auto& tls = toml::find(server, "tls");
             config.tls.cert_path = toml::find<std::string>(tls, "cert");

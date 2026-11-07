@@ -4,6 +4,13 @@
 # Port to listen on for TLS connections
 port = 8080
 
+# Router threads, one shard each (sessions are spread over them). 1 = the classic single-threaded router.
+# "auto" = one per available CPU (container-aware: cgroup quota, CPU affinity, ECS task limit).
+# WARNING: with more than one thread, sessions on different shards cannot reach each other yet (a publish only
+# reaches subscribers on the publisher's shard, a CALL only finds callees on the caller's shard); cross-shard
+# delivery is not implemented. Leave at 1 for normal routing.
+threads = 1
+
 [server.tls]
 # Path to TLS certificate (PEM format)
 cert = "/path/to/cert.pem"

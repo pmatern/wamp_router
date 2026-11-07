@@ -253,6 +253,8 @@ unit tests independent of process-wide state). It is the prerequisite for everyt
 
 ### Stage 2: N shards, one thread each
 
+**Status: done, behind `[server] threads` (default 1)** (`include/router.hpp`). The acceptor hands each connection to the shard with the fewest sessions by passing the socket's native handle to that shard's `io_context`; the whole session (TLS handshake included) then runs there. Verified with ThreadSanitizer (the full test suite is clean) and with self-contained load (`wamp_load --mode selfrpc|selfpubsub`, where every client registers/subscribes only to its own names). **Cross-shard delivery is not implemented**, so with more than one thread a publish reaches only subscribers on the publisher's shard and a CALL finds only callees on the caller's shard: the router warns at startup and `threads` stays 1 by default. Plan as designed:
+
 * **Thread count:** the number of cores the container may actually use, from the cgroup (`cpu.max` on cgroup v2,
   `cpu.cfs_quota_us` on v1; `hardware_concurrency()` ignores quotas), overridable in config (`[server] threads`).
   Take it from `detect_cpu_limits()` (cgroup quota, affinity, ECS task metadata). Pin threads to CPUs only when the container has a `cpuset`; do not busy-poll under a CFS quota (throttling ruins tail latency).

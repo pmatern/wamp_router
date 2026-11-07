@@ -23,7 +23,7 @@
 
 #include "include/config.hpp"
 #include "include/cpu_limits.hpp"
-#include "include/wamp_server.hpp"
+#include "include/router.hpp"
 #include <asio.hpp>
 #include <spdlog/spdlog.h>
 #include <cstdio>
@@ -35,6 +35,7 @@ int main(int argc, char** argv) {
     using namespace wamp;
 
     unsigned short port = 9000;
+    unsigned threads = 1;
     ServerConfig config;
     bool log = false;
     config.max_pending_invocations = 10000;
@@ -45,6 +46,7 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
         if (a == "--port") { if (auto v = next()) port = static_cast<unsigned short>(std::atoi(v)); }
+        else if (a == "--threads") { if (auto v = next()) threads = static_cast<unsigned>(std::atoi(v)); }
         else if (a == "--queue-size") { if (auto v = next()) config.events.size = std::strtoul(v, nullptr, 10); }
         else if (a == "--overflow") {
             if (auto v = next()) {
@@ -52,17 +54,19 @@ int main(int argc, char** argv) {
             }
         }
         else if (a == "--log") log = true;
-        else { std::puts("wamp_profile_router [--port P] [--queue-size N] [--overflow backpressure|drop] [--log]"); return 1; }
+        else { std::puts("wamp_profile_router [--port P] [--threads N] [--queue-size N] [--overflow backpressure|drop] [--log]"); return 1; }
     }
 
     spdlog::set_level(log ? spdlog::level::info : spdlog::level::off);
 
-    asio::io_context io;
-    WampServer server{io, port, config};
-    server.start();
+    config.port = port;
+    Router router{config, Router::Transport::PLAIN, threads};
+    router.stop_on_signals();
+    router.start();
     const auto cpus = detect_cpu_limits();
-    std::printf("wamp_profile_router listening on %u (pid %d); CPUs available %u (hardware %u, limited by %s)\n",
-                server.port(), static_cast<int>(getpid()), cpus.available, cpus.hardware, cpus.source.c_str());
+    std::printf("wamp_profile_router listening on %u (pid %d), %zu shard thread(s); CPUs available %u (hardware %u, limited by %s)\n",
+                router.port(), static_cast<int>(getpid()), router.shard_count(), cpus.available, cpus.hardware,
+                cpus.source.c_str());
     std::fflush(stdout);
-    io.run();
+    router.wait();
 }
