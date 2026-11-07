@@ -74,9 +74,9 @@ TEST_CASE("WampSession RawSocket handshake", "[wamp_session]") {
 
         REQUIRE(result.has_value());
         REQUIRE(!result->empty());  // Should return handshake response
-
         // Decode response to verify it's a valid handshake
-        auto response_header = rawsocket::decode_frame_header(std::span{result->data(), 4});
+        // The handshake response is not a regular frame, so only check its size
+        REQUIRE(result->size() == 4);
         // Response should be successful handshake
     }
 
@@ -181,13 +181,13 @@ TEST_CASE("WampSession GOODBYE handling", "[wamp_session]") {
         .max_length = rawsocket::MaxLengthCode::BYTES_16M,
         .serializer = rawsocket::Serializer::CBOR
     });
-    session.process(std::span{handshake.data(), handshake.size()});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
     HelloMessage hello{"com.example.realm"};
     hello.roles.push_back(Role{"subscriber", {}});
     auto hello_cbor = serialize_hello(hello);
     auto hello_frame = rawsocket::create_wamp_message(hello_cbor);
-    session.process(std::span{hello_frame.data(), hello_frame.size()});
+    REQUIRE(session.process(std::span{hello_frame.data(), hello_frame.size()}).has_value());
 
     SECTION("Process GOODBYE from client") {
         auto goodbye = GoodbyeMessage::create_normal();
@@ -220,7 +220,7 @@ TEST_CASE("WampSession PING/PONG handling", "[wamp_session]") {
         .max_length = rawsocket::MaxLengthCode::BYTES_16M,
         .serializer = rawsocket::Serializer::CBOR
     });
-    session.process(std::span{handshake.data(), handshake.size()});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
     SECTION("Respond to PING with PONG") {
         std::vector<uint8_t> ping_data{0x01, 0x02, 0x03, 0x04};
@@ -258,7 +258,7 @@ TEST_CASE("WampSession error handling", "[wamp_session]") {
     SECTION("Invalid frame header") {
         std::vector<uint8_t> invalid{0xFF, 0xFF, 0xFF, 0xFF};
 
-        auto result = session.process(std::span{invalid.data(), invalid.size()});
+        (void)session.process(std::span{invalid.data(), invalid.size()});
 
         // Should handle gracefully
         // Don't assert on result - it may handle error in different ways
@@ -270,13 +270,13 @@ TEST_CASE("WampSession error handling", "[wamp_session]") {
             .max_length = rawsocket::MaxLengthCode::BYTES_16M,
             .serializer = rawsocket::Serializer::CBOR
         });
-        session.process(std::span{handshake.data(), handshake.size()});
+        REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
         HelloMessage hello{"com.example.realm"};
         hello.roles.push_back(Role{"subscriber", {}});
         auto hello_cbor = serialize_hello(hello);
         auto hello_frame = rawsocket::create_wamp_message(hello_cbor);
-        session.process(std::span{hello_frame.data(), hello_frame.size()});
+        REQUIRE(session.process(std::span{hello_frame.data(), hello_frame.size()}).has_value());
 
         uint64_t sid = session.session_id();
         REQUIRE(sid != 0);
@@ -377,7 +377,7 @@ TEST_CASE("WampSession authentication - unknown authid rejected", "[wamp_session
         .max_length = rawsocket::MaxLengthCode::BYTES_16M,
         .serializer = rawsocket::Serializer::CBOR
     });
-    session.process(std::span{handshake.data(), handshake.size()});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
     // Send HELLO with unknown authid
     HelloMessage hello{"com.example.realm"};
@@ -421,7 +421,7 @@ TEST_CASE("WampSession authentication - missing authid rejected", "[wamp_session
         .max_length = rawsocket::MaxLengthCode::BYTES_16M,
         .serializer = rawsocket::Serializer::CBOR
     });
-    session.process(std::span{handshake.data(), handshake.size()});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
     // Send HELLO with cryptosign but no authid
     HelloMessage hello{"com.example.realm"};
@@ -461,7 +461,7 @@ TEST_CASE("WampSession authentication - sends CHALLENGE for valid authid", "[wam
         .max_length = rawsocket::MaxLengthCode::BYTES_16M,
         .serializer = rawsocket::Serializer::CBOR
     });
-    session.process(std::span{handshake.data(), handshake.size()});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
     // Send HELLO with valid authid
     HelloMessage hello{"com.example.realm"};
@@ -507,7 +507,7 @@ TEST_CASE("WampSession authentication - full flow success", "[wamp_session][auth
         .max_length = rawsocket::MaxLengthCode::BYTES_16M,
         .serializer = rawsocket::Serializer::CBOR
     });
-    session.process(std::span{handshake.data(), handshake.size()});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
     // Send HELLO with valid authid
     HelloMessage hello{"com.example.realm"};
@@ -584,7 +584,7 @@ TEST_CASE("WampSession authentication - invalid signature rejected", "[wamp_sess
         .max_length = rawsocket::MaxLengthCode::BYTES_16M,
         .serializer = rawsocket::Serializer::CBOR
     });
-    session.process(std::span{handshake.data(), handshake.size()});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
     // Send HELLO
     HelloMessage hello{"com.example.realm"};
@@ -636,7 +636,7 @@ TEST_CASE("WampSession authentication - no auth required when auth_keys empty", 
         .max_length = rawsocket::MaxLengthCode::BYTES_16M,
         .serializer = rawsocket::Serializer::CBOR
     });
-    session.process(std::span{handshake.data(), handshake.size()});
+    REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
     // Send HELLO without any auth info
     HelloMessage hello{"com.example.realm"};

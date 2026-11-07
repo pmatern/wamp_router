@@ -16,7 +16,7 @@ Outstanding work, as of 2026-11-05. Check items off as they land.
 ## Code quality and tests
 - [x] Found by the load test: `WampSession::process` handled one frame per socket read (pipelined messages sat in the buffer, and a partial 4-byte header spun forever); `handle_wamp_session` dropped an event or client bytes when the read and channel receive completed together; `WampClient` interleaved socket writes from concurrent invocation handlers; `WampClient::disconnect` used immediately-invoked coroutine lambdas (use-after-free in release builds).
 - [x] Flaky test "WampClient - Register procedure and handle call": the integration test fixture stopped its server before it saw the client EOF, so `WampSession` never ran `on_disconnect()` and `com.example.add` stayed registered in the process-wide registry. `WampSession` now cleans up in its destructor.
-- [ ] Fix `-Wunused-result` warnings from unchecked `session.process(...)` in `tests/test_wamp_session.cpp`.
+- [x] Fixed `-Wunused-result` and unused-variable warnings in `tests/test_wamp_session.cpp`.
 - [ ] Log the clean-disconnect "Operation canceled" read-loop error at debug, not error.
 - [ ] Integration tests (`tests/test_integration.cpp`): graceful server shutdown instead of detach; timing-dependent tests.
 - [ ] Resolve the TODO at `include/wamp_session.hpp:35` ("in process client support, fix names").
