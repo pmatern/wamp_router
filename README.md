@@ -382,6 +382,10 @@ Baseline (Release, same machine as above, embedded router, 10 positional argumen
 
 RPC rows above were measured before the event-queue work; a rerun gives about 18k calls/s with 10 callers (p50 0.55 ms, p99 0.8–1.1 ms).
 
+### Profiling and threading analysis
+
+`wamp_profile_router` (plain-TCP router, logging off), `wamp_load --mode idle --connections N` (open and hold N sessions), `wamp_handoff_bench` (cross-thread handoff costs) and `wamp_tls_probe` (TLS 1.3 handshake and record costs) support the profile in [docs/threading-analysis.md](docs/threading-analysis.md), which also holds the recommended thread-per-core design.
+
 ### Event queue and backpressure
 
 Each session has a bounded queue of messages waiting to be written to its client (EVENT, INVOCATION, RESULT, ERROR). Size and overflow behaviour are configurable:

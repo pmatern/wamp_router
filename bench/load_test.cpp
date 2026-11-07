@@ -57,6 +57,8 @@ struct Options {
     size_t messages = 10000;     // events published
     size_t calls = 1000;         // calls per caller
     size_t payload_args = 10;
+    size_t connections = 1000;   // idle: connections to open
+    size_t hold_seconds = 3;     // idle: how long to keep them open (so memory can be sampled)
     size_t queue_size = 100;     // embedded router: per-session event queue size
     std::string overflow = "backpressure";  // embedded router: backpressure | drop
     size_t rate = 2000;          // events/s, 0 = unpaced (stress: the router drops events when subscriber queues fill)
@@ -66,7 +68,9 @@ struct Options {
 void usage() {
     std::puts(
         "wamp_load [options]\n"
-        "  --mode pubsub|rpc|both   scenarios to run (default both)\n"
+        "  --mode pubsub|rpc|both|idle  scenarios to run (default both; idle opens connections and holds them)\n"
+        "  --connections N          idle: connections to open (default 1000)\n"
+        "  --hold S                 idle: seconds to keep them open (default 3)\n"
         "  --subscribers N          pubsub: subscriber clients (default 10)\n"
         "  --messages N             pubsub: events published (default 10000)\n"
         "  --rate R                 pubsub: events/s, 0 = unpaced stress test (default 2000)\n"
@@ -101,10 +105,12 @@ bool parse(int argc, char** argv, Options& o) {
         else if (a == "--queue-size") { if (!number(o.queue_size)) return false; }
         else if (a == "--overflow") { const char* v = next(); if (!v) return false; o.overflow = v; }
         else if (a == "--rate") { if (!number(o.rate)) return false; }
+        else if (a == "--connections") { if (!number(o.connections)) return false; }
+        else if (a == "--hold") { if (!number(o.hold_seconds)) return false; }
         else if (a == "--payload-args") { if (!number(o.payload_args)) return false; }
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(); return false; }
     }
-    if (o.mode != "pubsub" && o.mode != "rpc" && o.mode != "both") {
+    if (o.mode != "pubsub" && o.mode != "rpc" && o.mode != "both" && o.mode != "idle") {
         std::fprintf(stderr, "invalid --mode: %s\n", o.mode.c_str());
         return false;
     }
@@ -354,6 +360,46 @@ awaitable<void> run_rpc(boost::asio::io_context& io, ClientPool& pool, const Opt
     }
 }
 
+// ----------------------------------------------------------------------------
+// Idle: open N sessions (RawSocket + HELLO/WELCOME), hold them, report the connect rate
+// ----------------------------------------------------------------------------
+awaitable<void> run_idle(boost::asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port) {
+    constexpr size_t kConcurrent = 64;  // connects in flight, so the router sees a burst rather than a trickle
+    std::printf("\n== Idle: %zu connections, %zu in flight ==\n", o.connections, kConcurrent);
+
+    size_t next = 0;
+    size_t done = 0;
+    size_t failed = 0;
+    size_t active = 0;
+    const auto start = Clock::now();
+    auto worker = [&]() -> awaitable<void> {
+        while (next < o.connections) {
+            ++next;
+            auto client = std::make_shared<WampClient>(io);
+            pool.push_back(client);
+            try {
+                co_await client->connect(host, port, "load.realm");
+                ++done;
+            } catch (const std::exception&) {
+                ++failed;
+            }
+        }
+        --active;
+    };
+    for (size_t i = 0; i < kConcurrent; ++i) {
+        ++active;
+        co_spawn(io, worker(), detached);
+    }
+    while (active > 0) {
+        co_await sleep_for(io, std::chrono::milliseconds(5));
+    }
+    const double elapsed = seconds(start, Clock::now());
+    std::printf("connected        %zu ok, %zu failed in %.2f s (%.0f connections/s)\n", done, failed, elapsed,
+                static_cast<double>(done) / elapsed);
+    std::printf("holding %zu s (sample the router's memory now)...\n", o.hold_seconds);
+    co_await sleep_for(io, std::chrono::seconds(o.hold_seconds));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -389,6 +435,9 @@ int main(int argc, char** argv) {
             }
             if (opts.mode == "rpc" || opts.mode == "both") {
                 co_await run_rpc(io, pool, opts, opts.host, port);
+            }
+            if (opts.mode == "idle") {
+                co_await run_idle(io, pool, opts, opts.host, port);
             }
         } catch (const std::exception& e) {
             std::fprintf(stderr, "load test failed: %s\n", e.what());

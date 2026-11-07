@@ -133,3 +133,44 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(wamp_load PRIVATE -O3)
 endif()
 
+
+# Plain-TCP router for profiling with perf (not built by default)
+#   cmake --build build-local-release --target wamp_profile_router
+add_executable(wamp_profile_router EXCLUDE_FROM_ALL bench/profile_router.cpp)
+target_include_directories(wamp_profile_router PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(wamp_profile_router PRIVATE
+    Boost::system
+    Boost::boost
+    fmt::fmt
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+    toml11::toml11
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
+target_compile_options(wamp_profile_router PRIVATE -Wall -Wextra -Wpedantic)
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(wamp_profile_router PRIVATE -O3)
+endif()
+
+find_package(Threads REQUIRED)
+
+# Cross-thread handoff primitives (not built by default; run a Release build)
+#   cmake --build build-local-release --target wamp_handoff_bench
+add_executable(wamp_handoff_bench EXCLUDE_FROM_ALL bench/bench_handoff.cpp)
+target_include_directories(wamp_handoff_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(wamp_handoff_bench PRIVATE Boost::system Boost::boost Threads::Threads)
+target_compile_options(wamp_handoff_bench PRIVATE -Wall -Wextra -Wpedantic)
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(wamp_handoff_bench PRIVATE -O3)
+endif()
+
+# TLS 1.3 cost per connection and per message (not built by default; run a Release build)
+#   cmake --build build-local-release --target wamp_tls_probe
+add_executable(wamp_tls_probe EXCLUDE_FROM_ALL bench/tls_probe.cpp)
+target_include_directories(wamp_tls_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(wamp_tls_probe PRIVATE Boost::system Boost::boost OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+target_compile_options(wamp_tls_probe PRIVATE -Wall -Wextra -Wpedantic)
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(wamp_tls_probe PRIVATE -O3)
+endif()

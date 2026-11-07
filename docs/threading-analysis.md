@@ -1,0 +1,214 @@
+# Threading analysis
+
+Question: should the router stay on one `io_context` thread, and if not, what is the best thread-per-core design
+(shared-nothing, minimal context switching, Linux containers, ordering at WAMP-spec level only)?
+
+**Answer in one paragraph.** Do a few single-thread fixes first (they remove about a third of the per-message cost and make
+threading cheaper), then move to a shared-nothing thread-per-core design: one `io_context` per core, sessions pinned to the core
+that accepted them, **every table replicated per core** (subscriptions, registrations, realms), and cross-core traffic carried as
+batched messages over SPSC lanes. The measurements say the cross-core hop (30-60 ns/message) is negligible next to the per-message
+work (about 50 us of CPU per RPC, about 8 us per delivered event), so the design scales close to linearly with cores for both
+workloads. For the idle/reconnect workload the gain is mostly TLS handshakes (0.5-1.1 ms of CPU each).
+
+## What was measured, and how
+
+All tools are in `bench/` and are not built by default. Release builds; Linux numbers come from the `cpp23-builder` image on Docker
+Desktop (4 vCPUs, `perf record -e cpu-clock`, frame pointers), macOS numbers from the dev machine (Intel i7-1068NG7, 8 threads).
+
+| Tool | Purpose |
+|---|---|
+| `wamp_profile_router` | plain-TCP router, logging off, one thread: the process to profile or run `ps`/`perf` against |
+| `wamp_load` (`--mode rpc|pubsub|idle`) | load generator; `idle` opens N sessions and holds them |
+| `wamp_handoff_bench` | cross-thread handoff and `shared_ptr` refcount costs |
+| `wamp_tls_probe` | server CPU per TLS 1.3 handshake and per message, TLS vs plain |
+
+```bash
+cmake --build build-local-release --target wamp_profile_router wamp_load wamp_handoff_bench wamp_tls_probe
+./build-local-release/wamp_profile_router --port 9000 &
+./build-local-release/wamp_load --host 127.0.0.1 --port 9000 --mode rpc --callers 10 --calls 5000
+./build-local-release/wamp_handoff_bench
+./build-local-release/wamp_tls_probe test_certs/cert.pem test_certs/key.pem
+```
+
+**Caveat that matters.** Inside Docker Desktop's VM, syscalls are very expensive (about 20 us each), so the kernel share there is
+80%; on macOS natively the router spends about one third of its CPU in the kernel. The *user-space* breakdown and the *syscall
+counts per message* are reliable; the absolute kernel share is not. Re-run on bare-metal or a real Linux VM before committing to the
+big stages below.
+
+## Findings
+
+### 1. One core's ceiling (macOS native, router on its own process, load generator separate)
+
+| Scenario | Result | Router CPU |
+|---|---|---|
+| RPC, 10 callers x 5,000 calls | 16.7k calls/s, p50 0.57 ms | 49 us per call (33 user + 16 sys) |
+| PubSub, 10 subscribers, unpaced | 46k events/s delivered | about 11 us per delivered event (5.5 user + 5.6 sys) |
+| PubSub, 100 subscribers, paced 1000/s | 74k events/s delivered, p50 2 ms | about 8 us per delivered event (3.8 user + 4.3 sys) |
+
+An RPC is four router messages (CALL in, INVOCATION out, YIELD in, RESULT out), so about 12 us of CPU per message. The in-process
+micro-benchmarks (README) show the handler logic itself costs only 12.5 us per call, so most of the 49 us is serialization, asio
+and syscalls, not routing.
+
+### 2. Where the CPU goes
+
+Router thread, Linux profile (percent of all samples, kernel included):
+
+| Category | RPC (10 callers) | PubSub (10 subscribers, unpaced) |
+|---|---|---|
+| kernel (syscalls, scheduler, TCP) | 70% | 79% |
+| asio (reactor, coroutines, `parallel_group`, channels) | 9.5% | 11.5% |
+| CBOR (nlohmann + serializer) | 10% | 3% |
+| allocation (`malloc`/`free`, asio recycling) | 5% | 3% |
+| libc / std containers / variant | 7% | 5% |
+| router logic (`wamp::`) | 1.6% | 0.8% |
+| logging (spdlog with level `off`) | 0.7% | 0.4% |
+
+Of the *user* time: RPC is one third CBOR, one third asio, one sixth allocation, about 5% actual routing. Pub/sub is more than half
+asio. **The router's own logic is almost free; the cost is plumbing.** That is the key to the whole design: nearly all the work is
+session-local (parse, serialize, syscalls) and parallelizes without sharing anything.
+
+### 3. Syscalls per message (strace -c)
+
+* RPC: 2.0 `sendto`, 3.0 `recvfrom` (one in three fails with EAGAIN), 2.0 `epoll_wait` per call. The minimum is 2 sends + 2 reads.
+* PubSub: for every delivered event there is one `sendto`, and almost every `recvfrom` fails with EAGAIN (11,164 of 11,233).
+
+**Why:** `handle_wamp_session` (`include/wamp_server.hpp`) runs a `parallel_group` of "read from socket" and "receive from the
+event channel" in a loop. Every delivered event completes the channel side, cancels the pending read, writes the one frame with its
+own `async_write`, then starts a fresh `async_read_some` (a speculative `recv` that returns EAGAIN, then an epoll re-arm). So each
+delivered event costs a wasted read attempt, a cancellation, a coroutine/handler round trip and a lone `send`, and no frames are
+ever coalesced. Syscalls are about half of the router CPU on macOS, so this is the largest single inefficiency.
+
+### 4. TLS 1.3 (`wamp_tls_probe`, one server thread, macOS)
+
+| | RSA-2048 cert (the test cert) | ECDSA P-256 cert |
+|---|---|---|
+| server CPU per handshake | 1.12 ms (about 890/s per core) | 0.47 ms (about 2,100/s per core) |
+| plain TCP accept | 25 us | 11 us |
+
+Record layer, per message read: 200 B +1.4 us (2.7 to 4.2), 1 KiB +2.0 us, 16 KiB +6.4 us. Against about 10 us of router CPU per
+message that is a 10-15% tax for small messages. A reconnect storm of 100k clients costs 110 s (RSA) or 48 s (ECDSA) of CPU on one
+core: **for a mostly idle fleet, handshakes are the cost, and they parallelize perfectly.** Recommend ECDSA certificates regardless.
+
+### 5. Idle sessions
+
+About 11 KB of RSS per connected session (5,000 sessions: 55 MB on macOS; 10,000: 111 MB on Linux). 8 KiB of that is the
+`std::array<uint8_t, 8192>` receive buffer that lives in each session's coroutine frame. 100k idle sessions would be about
+1.1 GB, mostly unused buffer; allocating the buffer only while a read is outstanding (or 1-2 KiB) would cut it by about 70%.
+Connect rate in the harness was 3.5k-12k/s (client-bound, so a lower bound).
+
+### 6. Cost of moving data between cores (`wamp_handoff_bench`, Linux VM, 4 vCPUs)
+
+| Operation | Cost |
+|---|---|
+| mutex + deque + condvar, batch 16-128 | 31 ns/message |
+| mutex + deque + condvar, batch 1 | 60 ns/message |
+| SPSC ring (spinning consumer) | 63 ns/message (with a `shared_ptr` payload) |
+| `asio::post` to another `io_context`, batch 16-128 | 34-40 ns/message |
+| `asio::post`, batch 1 | 413 ns/message |
+| `shared_ptr` copy+destroy of **one** frame: 1 / 2 / 4 threads | 13 / 56 / 136 ns per op |
+| clone a frame instead (`make_shared<vector>` copy): 128 B / 512 B / 4 KiB / 64 KiB | 31 / 35 / 109 / 1,650 ns |
+
+Takeaways: (a) handoff only has to be *batched*, after which the mechanism hardly matters (mutex/condvar, `asio::post` and a ring
+are within 2x; unbatched `post` is 10x worse); (b) **do not share one frame's refcount across cores in the fan-out loop**: at 4
+threads each atomic op costs 136 ns, more than cloning a frame of up to 4 KiB; (c) a 30-60 ns hop is 0.5% of the 12 us per-message
+router cost, so the architecture is bound by per-session work, not by communication.
+
+## Recommended design
+
+### Stage 0: single-thread fixes first (independent of threading)
+
+1. **Split each session into a reader coroutine and a writer coroutine.** The writer waits on the queue, drains everything that is
+   ready and writes it with one gathered `async_write` (`writev`). This removes the read cancel/re-arm, the EAGAIN `recv` per
+   event, and turns N back-to-back events into one syscall. Expected: syscalls per delivered event from about 2.5 to 1/batch +
+   small; the kernel half of the PubSub cost drops by roughly a third to a half under load. It also removes the `parallel_group`
+   machinery (about 11% of PubSub CPU).
+2. **Shrink the per-session buffer** (1-2 KiB, grow on demand): about 70% less memory per idle session.
+3. **Replace nlohmann CBOR** with a purpose-built reader/writer for the WAMP message shapes (decode straight into `WampList`/
+   `WampDict`, encode straight into the frame buffer; no `json` tree): CBOR is a third of RPC user time, and the README shows
+   4.5-5 us to decode a 10-argument message.
+4. Recycle frame buffers (pool) instead of `make_shared<vector>` per frame: allocation is 3-5% of CPU.
+5. Evaluate Asio's io_uring backend on Linux (`BOOST_ASIO_HAS_IO_URING`). Caveat: many container runtimes' default seccomp
+   profiles block `io_uring`, so keep epoll as the default and treat this as an opt-in.
+
+### Stage 1: a `Shard` object instead of process-wide statics
+
+Move everything that is global today into one `Shard` that is passed by reference: `EventChannelRegistry` (channels, strikes,
+blocked-send list, drop counter), `InvocationTracker`, `RealmRegistry` and its `Realm`s, ID generators, call sweeper, and the
+`ProcedureHandler` settings. The session holds a `Shard&`. With one shard this is a behaviour-neutral refactor (and it makes the
+unit tests independent of process-wide state). It is the prerequisite for everything below and the riskiest mechanical step.
+
+### Stage 2: N shards, one thread each
+
+* **Thread count:** the number of cores the container may actually use, from the cgroup (`cpu.max` on cgroup v2,
+  `cpu.cfs_quota_us` on v1; `hardware_concurrency()` ignores quotas), overridable in config (`[server] threads`).
+  Pin threads to CPUs only when the container has a `cpuset`; do not busy-poll under a CFS quota (throttling ruins tail latency).
+* **Accepting:** one acceptor assigns each new socket to the least-loaded shard and `post`s it there; the TLS handshake and the
+  whole session then run on that shard's thread. An accept is 11-25 us against a 0.5-1.1 ms handshake, so a single acceptor is not
+  a bottleneck, and it balances better than `SO_REUSEPORT` hashing, which can leave cores idle when connections are few and long
+  lived. `SO_REUSEPORT` stays an option for very high accept rates.
+* **Lanes:** one bounded SPSC queue per ordered pair (source shard, destination shard), carrying small message structs. The
+  consumer drains its lanes in a posted task and only the empty-to-non-empty transition wakes it (eventfd / `post`), so a busy
+  pair does not pay one wake-up per message. Per-publisher ordering follows from FIFO per lane: all of one session's traffic to a
+  given shard uses the same lane.
+
+### Stage 3: pub/sub across shards
+
+Every shard keeps a **private** `Realm` per realm name with its local subscribers, plus an **interest table** (topic -> set of
+shards that have at least one subscriber). A PUBLISH on shard A:
+
+1. looks up the interest table (local, no locking), serializes the EVENT frame template once as today,
+2. sends one message per *interested remote shard* (not per subscriber), carrying a copy of the frame (clone up to about 4 KiB;
+   above that share an immutable buffer with one atomic reference per shard-message, never per subscriber),
+3. fans out to its own local subscribers, and each remote shard fans out to its own local subscribers.
+
+Subscribe/unsubscribe changes the local table and broadcasts an interest delta to all shards; SUBSCRIBED is sent after every shard
+has acknowledged (rare operation, one lane round trip), which preserves "subscribed means later publishes will be seen".
+Rejected alternative: **topic ownership by hash**: adds a hop to every publish, serializes a hot topic on one core, and the
+subscriber-per-core index is needed anyway for the final fan-out.
+
+Slow-subscriber strikes, queue sizes and the drop policy stay per session on the shard that owns the subscriber. Lanes are
+bounded: when a lane to shard B is full the publishing session pauses reading (the existing backpressure mechanism, with the lane
+as the thing it waits on), so cross-core traffic cannot grow without bound.
+
+### Stage 4: RPC across shards
+
+* **Registrations:** replicated like interest, because they change rarely. The "one registration per procedure" rule needs one
+  arbiter: send REGISTER to the shard that owns `hash(realm, procedure)`, which grants or rejects and then broadcasts the new
+  registration; REGISTERED is sent after all shards acknowledged.
+* **CALL on shard A:** the replicated table gives the callee's shard B. A sends a `Call` message on lane A to B (caller shard,
+  caller session, request id, payload). **B owns the pending call**: invocation ids carry the shard number in their high bits, so
+  the YIELD (which arrives on B, the callee's own session) finds its record in B's local tracker with no lookup elsewhere. B
+  sends INVOCATION to the callee, and on YIELD sends a `Result` message on lane B to A, which writes RESULT to the caller.
+* **Timeouts and INTERRUPT:** B sweeps its own tracker and tells A to send `wamp.error.timeout`; the existing 50 ms sweeper becomes
+  per shard. Caller disconnect sends a `Cancel` to B so the pending record is dropped; callee disconnect fails the calls it owns,
+  as today.
+* **IDs:** per-shard ranges (shard number in the high bits) replace the shared atomic generators; no coordination.
+
+### Stage 5: everything else that touches shared state
+
+Per-shard counters aggregated on read (dropped events, active sessions), asynchronous or per-shard logging so a slow sink does not
+stall a core, graceful shutdown that stops acceptors then drains lanes, and config reload (still "restart to change").
+
+## Expected gains and risks
+
+| Stage | Expected gain | Risk |
+|---|---|---|
+| 0.1 reader/writer split + writev | about 1.3-1.6x on fan-out; fewer syscalls on RPC | low |
+| 0.2 smaller buffer | about 70% less memory per idle session | low |
+| 0.3 custom CBOR + 0.4 buffer pool | about 1.2-1.4x on RPC (CBOR is a third of user time) | medium (new codec needs a fuzz/round-trip test suite) |
+| 1 `Shard` refactor | none by itself | medium (touches every static) |
+| 2-4 N shards | near-linear in cores for session-local work: projected 3-3.5x on 4 cores for RPC and fan-out, N-fold handshake rate for reconnect storms | high (concurrency; needs ordering tests and TSAN) |
+
+These are projections from the profile, not measurements of a threaded router. Because the cross-core cost per message (30-60
+ns) is two orders of magnitude below the per-message work, the dominant uncertainty is bare-metal syscall cost, which only
+changes how much Stage 0 buys, not whether the design scales.
+
+## What to do before building Stage 2
+
+1. Reproduce the profile on bare-metal or a normal Linux VM (kernel symbols and a real syscall cost), with the load generator on
+   separate hardware.
+2. Implement Stage 0.1 and re-measure; it changes the profile, and the answer may shift how many cores a given load needs.
+3. Add a multi-process/multi-host mode to `wamp_load` so the load generator is not the bottleneck (it shares a single thread across
+   all clients today).
+4. Decide the supported guarantees explicitly (per-publisher, per-topic ordering; subscribe-then-publish visibility) and write the
+   ordering tests first.
