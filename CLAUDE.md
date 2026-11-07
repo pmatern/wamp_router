@@ -196,7 +196,7 @@ Add authentication keys to config.toml:
 **Authentication Protocol Flow:**
 1. Client sends `HELLO` with `authid="user1"` and `authmethods=["cryptosign"]`
 2. Router sends `CHALLENGE` with random 32-byte nonce (hex-encoded)
-3. Client signs: `challenge_hex + "|0|" + authid + "|user"` with private key
+3. Client signs the raw challenge bytes (the 32 bytes behind the hex string) with its private key; the 64-byte signature is returned hex-encoded (`signature||challenge`, 96 bytes, is also accepted)
 4. Client sends `AUTHENTICATE` with Ed25519 signature (hex-encoded)
 5. Router verifies signature with public key from config
    - Success: Sends `WELCOME` with authid, authrole, authmethod

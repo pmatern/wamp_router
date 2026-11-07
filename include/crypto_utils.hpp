@@ -301,6 +301,48 @@ inline std::expected<std::string, std::string> sign_ed25519(
 }
 
 // ============================================================================
+// Cryptosign challenge signing (WAMP spec: sign the raw challenge bytes)
+// ============================================================================
+
+// Signs the raw bytes behind a hex-encoded challenge; returns the 64-byte signature, hex-encoded
+inline std::expected<std::string, std::string> sign_challenge(
+    const std::string& challenge_hex,
+    EVP_PKEY* private_key
+) {
+    auto challenge = hex_to_bytes(challenge_hex);
+    if (!challenge) {
+        return std::unexpected{"Challenge is not valid hex: " + challenge.error()};
+    }
+    return sign_ed25519(std::string(challenge->begin(), challenge->end()), private_key);
+}
+
+// Verifies a signature over the raw challenge bytes. Accepts the 64-byte signature, or the 96-byte
+// signature||challenge form some clients send (the trailing 32 bytes must equal the challenge).
+inline bool verify_challenge_signature(
+    const std::string& signature_hex,
+    const std::string& challenge_hex,
+    const std::string& public_key_hex
+) {
+    auto challenge = hex_to_bytes(challenge_hex);
+    auto signature = hex_to_bytes(signature_hex);
+    if (!challenge || !signature) {
+        return false;
+    }
+
+    if (signature->size() == 96) {
+        if (!std::equal(challenge->begin(), challenge->end(), signature->begin() + 64)) {
+            return false;
+        }
+        signature->resize(64);
+    }
+
+    return verify_ed25519_signature(
+        bytes_to_hex(*signature),
+        std::string(challenge->begin(), challenge->end()),
+        public_key_hex);
+}
+
+// ============================================================================
 // Extract Raw Public Key from EVP_PKEY (for getting hex representation)
 // ============================================================================
 

@@ -285,11 +285,9 @@ class MyComponent(ApplicationSession):
 
     def onChallenge(self, challenge):
         if challenge.method == "cryptosign":
-            # Sign: challenge|session_id|authid|authrole
-            challenge_hex = challenge.extra["challenge"]
-            message = f"{challenge_hex}|0|user1|user"
-            signature = self.signing_key.sign(message.encode()).signature
-            return signature.hex()
+            # Sign the raw challenge bytes (the 32 bytes behind the hex string)
+            challenge = bytes.fromhex(challenge.extra["challenge"])
+            return self.signing_key.sign(challenge).signature.hex()
 
     async def onJoin(self, details):
         print(f"Authenticated as: {details.authid}")

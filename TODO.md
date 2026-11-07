@@ -34,6 +34,7 @@ Do the protocol gaps (arguments forwarding in particular) first so benchmarks me
 - [ ] After the load tool exists, revisit the single-threaded design and unbounded per-session channels (`include/event_channel.hpp`).
 
 ## Backlog
-- [x] Roles and authorization per authid: `[auth.roles]` + `[[roles.<name>.rules]]` (exact/prefix URIs; call, register, publish, subscribe), default-deny once `[auth.keys]` is set, `wamp.error.not_authorized`. Not done: realm-scoped roles, wildcard URI patterns, reloading permissions without a restart, putting the role into the signed Cryptosign challenge.
+- [x] Roles and authorization per authid: `[auth.roles]` + `[[roles.<name>.rules]]` (exact/prefix URIs; call, register, publish, subscribe), default-deny once `[auth.keys]` is set, `wamp.error.not_authorized`. Not done: wildcard URI patterns, reloading permissions without a restart.
+- [ ] Realm support: realm isolation (subscriptions/registrations are process-wide, so a publish in one realm reaches subscribers in every other), realm-scoped roles, per-authid allowed realms, and ~~signing the raw Cryptosign challenge as the spec does~~ (done). Do before the threading review.
 - [ ] WebSocket transport; JSON and MessagePack serializers.
 - [ ] Pattern-based subscriptions/registrations, call cancellation, progressive results.

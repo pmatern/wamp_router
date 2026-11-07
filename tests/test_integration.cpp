@@ -676,9 +676,8 @@ public:
             if (!key_result.has_value()) return false;
 
             std::string challenge_nonce = challenge->extra.at("challenge");
-            std::string message_to_sign = challenge_nonce + "|0|" + authid_ + "|user";
 
-            auto sig_result = sign_ed25519(message_to_sign, key_result->get());
+            auto sig_result = sign_challenge(challenge_nonce, key_result->get());
             if (!sig_result.has_value()) return false;
 
             // Send AUTHENTICATE

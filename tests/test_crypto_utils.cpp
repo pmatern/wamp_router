@@ -235,6 +235,33 @@ TEST_CASE("Ed25519 signing and verification", "[crypto]") {
         std::remove(priv_path.c_str());
     }
 
+    SECTION("challenge signing covers the raw challenge bytes") {
+        auto [priv_path, public_key_hex] = create_test_keypair_files();
+        auto key_result = load_ed25519_private_key_pem(priv_path);
+        REQUIRE(key_result.has_value());
+
+        const std::string challenge = generate_challenge();
+        auto sig = sign_challenge(challenge, key_result->get());
+        REQUIRE(sig.has_value());
+        REQUIRE(sig->size() == 128);  // 64 bytes hex
+
+        REQUIRE(verify_challenge_signature(*sig, challenge, public_key_hex));
+        REQUIRE_FALSE(verify_challenge_signature(*sig, generate_challenge(), public_key_hex));
+
+        // Signing the hex text instead of the bytes (the old behaviour) is not accepted
+        auto text_sig = sign_ed25519(challenge, key_result->get());
+        REQUIRE(text_sig.has_value());
+        REQUIRE_FALSE(verify_challenge_signature(*text_sig, challenge, public_key_hex));
+
+        // signature||challenge form
+        REQUIRE(verify_challenge_signature(*sig + challenge, challenge, public_key_hex));
+        REQUIRE_FALSE(verify_challenge_signature(*sig + generate_challenge(), challenge, public_key_hex));
+
+        REQUIRE_FALSE(sign_challenge("not hex", key_result->get()).has_value());
+
+        std::remove(priv_path.c_str());
+    }
+
     SECTION("verify_ed25519_signature rejects tampered signature") {
         auto [priv_path, public_key_hex] = create_test_keypair_files();
 

@@ -1048,13 +1048,8 @@ private:
 
         spdlog::debug("Challenge nonce: {}", challenge_nonce);
 
-        // Build message to sign: challenge|0|authid|user
-        std::string message_to_sign = challenge_nonce + "|0|" + *authid_ + "|user";
-
-        spdlog::debug("Message to sign: {}", message_to_sign);
-
-        // Sign the message
-        auto signature_result = sign_ed25519(message_to_sign, private_key_.get());
+        // Cryptosign: sign the raw challenge bytes
+        auto signature_result = sign_challenge(challenge_nonce, private_key_.get());
         if (!signature_result.has_value()) {
             throw std::runtime_error("Failed to sign challenge: " + signature_result.error());
         }

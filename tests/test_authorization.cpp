@@ -127,7 +127,7 @@ WelcomeMessage establish(WampSession& session, const KeyPair& kp, const std::str
 
     auto key = load_ed25519_private_key_pem(kp.priv_path);
     REQUIRE(key.has_value());
-    auto sig = sign_ed25519(challenge->extra.at("challenge") + "|0|" + authid + "|user", key->get());
+    auto sig = sign_challenge(challenge->extra.at("challenge"), key->get());
     REQUIRE(sig.has_value());
 
     auto auth_frame = rawsocket::create_wamp_message(serialize_authenticate(AuthenticateMessage{*sig}));

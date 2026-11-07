@@ -494,14 +494,10 @@ private:
 
         const std::string& public_key_hex = it->second;
 
-        // Build message that should have been signed:
-        // Format: challenge|session_id|authid|authrole
-        // Note: session_id not yet assigned, use "0"
-        std::string signed_message = pending_challenge_ + "|0|" + pending_authid_ + "|user";
-
-        bool signature_valid = verify_ed25519_signature(
+        // Cryptosign: the client signs the raw challenge bytes
+        bool signature_valid = verify_challenge_signature(
             authenticate.signature,
-            signed_message,
+            pending_challenge_,
             public_key_hex
         );
 

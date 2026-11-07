@@ -534,9 +534,8 @@ TEST_CASE("WampSession authentication - full flow success", "[wamp_session][auth
     REQUIRE(key_result.has_value());
 
     std::string challenge_nonce = challenge->extra.at("challenge");
-    std::string message_to_sign = challenge_nonce + "|0|testuser|user";
 
-    auto sig_result = sign_ed25519(message_to_sign, key_result->get());
+    auto sig_result = sign_challenge(challenge_nonce, key_result->get());
     REQUIRE(sig_result.has_value());
 
     // Send AUTHENTICATE
