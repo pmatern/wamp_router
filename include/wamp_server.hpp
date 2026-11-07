@@ -20,10 +20,10 @@
 #include "event_channel.hpp"
 #include "config.hpp"
 #include "procedure_handler.hpp"
-#include <boost/asio.hpp>
-#include <boost/asio/ssl.hpp>
-#include <boost/asio/experimental/channel.hpp>
-#include <boost/asio/experimental/parallel_group.hpp>
+#include <asio.hpp>
+#include <asio/ssl.hpp>
+#include <asio/experimental/channel.hpp>
+#include <asio/experimental/parallel_group.hpp>
 #include <spdlog/spdlog.h>
 #include <expected>
 #include <system_error>
@@ -34,13 +34,13 @@
 
 namespace wamp {
 
-using boost::asio::ip::tcp;
-namespace ssl = boost::asio::ssl;
+using asio::ip::tcp;
+namespace ssl = asio::ssl;
 
 // True for ssl::stream<...>; false for a plain tcp::socket (which also has lowest_layer())
 template<typename SocketType>
 inline constexpr bool is_tls_socket =
-    requires(SocketType& s) { s.async_handshake(ssl::stream_base::server, boost::asio::use_awaitable); };
+    requires(SocketType& s) { s.async_handshake(ssl::stream_base::server, asio::use_awaitable); };
 
 // ============================================================================
 // Socket Helper Functions - Work with both plain TCP and TLS sockets
@@ -79,21 +79,21 @@ inline void set_socket_options(SocketType& socket) {
 // Mutual exclusion for coroutines on one io_context thread. Uncontended lock/unlock never suspend.
 class WriteLock {
 public:
-    explicit WriteLock(boost::asio::io_context& io) : token_(io, 1) {
-        token_.try_send(boost::system::error_code{});
+    explicit WriteLock(asio::io_context& io) : token_(io, 1) {
+        token_.try_send(std::error_code{});
     }
 
     // False if the wait was cancelled (the session is closing)
-    boost::asio::awaitable<bool> lock() {
-        if (token_.try_receive([](boost::system::error_code) {})) {
+    asio::awaitable<bool> lock() {
+        if (token_.try_receive([](std::error_code) {})) {
             co_return true;
         }
-        auto [ec] = co_await token_.async_receive(boost::asio::as_tuple(boost::asio::use_awaitable));
+        auto [ec] = co_await token_.async_receive(asio::as_tuple(asio::use_awaitable));
         co_return !ec;
     }
 
     void unlock() {
-        token_.try_send(boost::system::error_code{});
+        token_.try_send(std::error_code{});
     }
 
     class Guard {
@@ -107,7 +107,7 @@ public:
     };
 
 private:
-    boost::asio::experimental::channel<void(boost::system::error_code)> token_;
+    asio::experimental::channel<void(std::error_code)> token_;
 };
 
 // Upper bounds for one gathered write, so a flood for one subscriber cannot hold the socket (and the
@@ -138,27 +138,27 @@ struct ReadState {
 };
 
 struct ReadResult {
-    boost::system::error_code ec;
+    std::error_code ec;
     std::span<const uint8_t> data;  // valid until the next suspension point
 };
 
 template<typename SocketType>
-inline boost::asio::awaitable<ReadResult> read_some(SocketType& socket, ReadState<SocketType>& state) {
+inline asio::awaitable<ReadResult> read_some(SocketType& socket, ReadState<SocketType>& state) {
     if constexpr (is_tls_socket<SocketType>) {
         if (state.tls_buffer.empty()) state.tls_buffer.resize(kTlsReadBuffer);
         auto [ec, n] = co_await socket.async_read_some(
-            boost::asio::buffer(state.tls_buffer), boost::asio::as_tuple(boost::asio::use_awaitable));
+            asio::buffer(state.tls_buffer), asio::as_tuple(asio::use_awaitable));
         co_return ReadResult{ec, std::span<const uint8_t>{state.tls_buffer.data(), n}};
     } else {
         while (true) {
             auto [ec_wait] = co_await socket.async_wait(
-                tcp::socket::wait_read, boost::asio::as_tuple(boost::asio::use_awaitable));
+                tcp::socket::wait_read, asio::as_tuple(asio::use_awaitable));
             if (ec_wait) co_return ReadResult{ec_wait, {}};
 
             auto scratch = shared_read_scratch();
-            boost::system::error_code ec;
-            const size_t n = socket.read_some(boost::asio::buffer(scratch.data(), scratch.size()), ec);
-            if (ec == boost::asio::error::would_block) continue;  // readiness was spurious
+            std::error_code ec;
+            const size_t n = socket.read_some(asio::buffer(scratch.data(), scratch.size()), ec);
+            if (ec == asio::error::would_block) continue;  // readiness was spurious
             co_return ReadResult{ec, std::span<const uint8_t>{scratch.data(), n}};
         }
     }
@@ -166,7 +166,7 @@ inline boost::asio::awaitable<ReadResult> read_some(SocketType& socket, ReadStat
 
 // Handles one socket read result. `write_lock` is null before the session's writer exists.
 template<typename SocketType>
-inline boost::asio::awaitable<std::expected<bool, std::error_code>>
+inline asio::awaitable<std::expected<bool, std::error_code>>
 handle_socket_read_completion(
     SocketType& socket,
     WampSession& protocol,
@@ -176,13 +176,13 @@ handle_socket_read_completion(
 ) {
     const auto ec_read = read.ec;
     // Check for EOF (client disconnected gracefully)
-    if (ec_read == boost::asio::error::eof) {
+    if (ec_read == asio::error::eof) {
         spdlog::info("Client {} disconnected", remote_address);
         protocol.on_disconnect();
         co_return std::unexpected{ec_read};
     }
 
-    if (ec_read == boost::asio::error::operation_aborted) {
+    if (ec_read == asio::error::operation_aborted) {
         spdlog::debug("Read from {} canceled", remote_address);
         protocol.on_disconnect();
         co_return std::unexpected{ec_read};
@@ -218,10 +218,10 @@ handle_socket_read_completion(
         std::optional<WriteLock::Guard> guard;
         if (write_lock) guard.emplace(*write_lock);
 
-        auto [ec_write, bytes_written] = co_await boost::asio::async_write(
+        auto [ec_write, bytes_written] = co_await asio::async_write(
             socket,
-            boost::asio::buffer(*result),
-            boost::asio::as_tuple(boost::asio::use_awaitable)
+            asio::buffer(*result),
+            asio::as_tuple(asio::use_awaitable)
         );
 
         if (ec_write) {
@@ -238,7 +238,7 @@ handle_socket_read_completion(
 
 // Reads client messages until the connection ends
 template<typename SocketType>
-inline boost::asio::awaitable<std::expected<void, std::error_code>>
+inline asio::awaitable<std::expected<void, std::error_code>>
 session_reader(SocketType& socket, ReadState<SocketType>& state, WampSession& protocol,
                const std::string& remote_address, WriteLock& write_lock) {
     while (true) {
@@ -256,15 +256,15 @@ session_reader(SocketType& socket, ReadState<SocketType>& state, WampSession& pr
 // Sends queued events/invocations/results to the client, coalescing whatever is already waiting
 // into one gathered write
 template<typename SocketType>
-inline boost::asio::awaitable<std::expected<void, std::error_code>>
+inline asio::awaitable<std::expected<void, std::error_code>>
 session_writer(SocketType& socket, EventChannel& channel, const std::string& remote_address,
                WriteLock& write_lock) {
     std::vector<std::shared_ptr<const std::vector<uint8_t>>> frames;
-    std::vector<boost::asio::const_buffer> buffers;
+    std::vector<asio::const_buffer> buffers;
 
     while (true) {
         auto [ec_channel, first] = co_await channel.async_receive(
-            boost::asio::as_tuple(boost::asio::use_awaitable));
+            asio::as_tuple(asio::use_awaitable));
         if (ec_channel) {
             // Closed on disconnect, or cancelled because the reader finished
             co_return std::unexpected{ec_channel};
@@ -273,7 +273,7 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
         frames.clear();
         buffers.clear();
         size_t bytes = 0;
-        auto add = [&](boost::system::error_code ec, EventToSend event) {
+        auto add = [&](std::error_code ec, EventToSend event) {
             if (!ec && event.event_data) {
                 bytes += event.event_data->size();
                 buffers.emplace_back(event.event_data->data(), event.event_data->size());
@@ -290,10 +290,10 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
         }
         WriteLock::Guard guard{write_lock};
 
-        auto [ec_write, bytes_written] = co_await boost::asio::async_write(
-            socket, buffers, boost::asio::as_tuple(boost::asio::use_awaitable));
+        auto [ec_write, bytes_written] = co_await asio::async_write(
+            socket, buffers, asio::as_tuple(asio::use_awaitable));
         if (ec_write) {
-            if (ec_write != boost::asio::error::operation_aborted) {
+            if (ec_write != asio::error::operation_aborted) {
                 spdlog::error("Write error sending events to {}: {}", remote_address, ec_write.message());
             }
             co_return std::unexpected{ec_write};
@@ -304,8 +304,8 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
 }
 
 template<typename SocketType>
-inline boost::asio::awaitable<std::expected<void, std::error_code>>
-handle_wamp_session(SocketType socket, boost::asio::io_context& io, const ServerConfig& config,
+inline asio::awaitable<std::expected<void, std::error_code>>
+handle_wamp_session(SocketType socket, asio::io_context& io, const ServerConfig& config,
                     std::shared_ptr<Shard> shard) {
     // `shard` is held by this coroutine frame, so the shard outlives the session even if the server
     // object is destroyed first (e.g. io_context shutdown destroys suspended sessions)
@@ -315,11 +315,11 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
     std::string remote_address = remote_endpoint.address().to_string();
 
     // Perform TLS handshake if this is an SSL socket
-    if constexpr (requires { socket.async_handshake(ssl::stream_base::server, boost::asio::use_awaitable); }) {
+    if constexpr (requires { socket.async_handshake(ssl::stream_base::server, asio::use_awaitable); }) {
         spdlog::debug("Starting TLS handshake with {}", remote_address);
         auto [ec_handshake] = co_await socket.async_handshake(
             ssl::stream_base::server,
-            boost::asio::as_tuple(boost::asio::use_awaitable)
+            asio::as_tuple(asio::use_awaitable)
         );
 
         if (ec_handshake) {
@@ -355,17 +355,17 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
     spdlog::debug("Event channel acquired for session {}", protocol.session_id());
 
     WriteLock write_lock{io};
-    auto executor = co_await boost::asio::this_coro::executor;
+    auto executor = co_await asio::this_coro::executor;
 
     auto [order, reader_ex, reader_result, writer_ex, writer_result] =
-        co_await boost::asio::experimental::make_parallel_group(
-            boost::asio::co_spawn(executor,
+        co_await asio::experimental::make_parallel_group(
+            asio::co_spawn(executor,
                 session_reader(socket, read_state, protocol, remote_address, write_lock),
-                boost::asio::deferred),
-            boost::asio::co_spawn(executor,
+                asio::deferred),
+            asio::co_spawn(executor,
                 session_writer(socket, *event_channel, remote_address, write_lock),
-                boost::asio::deferred)
-        ).async_wait(boost::asio::experimental::wait_for_one(), boost::asio::use_awaitable);
+                asio::deferred)
+        ).async_wait(asio::experimental::wait_for_one(), asio::use_awaitable);
 
     protocol.on_disconnect();
 
@@ -379,12 +379,12 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
 }
 
 // Periodically fails pending calls whose callee has not answered in time.
-inline boost::asio::awaitable<void> call_timeout_sweeper(std::shared_ptr<Shard> shard) {
-    auto executor = co_await boost::asio::this_coro::executor;
-    boost::asio::steady_timer timer(executor);
+inline asio::awaitable<void> call_timeout_sweeper(std::shared_ptr<Shard> shard) {
+    auto executor = co_await asio::this_coro::executor;
+    asio::steady_timer timer(executor);
     for (;;) {
         timer.expires_after(std::chrono::milliseconds(50));
-        auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
+        auto [ec] = co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
         if (ec) co_return;
         ProcedureHandler::expire_calls(*shard);
     }
@@ -392,7 +392,7 @@ inline boost::asio::awaitable<void> call_timeout_sweeper(std::shared_ptr<Shard> 
 
 class WampServer {
 public:
-    WampServer(boost::asio::io_context& io_context, unsigned short port, const ServerConfig& config)
+    WampServer(asio::io_context& io_context, unsigned short port, const ServerConfig& config)
         : io_context_(io_context)
         , acceptor_(io_context, tcp::endpoint(tcp::v4(), port))
         , bound_port_(acceptor_.local_endpoint().port())
@@ -402,11 +402,11 @@ public:
     }
 
     void start() {
-        boost::asio::co_spawn(io_context_, call_timeout_sweeper(shard_), boost::asio::detached);
-        boost::asio::co_spawn(
+        asio::co_spawn(io_context_, call_timeout_sweeper(shard_), asio::detached);
+        asio::co_spawn(
             io_context_,
             accept_loop(),
-            boost::asio::detached
+            asio::detached
         );
     }
 
@@ -419,12 +419,12 @@ public:
     }
 
 private:
-    boost::asio::awaitable<void> accept_loop() {
+    asio::awaitable<void> accept_loop() {
         spdlog::info("WAMP Server listening on port {}", bound_port_);
 
         while (true) {
             auto [ec, socket] = co_await acceptor_.async_accept(
-                boost::asio::as_tuple(boost::asio::use_awaitable)
+                asio::as_tuple(asio::use_awaitable)
             );
 
             if (ec) {
@@ -438,15 +438,15 @@ private:
 
             set_socket_options(socket);
 
-            boost::asio::co_spawn(
+            asio::co_spawn(
                 acceptor_.get_executor(),
                 handle_wamp_session<tcp::socket>(std::move(socket), io_context_, config_, shard_),
-                boost::asio::detached
+                asio::detached
             );
         }
     }
 
-    boost::asio::io_context& io_context_;
+    asio::io_context& io_context_;
     tcp::acceptor acceptor_;
     unsigned short bound_port_;
     const ServerConfig& config_;
@@ -459,7 +459,7 @@ private:
 class WampTlsServer {
 public:
     WampTlsServer(
-        boost::asio::io_context& io_context,
+        asio::io_context& io_context,
         const ServerConfig& config
     )
         : io_context_(io_context)
@@ -473,11 +473,11 @@ public:
     }
 
     void start() {
-        boost::asio::co_spawn(io_context_, call_timeout_sweeper(shard_), boost::asio::detached);
-        boost::asio::co_spawn(
+        asio::co_spawn(io_context_, call_timeout_sweeper(shard_), asio::detached);
+        asio::co_spawn(
             io_context_,
             accept_loop(),
-            boost::asio::detached
+            asio::detached
         );
     }
 
@@ -534,14 +534,14 @@ private:
         }
     }
 
-    boost::asio::awaitable<void> accept_loop() {
+    asio::awaitable<void> accept_loop() {
         using ssl_socket = ssl::stream<tcp::socket>;
 
         spdlog::info("WAMP Server listening on port {}", bound_port_);
 
         while (true) {
             auto [ec, plain_socket] = co_await acceptor_.async_accept(
-                boost::asio::as_tuple(boost::asio::use_awaitable)
+                asio::as_tuple(asio::use_awaitable)
             );
 
             if (ec) {
@@ -558,15 +558,15 @@ private:
 
             set_socket_options(tls_socket);
 
-            boost::asio::co_spawn(
+            asio::co_spawn(
                 acceptor_.get_executor(),
                 handle_wamp_session<ssl_socket>(std::move(tls_socket), io_context_, config_, shard_),
-                boost::asio::detached
+                asio::detached
             );
         }
     }
 
-    boost::asio::io_context& io_context_;
+    asio::io_context& io_context_;
     ssl::context ssl_context_;
     tcp::acceptor acceptor_;
     unsigned short bound_port_;

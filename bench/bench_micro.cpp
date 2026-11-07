@@ -22,7 +22,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/benchmark/catch_benchmark.hpp>
-#include <boost/asio/io_context.hpp>
+#include <asio/io_context.hpp>
 #include <spdlog/spdlog.h>
 #include "include/authorizer.hpp"
 #include "include/invocation_tracker.hpp"
@@ -227,7 +227,7 @@ TEST_CASE("bench: registration manager and invocation tracker", "[bench][routing
 // ============================================================================
 
 TEST_CASE("bench: publish fan-out", "[bench][handlers]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     const WampList args = make_args(10);
     const WampDict kw = make_kw();
 
@@ -248,7 +248,7 @@ TEST_CASE("bench: publish fan-out", "[bench][handlers]") {
         BENCHMARK("PUBLISH + drain, " + std::to_string(n) + " subscribers") {
             auto response = PubSubHandler::handle_publish(kRealm(), publish, publisher);
             for (auto& channel : channels) {
-                channel->try_receive([](boost::system::error_code, EventToSend) {});
+                channel->try_receive([](std::error_code, EventToSend) {});
             }
             return response;
         };
@@ -261,7 +261,7 @@ TEST_CASE("bench: publish fan-out", "[bench][handlers]") {
 }
 
 TEST_CASE("bench: RPC round trip through the router", "[bench][handlers]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     const uint64_t callee = 9'200'001;
     const uint64_t caller = 9'200'002;
     auto callee_channel = test_shard().channels.get_or_create(callee, io);
@@ -277,7 +277,7 @@ TEST_CASE("bench: RPC round trip through the router", "[bench][handlers]") {
         (void)ProcedureHandler::handle_call(kRealm(), call, caller);
 
         uint64_t invocation_id = 0;
-        callee_channel->try_receive([&](boost::system::error_code, EventToSend ev) {
+        callee_channel->try_receive([&](std::error_code, EventToSend ev) {
             std::vector<uint8_t> payload{ev.event_data->begin() + rawsocket::FRAME_HEADER_SIZE,
                                          ev.event_data->end()};
             if (auto inv = deserialize_invocation(payload)) {
@@ -288,7 +288,7 @@ TEST_CASE("bench: RPC round trip through the router", "[bench][handlers]") {
         (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation_id, {}, args, kw}, callee);
 
         bool delivered = false;
-        caller_channel->try_receive([&](boost::system::error_code, EventToSend) { delivered = true; });
+        caller_channel->try_receive([&](std::error_code, EventToSend) { delivered = true; });
         return delivered;
     };
 

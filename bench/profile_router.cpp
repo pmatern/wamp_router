@@ -24,7 +24,7 @@
 #include "include/config.hpp"
 #include "include/cpu_limits.hpp"
 #include "include/wamp_server.hpp"
-#include <boost/asio.hpp>
+#include <asio.hpp>
 #include <spdlog/spdlog.h>
 #include <cstdio>
 #include <cstdlib>
@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
 
     spdlog::set_level(log ? spdlog::level::info : spdlog::level::off);
 
-    boost::asio::io_context io;
+    asio::io_context io;
     WampServer server{io, port, config};
     server.start();
     const auto cpus = detect_cpu_limits();

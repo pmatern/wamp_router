@@ -13,7 +13,7 @@
 // limitations under the License.
 
 #include <catch2/catch_test_macros.hpp>
-#include <boost/asio/io_context.hpp>
+#include <asio/io_context.hpp>
 #include "include/procedure_handler.hpp"
 #include "include/pubsub_handler.hpp"
 #include "include/realm.hpp"
@@ -30,7 +30,7 @@ std::vector<uint8_t> payload_of(const std::vector<uint8_t>& frame) {
 
 std::vector<uint8_t> pop_frame(EventChannel& channel) {
     std::vector<uint8_t> out;
-    channel.try_receive([&](boost::system::error_code ec, EventToSend ev) {
+    channel.try_receive([&](std::error_code ec, EventToSend ev) {
         if (!ec && ev.event_data) {
             out = *ev.event_data;
         }
@@ -40,7 +40,7 @@ std::vector<uint8_t> pop_frame(EventChannel& channel) {
 
 // Two sessions in realm A and one in realm B, with their event channels
 struct TwoRealms {
-    boost::asio::io_context io;
+    asio::io_context io;
     Shard shard;
     Realm& a = shard.realms.get("isolation.a");
     Realm& b = shard.realms.get("isolation.b");

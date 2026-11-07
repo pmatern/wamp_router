@@ -25,7 +25,7 @@
 #include "config.hpp"
 #include "authorizer.hpp"
 #include "crypto_utils.hpp"
-#include <boost/asio/io_context.hpp>
+#include <asio/io_context.hpp>
 #include <spdlog/spdlog.h>
 #include <vector>
 #include <span>
@@ -50,7 +50,7 @@ enum class SessionProtocolState {
 // ============================================================================
 class WampSession {
 public:
-    explicit WampSession(boost::asio::io_context& io, const ServerConfig& config, Shard& shard)
+    explicit WampSession(asio::io_context& io, const ServerConfig& config, Shard& shard)
         : io_(io)
         , config_(config)
         , shard_(shard)
@@ -872,7 +872,7 @@ private:
     }
 
 private:
-    boost::asio::io_context& io_;
+    asio::io_context& io_;
     const ServerConfig& config_;  // Server configuration (includes auth keys)
     Shard& shard_;                // The shard (channels, pending calls, realms, ids) this session runs on
     SessionProtocolState state_;

@@ -1,12 +1,15 @@
 cmake_minimum_required(VERSION 3.25)
 project(WAMPRouter CXX)
 
+# Standalone Asio, header only
+add_compile_definitions(ASIO_STANDALONE)
+
 # Set C++23 standard
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find packages installed by vcpkg
-find_package(Boost REQUIRED COMPONENTS system)
+find_package(asio CONFIG REQUIRED)  # standalone Asio (std::error_code, no Boost)
 find_package(spdlog CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)  # tests only: the independent CBOR oracle
 find_package(Catch2 3 CONFIG REQUIRED)
@@ -21,8 +24,7 @@ target_include_directories(wamp_router PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Link libraries
 target_link_libraries(wamp_router PRIVATE
-    Boost::system
-    Boost::boost  # Header-only Boost.Asio
+    asio::asio
     spdlog::spdlog
     toml11::toml11
     OpenSSL::SSL
@@ -70,8 +72,7 @@ target_include_directories(wamp_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Link test libraries
 target_link_libraries(wamp_tests PRIVATE
-    Boost::system
-    Boost::boost
+    asio::asio
     spdlog::spdlog
     nlohmann_json::nlohmann_json
     Catch2::Catch2WithMain
@@ -97,8 +98,7 @@ catch_discover_tests(wamp_tests)
 add_executable(wamp_bench EXCLUDE_FROM_ALL bench/bench_micro.cpp)
 target_include_directories(wamp_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(wamp_bench PRIVATE
-    Boost::system
-    Boost::boost
+    asio::asio
     spdlog::spdlog
     Catch2::Catch2WithMain
     toml11::toml11
@@ -115,8 +115,7 @@ endif()
 add_executable(wamp_load EXCLUDE_FROM_ALL bench/load_test.cpp)
 target_include_directories(wamp_load PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(wamp_load PRIVATE
-    Boost::system
-    Boost::boost
+    asio::asio
     spdlog::spdlog
     toml11::toml11
     OpenSSL::SSL
@@ -133,8 +132,7 @@ endif()
 add_executable(wamp_profile_router EXCLUDE_FROM_ALL bench/profile_router.cpp)
 target_include_directories(wamp_profile_router PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(wamp_profile_router PRIVATE
-    Boost::system
-    Boost::boost
+    asio::asio
     spdlog::spdlog
     toml11::toml11
     OpenSSL::SSL
@@ -151,7 +149,7 @@ find_package(Threads REQUIRED)
 #   cmake --build build-local-release --target wamp_handoff_bench
 add_executable(wamp_handoff_bench EXCLUDE_FROM_ALL bench/bench_handoff.cpp)
 target_include_directories(wamp_handoff_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(wamp_handoff_bench PRIVATE Boost::system Boost::boost Threads::Threads)
+target_link_libraries(wamp_handoff_bench PRIVATE asio::asio Threads::Threads)
 target_compile_options(wamp_handoff_bench PRIVATE -Wall -Wextra -Wpedantic)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(wamp_handoff_bench PRIVATE -O3)
@@ -161,7 +159,7 @@ endif()
 #   cmake --build build-local-release --target wamp_tls_probe
 add_executable(wamp_tls_probe EXCLUDE_FROM_ALL bench/tls_probe.cpp)
 target_include_directories(wamp_tls_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(wamp_tls_probe PRIVATE Boost::system Boost::boost OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+target_link_libraries(wamp_tls_probe PRIVATE asio::asio OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 target_compile_options(wamp_tls_probe PRIVATE -Wall -Wextra -Wpedantic)
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     target_compile_options(wamp_tls_probe PRIVATE -O3)

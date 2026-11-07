@@ -19,9 +19,9 @@
 #include "wamp_serializer.hpp"
 #include "raw_socket.hpp"
 #include "crypto_utils.hpp"
-#include <boost/asio.hpp>
-#include <boost/asio/experimental/channel.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
+#include <asio.hpp>
+#include <asio/experimental/channel.hpp>
+#include <asio/experimental/awaitable_operators.hpp>
 #include <spdlog/spdlog.h>
 #include <deque>
 #include <functional>
@@ -35,11 +35,11 @@
 
 namespace wamp {
 
-using boost::asio::awaitable;
-using boost::asio::use_awaitable;
-using boost::asio::co_spawn;
-using boost::asio::detached;
-using boost::asio::ip::tcp;
+using asio::awaitable;
+using asio::use_awaitable;
+using asio::co_spawn;
+using asio::detached;
+using asio::ip::tcp;
 
 // Thrown by WampClient when the router answers a request with an ERROR, and
 // throwable from an InvocationHandler to make the router send an ERROR to the caller.
@@ -79,7 +79,7 @@ using InvocationHandler = std::function<awaitable<YieldMessage>(const Invocation
 // ============================================================================
 class WampClient {
 public:
-    explicit WampClient(boost::asio::io_context& io)
+    explicit WampClient(asio::io_context& io)
         : io_(io)
         , socket_(io)
         , state_(State::DISCONNECTED)
@@ -143,7 +143,7 @@ public:
 
         tcp::resolver resolver{io_};
         auto endpoints = co_await resolver.async_resolve(host, std::to_string(port), use_awaitable);
-        co_await boost::asio::async_connect(socket_, endpoints, use_awaitable);
+        co_await asio::async_connect(socket_, endpoints, use_awaitable);
 
         co_await send_rawsocket_handshake();
 
@@ -193,9 +193,9 @@ public:
             co_return;
         }
 
-        using namespace boost::asio::experimental::awaitable_operators;
+        using namespace asio::experimental::awaitable_operators;
 
-        boost::asio::steady_timer timer{io_};
+        asio::steady_timer timer{io_};
         timer.expires_after(std::chrono::milliseconds(500));
 
         // Coroutine lambdas must stay alive while their coroutines run (the frame refers to the
@@ -206,7 +206,7 @@ public:
         };
 
         auto receive_goodbye = [&]() -> awaitable<bool> {
-            auto [ec, msg] = co_await goodbye_channel_.async_receive(boost::asio::as_tuple(use_awaitable));
+            auto [ec, msg] = co_await goodbye_channel_.async_receive(asio::as_tuple(use_awaitable));
             if (!ec && msg.has_value()) {
                 spdlog::debug("Received GOODBYE response from server");
                 co_return true; // got goodbye
@@ -415,7 +415,7 @@ private:
     // throw it as a WampException.
     template<typename Reply, typename Channel>
     awaitable<Reply> await_reply(std::shared_ptr<Channel> channel, uint64_t request_id, const char* what) {
-        auto [ec, reply] = co_await channel->async_receive(boost::asio::as_tuple(use_awaitable));
+        auto [ec, reply] = co_await channel->async_receive(asio::as_tuple(use_awaitable));
         if (!ec && reply.has_value()) {
             co_return std::move(*reply);
         }
@@ -439,7 +439,7 @@ private:
 
             while (read_loop_running_ && socket_.is_open()) {
                 size_t n = co_await socket_.async_read_some(
-                    boost::asio::buffer(buffer),
+                    asio::buffer(buffer),
                     use_awaitable
                 );
 
@@ -452,9 +452,9 @@ private:
             }
 
             spdlog::debug("Read loop terminated");
-        } catch (const boost::system::system_error& e) {
+        } catch (const std::system_error& e) {
             // Closing the socket (disconnect) or the peer going away ends the loop; not an error
-            if (e.code() == boost::asio::error::operation_aborted || e.code() == boost::asio::error::eof) {
+            if (e.code() == asio::error::operation_aborted || e.code() == asio::error::eof) {
                 spdlog::debug("Read loop ended: {}", e.what());
             } else {
                 spdlog::error("Read loop error: {}", e.what());
@@ -629,7 +629,7 @@ private:
 
         spdlog::info("Received WELCOME: session_id={}", welcome_result->session_id);
 
-        welcome_channel_.try_send(boost::system::error_code(), std::make_optional(*welcome_result));
+        welcome_channel_.try_send(std::error_code(), std::make_optional(*welcome_result));
     }
 
     void handle_challenge(const std::vector<uint8_t>& cbor_payload) {
@@ -643,7 +643,7 @@ private:
         spdlog::info("Received CHALLENGE: authmethod={}", challenge_result->authmethod);
 
         // Send challenge to channel for connect_with_auth() to process
-        challenge_channel_.try_send(boost::system::error_code(), std::make_optional(*challenge_result));
+        challenge_channel_.try_send(std::error_code(), std::make_optional(*challenge_result));
     }
 
     void handle_subscribed(const std::vector<uint8_t>& cbor_payload) {
@@ -657,7 +657,7 @@ private:
 
         auto it = pending_subscribes_.find(subscribed.request_id);
         if (it != pending_subscribes_.end()) {
-            it->second->try_send(boost::system::error_code(), std::make_optional(subscribed));
+            it->second->try_send(std::error_code(), std::make_optional(subscribed));
             pending_subscribes_.erase(it);
         } else {
             spdlog::warn("Received SUBSCRIBED for unknown request_id={}", subscribed.request_id);
@@ -675,7 +675,7 @@ private:
 
         auto it = pending_unsubscribes_.find(unsubscribed.request_id);
         if (it != pending_unsubscribes_.end()) {
-            it->second->try_send(boost::system::error_code(), std::make_optional(unsubscribed));
+            it->second->try_send(std::error_code(), std::make_optional(unsubscribed));
             pending_unsubscribes_.erase(it);
         } else {
             spdlog::warn("Received UNSUBSCRIBED for unknown request_id={}", unsubscribed.request_id);
@@ -693,7 +693,7 @@ private:
 
         auto it = pending_unregisters_.find(unregistered.request_id);
         if (it != pending_unregisters_.end()) {
-            it->second->try_send(boost::system::error_code(), std::make_optional(unregistered));
+            it->second->try_send(std::error_code(), std::make_optional(unregistered));
             pending_unregisters_.erase(it);
         } else {
             spdlog::warn("Received UNREGISTERED for unknown request_id={}", unregistered.request_id);
@@ -711,7 +711,7 @@ private:
 
         auto it = pending_publishes_.find(published.request_id);
         if (it != pending_publishes_.end()) {
-            it->second->try_send(boost::system::error_code(), std::make_optional(published));
+            it->second->try_send(std::error_code(), std::make_optional(published));
             pending_publishes_.erase(it);
         } else {
             spdlog::warn("Received PUBLISHED for unknown request_id={}", published.request_id);
@@ -747,7 +747,7 @@ private:
 
         auto it = pending_registers_.find(registered.request_id);
         if (it != pending_registers_.end()) {
-            it->second->try_send(boost::system::error_code(), std::make_optional(registered));
+            it->second->try_send(std::error_code(), std::make_optional(registered));
             pending_registers_.erase(it);
         } else {
             spdlog::warn("Received REGISTERED for unknown request_id={}", registered.request_id);
@@ -770,10 +770,10 @@ private:
 
             // Spawn coroutine to handle invocation
             auto handler = it->second;
-            auto signal = std::make_shared<boost::asio::cancellation_signal>();
+            auto signal = std::make_shared<asio::cancellation_signal>();
             running_invocations_[invocation.request_id] = signal;
             co_spawn(io_, handle_invocation_async(handler, invocation, signal),
-                     boost::asio::bind_cancellation_slot(signal->slot(), detached));
+                     asio::bind_cancellation_slot(signal->slot(), detached));
         } else {
             spdlog::warn("Received INVOCATION for unknown registration_id={}", invocation.registration_id);
         }
@@ -793,12 +793,12 @@ private:
         }
         spdlog::debug("INTERRUPT: canceling invocation {}", interrupt->request_id);
         auto signal = it->second;  // the handler may finish and erase the entry while emitting
-        signal->emit(boost::asio::cancellation_type::terminal);
+        signal->emit(asio::cancellation_type::terminal);
     }
 
     // `signal` is a parameter so it outlives the coroutine, whose cancellation slot refers to it
     awaitable<void> handle_invocation_async(InvocationHandler handler, InvocationMessage invocation,
-                                            std::shared_ptr<boost::asio::cancellation_signal> signal) {
+                                            std::shared_ptr<asio::cancellation_signal> signal) {
         (void)signal;
         std::optional<ErrorMessage> error;
         bool canceled = false;
@@ -807,8 +807,8 @@ private:
             auto yield = co_await handler(invocation);
             running_invocations_.erase(invocation.request_id);
             co_await send_wamp_message(yield);
-        } catch (const boost::system::system_error& e) {
-            if (e.code() != boost::asio::error::operation_aborted) {
+        } catch (const std::system_error& e) {
+            if (e.code() != asio::error::operation_aborted) {
                 spdlog::error("Invocation handler error: {}", e.what());
                 error = ErrorMessage{MessageType::INVOCATION, invocation.request_id,
                                      {{"message", std::string{e.what()}}}, "wamp.error.callee_failure"};
@@ -829,7 +829,7 @@ private:
         running_invocations_.erase(invocation.request_id);
         if (canceled) {
             // Awaiting again would throw while the cancellation state is set
-            co_await boost::asio::this_coro::reset_cancellation_state();
+            co_await asio::this_coro::reset_cancellation_state();
             error = ErrorMessage::create_canceled(invocation.request_id, "Invocation interrupted");
         }
         if (error.has_value()) {
@@ -848,7 +848,7 @@ private:
 
         auto it = pending_calls_.find(result.request_id);
         if (it != pending_calls_.end()) {
-            it->second->try_send(boost::system::error_code(), std::make_optional(result));
+            it->second->try_send(std::error_code(), std::make_optional(result));
             pending_calls_.erase(it);
         } else {
             spdlog::warn("Received RESULT for unknown request_id={}", result.request_id);
@@ -868,7 +868,7 @@ private:
 
         // Route error to the appropriate pending operation based on request_type.
         // The ERROR is stashed so the awaiting coroutine can rethrow it as a WampException.
-        auto ec = boost::asio::error::operation_aborted;
+        auto ec = asio::error::operation_aborted;
         failed_requests_.insert_or_assign(error.request_id, error);
 
         switch (error.request_type) {
@@ -943,7 +943,7 @@ private:
         spdlog::info("Received GOODBYE: {}", goodbye_result->reason);
 
         // Signal disconnect() coroutine if it's waiting
-        goodbye_channel_.try_send(boost::system::error_code(), std::make_optional(*goodbye_result));
+        goodbye_channel_.try_send(std::error_code(), std::make_optional(*goodbye_result));
 
         // Note: socket close and state change are handled by disconnect()
     }
@@ -961,9 +961,9 @@ private:
         };
 
         auto handshake_bytes = rawsocket::encode_handshake_request(request);
-        co_await boost::asio::async_write(
+        co_await asio::async_write(
             socket_,
-            boost::asio::buffer(handshake_bytes),
+            asio::buffer(handshake_bytes),
             use_awaitable
         );
 
@@ -971,9 +971,9 @@ private:
 
         // Read handshake response (4 bytes)
         std::array<uint8_t, 4> response{};
-        co_await boost::asio::async_read(
+        co_await asio::async_read(
             socket_,
-            boost::asio::buffer(response),
+            asio::buffer(response),
             use_awaitable
         );
 
@@ -1011,9 +1011,9 @@ private:
 
         spdlog::info("Sending HELLO frame ({} bytes)", hello_frame.size());
 
-        co_await boost::asio::async_write(
+        co_await asio::async_write(
             socket_,
-            boost::asio::buffer(hello_frame),
+            asio::buffer(hello_frame),
             use_awaitable
         );
 
@@ -1051,9 +1051,9 @@ private:
         auto auth_cbor = serialize_authenticate(auth);
         auto auth_frame = rawsocket::create_wamp_message(auth_cbor);
 
-        co_await boost::asio::async_write(
+        co_await asio::async_write(
             socket_,
-            boost::asio::buffer(auth_frame),
+            asio::buffer(auth_frame),
             use_awaitable
         );
 
@@ -1095,16 +1095,16 @@ private:
     // Writers take turns: later ones wait on a timer that the previous writer cancels.
     awaitable<void> write_frame(const std::vector<uint8_t>& frame) {
         while (write_in_progress_) {
-            boost::asio::steady_timer gate{io_, boost::asio::steady_timer::time_point::max()};
+            asio::steady_timer gate{io_, asio::steady_timer::time_point::max()};
             write_waiters_.push_back(&gate);
-            co_await gate.async_wait(boost::asio::as_tuple(use_awaitable));
+            co_await gate.async_wait(asio::as_tuple(use_awaitable));
         }
         write_in_progress_ = true;
 
-        auto [ec, written] = co_await boost::asio::async_write(
+        auto [ec, written] = co_await asio::async_write(
             socket_,
-            boost::asio::buffer(frame),
-            boost::asio::as_tuple(use_awaitable)
+            asio::buffer(frame),
+            asio::as_tuple(use_awaitable)
         );
         (void)written;
 
@@ -1116,7 +1116,7 @@ private:
         }
 
         if (ec) {
-            throw boost::system::system_error{ec};
+            throw std::system_error{ec};
         }
     }
 
@@ -1145,7 +1145,7 @@ private:
         AWAITING_FRAME_PAYLOAD
     };
 
-    boost::asio::io_context& io_;
+    asio::io_context& io_;
     tcp::socket socket_;
 
     State state_;
@@ -1165,36 +1165,36 @@ private:
 
     // Write serialization (see write_frame)
     bool write_in_progress_ = false;
-    std::deque<boost::asio::steady_timer*> write_waiters_;
+    std::deque<asio::steady_timer*> write_waiters_;
 
     // Request ID generation
     std::atomic<uint64_t> next_request_id_{1};
 
     // Connection establishment
-    using WelcomeChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<WelcomeMessage>)>;
+    using WelcomeChannel = asio::experimental::channel<void(std::error_code, std::optional<WelcomeMessage>)>;
     WelcomeChannel welcome_channel_;
 
     // Disconnection
-    using GoodbyeChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<GoodbyeMessage>)>;
+    using GoodbyeChannel = asio::experimental::channel<void(std::error_code, std::optional<GoodbyeMessage>)>;
     GoodbyeChannel goodbye_channel_;
 
     // Authentication
-    using ChallengeChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<ChallengeMessage>)>;
+    using ChallengeChannel = asio::experimental::channel<void(std::error_code, std::optional<ChallengeMessage>)>;
     ChallengeChannel challenge_channel_;
     std::optional<std::string> authid_;
     std::unique_ptr<EVP_PKEY, PKEYDeleter> private_key_;
 
     // Pending requests (using channels for async awaiting with optional for default-constructibility)
-    using SubscribedChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<SubscribedMessage>)>;
-    using PublishedChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<PublishedMessage>)>;
-    using RegisteredChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<RegisteredMessage>)>;
-    using ResultChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<ResultMessage>)>;
+    using SubscribedChannel = asio::experimental::channel<void(std::error_code, std::optional<SubscribedMessage>)>;
+    using PublishedChannel = asio::experimental::channel<void(std::error_code, std::optional<PublishedMessage>)>;
+    using RegisteredChannel = asio::experimental::channel<void(std::error_code, std::optional<RegisteredMessage>)>;
+    using ResultChannel = asio::experimental::channel<void(std::error_code, std::optional<ResultMessage>)>;
     std::unordered_map<uint64_t, std::shared_ptr<SubscribedChannel>> pending_subscribes_;
     std::unordered_map<uint64_t, std::shared_ptr<PublishedChannel>> pending_publishes_;
     std::unordered_map<uint64_t, std::shared_ptr<RegisteredChannel>> pending_registers_;
     std::unordered_map<uint64_t, std::shared_ptr<ResultChannel>> pending_calls_;
-    using UnsubscribedChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<UnsubscribedMessage>)>;
-    using UnregisteredChannel = boost::asio::experimental::channel<void(boost::system::error_code, std::optional<UnregisteredMessage>)>;
+    using UnsubscribedChannel = asio::experimental::channel<void(std::error_code, std::optional<UnsubscribedMessage>)>;
+    using UnregisteredChannel = asio::experimental::channel<void(std::error_code, std::optional<UnregisteredMessage>)>;
     std::unordered_map<uint64_t, std::shared_ptr<UnsubscribedChannel>> pending_unsubscribes_;
     std::unordered_map<uint64_t, std::shared_ptr<UnregisteredChannel>> pending_unregisters_;
 
@@ -1205,7 +1205,7 @@ private:
     std::unordered_map<uint64_t, EventCallback> event_handlers_;
     std::unordered_map<std::string, uint64_t> topic_to_subscription_id_;
     std::unordered_map<uint64_t, InvocationHandler> invocation_handlers_;
-    std::unordered_map<uint64_t, std::shared_ptr<boost::asio::cancellation_signal>> running_invocations_;
+    std::unordered_map<uint64_t, std::shared_ptr<asio::cancellation_signal>> running_invocations_;
     std::unordered_map<std::string, uint64_t> uri_to_registration_id_;
 };
 

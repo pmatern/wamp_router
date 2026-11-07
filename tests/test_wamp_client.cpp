@@ -16,11 +16,11 @@
 #include <catch2/catch_test_macros.hpp>
 #include "include/wamp_client.hpp"
 #include "include/wamp_server.hpp"
-#include <boost/asio.hpp>
+#include <asio.hpp>
 #include <chrono>
 
 using namespace wamp;
-using namespace boost::asio;
+using namespace asio;
 
 // Test helper: Find available port
 uint16_t find_available_port() {
@@ -94,7 +94,7 @@ TEST_CASE("WampClient - Subscribe and receive event", "[wamp_client]") {
         });
 
         // Small delay to ensure subscription is processed
-        boost::asio::steady_timer timer{io};
+        asio::steady_timer timer{io};
         timer.expires_after(std::chrono::milliseconds(100));
         co_await timer.async_wait(use_awaitable);
 
@@ -152,7 +152,7 @@ TEST_CASE("WampClient - Register procedure and handle call", "[wamp_client]") {
         );
 
         // Small delay
-        boost::asio::steady_timer timer{io};
+        asio::steady_timer timer{io};
         timer.expires_after(std::chrono::milliseconds(100));
         co_await timer.async_wait(use_awaitable);
 
@@ -202,7 +202,7 @@ TEST_CASE("WampClient - Multiple subscribers receive same event", "[wamp_client]
         });
 
         // Small delay
-        boost::asio::steady_timer timer{io};
+        asio::steady_timer timer{io};
         timer.expires_after(std::chrono::milliseconds(100));
         co_await timer.async_wait(use_awaitable);
 
@@ -264,7 +264,7 @@ TEST_CASE("WampClient - Error handling for non-existent procedure", "[wamp_clien
 
 namespace {
 awaitable<void> sleep_ms(io_context& io, int ms) {
-    boost::asio::steady_timer timer{io};
+    asio::steady_timer timer{io};
     timer.expires_after(std::chrono::milliseconds(ms));
     co_await timer.async_wait(use_awaitable);
 }
@@ -628,12 +628,12 @@ TEST_CASE("WampClient - Call timeout interrupts the callee", "[wamp_client][time
         co_await callee.register_procedure(
             "com.example.hang",
             [&](const InvocationMessage& invocation) -> awaitable<YieldMessage> {
-                boost::asio::steady_timer t{io};
+                asio::steady_timer t{io};
                 t.expires_after(std::chrono::seconds(5));
-                auto [ec] = co_await t.async_wait(boost::asio::as_tuple(use_awaitable));
-                handler_interrupted = (ec == boost::asio::error::operation_aborted);
+                auto [ec] = co_await t.async_wait(asio::as_tuple(use_awaitable));
+                handler_interrupted = (ec == asio::error::operation_aborted);
                 handler_finished = true;
-                if (ec) throw boost::system::system_error{ec};
+                if (ec) throw std::system_error{ec};
                 co_return YieldMessage{invocation.request_id, {}};
             });
 
@@ -644,7 +644,7 @@ TEST_CASE("WampClient - Call timeout interrupts the callee", "[wamp_client][time
         }
 
         // Give the INTERRUPT time to reach the callee
-        boost::asio::steady_timer wait{io};
+        asio::steady_timer wait{io};
         wait.expires_after(std::chrono::milliseconds(300));
         co_await wait.async_wait(use_awaitable);
         io.stop();
@@ -676,7 +676,7 @@ TEST_CASE("WampClient - Call to an unresponsive callee times out", "[wamp_client
         co_await callee.register_procedure(
             "com.example.hang",
             [&](const InvocationMessage& invocation) -> awaitable<YieldMessage> {
-                boost::asio::steady_timer t{io};
+                asio::steady_timer t{io};
                 t.expires_after(std::chrono::seconds(5));
                 co_await t.async_wait(use_awaitable);
                 co_return YieldMessage{invocation.request_id, {}};
@@ -731,7 +731,7 @@ TEST_CASE("WampClient - Events and acknowledged responses share one socket witho
             ++acknowledged;
         }
 
-        boost::asio::steady_timer timer{io};
+        asio::steady_timer timer{io};
         timer.expires_after(std::chrono::milliseconds(300));
         co_await timer.async_wait(use_awaitable);
 
@@ -780,7 +780,7 @@ TEST_CASE("WampClient - Messages larger than the read scratch buffer arrive inta
 
         (void)co_await pub.publish("com.test.big", WampList{big}, {}, /*acknowledge=*/true);
 
-        boost::asio::steady_timer timer{io};
+        asio::steady_timer timer{io};
         timer.expires_after(std::chrono::milliseconds(300));
         co_await timer.async_wait(use_awaitable);
 
@@ -832,7 +832,7 @@ TEST_CASE("WampClient - Two routers in one process share no state", "[wamp_clien
             procedure_missing_on_b = e.error_uri == "wamp.error.no_such_procedure";
         }
 
-        boost::asio::steady_timer timer{io};
+        asio::steady_timer timer{io};
         timer.expires_after(std::chrono::milliseconds(200));
         co_await timer.async_wait(use_awaitable);
 

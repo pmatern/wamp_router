@@ -18,7 +18,7 @@
 #include "include/wamp_serializer.hpp"
 #include "include/raw_socket.hpp"
 #include "include/crypto_utils.hpp"
-#include <boost/asio/io_context.hpp>
+#include <asio/io_context.hpp>
 #include <fstream>
 
 using namespace wamp;
@@ -42,7 +42,7 @@ static ServerConfig create_test_config() {
 }
 
 TEST_CASE("WampSession initialization", "[wamp_session]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_test_config();
     WampSession session{io, config, test_shard()};
 
@@ -64,7 +64,7 @@ TEST_CASE("WampSession initialization", "[wamp_session]") {
 }
 
 TEST_CASE("WampSession RawSocket handshake", "[wamp_session]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_test_config();
     WampSession session{io, config, test_shard()};
 
@@ -117,7 +117,7 @@ TEST_CASE("WampSession RawSocket handshake", "[wamp_session]") {
 }
 
 TEST_CASE("WampSession HELLO/WELCOME exchange", "[wamp_session]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_test_config();
     WampSession session{io, config, test_shard()};
 
@@ -177,7 +177,7 @@ TEST_CASE("WampSession HELLO/WELCOME exchange", "[wamp_session]") {
 }
 
 TEST_CASE("WampSession GOODBYE handling", "[wamp_session]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_test_config();
     WampSession session{io, config, test_shard()};
 
@@ -215,7 +215,7 @@ TEST_CASE("WampSession GOODBYE handling", "[wamp_session]") {
 }
 
 TEST_CASE("WampSession PING/PONG handling", "[wamp_session]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_test_config();
     WampSession session{io, config, test_shard()};
 
@@ -255,7 +255,7 @@ TEST_CASE("WampSession PING/PONG handling", "[wamp_session]") {
 }
 
 TEST_CASE("WampSession error handling", "[wamp_session]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_test_config();
     WampSession session{io, config, test_shard()};
 
@@ -294,7 +294,7 @@ TEST_CASE("WampSession error handling", "[wamp_session]") {
 }
 
 TEST_CASE("WampSession buffering behavior", "[wamp_session]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_test_config();
     WampSession session{io, config, test_shard()};
 
@@ -372,7 +372,7 @@ static ServerConfig create_auth_test_config(const std::string& authid, const std
 TEST_CASE("WampSession authentication - unknown authid rejected", "[wamp_session][auth]") {
     auto [priv_path, public_key_hex] = create_auth_test_keypair();
 
-    boost::asio::io_context io;
+    asio::io_context io;
     // Configure with auth key for "validuser"
     auto config = create_auth_test_config("validuser", public_key_hex);
     WampSession session{io, config, test_shard()};
@@ -417,7 +417,7 @@ TEST_CASE("WampSession authentication - unknown authid rejected", "[wamp_session
 TEST_CASE("WampSession authentication - missing authid rejected", "[wamp_session][auth]") {
     auto [priv_path, public_key_hex] = create_auth_test_keypair();
 
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_auth_test_config("testuser", public_key_hex);
     WampSession session{io, config, test_shard()};
 
@@ -457,7 +457,7 @@ TEST_CASE("WampSession authentication - missing authid rejected", "[wamp_session
 TEST_CASE("WampSession authentication - sends CHALLENGE for valid authid", "[wamp_session][auth]") {
     auto [priv_path, public_key_hex] = create_auth_test_keypair();
 
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_auth_test_config("testuser", public_key_hex);
     WampSession session{io, config, test_shard()};
 
@@ -503,7 +503,7 @@ TEST_CASE("WampSession authentication - sends CHALLENGE for valid authid", "[wam
 TEST_CASE("WampSession authentication - full flow success", "[wamp_session][auth]") {
     auto [priv_path, public_key_hex] = create_auth_test_keypair();
 
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_auth_test_config("testuser", public_key_hex);
     WampSession session{io, config, test_shard()};
 
@@ -579,7 +579,7 @@ TEST_CASE("WampSession authentication - full flow success", "[wamp_session][auth
 TEST_CASE("WampSession authentication - invalid signature rejected", "[wamp_session][auth]") {
     auto [priv_path, public_key_hex] = create_auth_test_keypair();
 
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_auth_test_config("testuser", public_key_hex);
     WampSession session{io, config, test_shard()};
 
@@ -631,7 +631,7 @@ TEST_CASE("WampSession authentication - invalid signature rejected", "[wamp_sess
 }
 
 TEST_CASE("WampSession authentication - no auth required when auth_keys empty", "[wamp_session][auth]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = create_test_config();  // No auth_keys configured
     WampSession session{io, config, test_shard()};
 

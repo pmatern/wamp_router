@@ -27,7 +27,7 @@
 #include "include/config.hpp"
 #include "include/wamp_client.hpp"
 #include "include/wamp_server.hpp"
-#include <boost/asio.hpp>
+#include <asio.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
@@ -41,10 +41,10 @@
 #include <vector>
 
 using namespace wamp;
-using boost::asio::awaitable;
-using boost::asio::co_spawn;
-using boost::asio::detached;
-using boost::asio::use_awaitable;
+using asio::awaitable;
+using asio::co_spawn;
+using asio::detached;
+using asio::use_awaitable;
 using Clock = std::chrono::steady_clock;
 
 namespace {
@@ -133,10 +133,10 @@ bool parse(int argc, char** argv, Options& o) {
 class EmbeddedRouter {
 public:
     explicit EmbeddedRouter(ServerConfig config) {
-        std::promise<std::tuple<uint16_t, boost::asio::io_context*, Shard*>> ready;
+        std::promise<std::tuple<uint16_t, asio::io_context*, Shard*>> ready;
         auto future = ready.get_future();
         thread_ = std::thread([ready = std::move(ready), config = std::move(config)]() mutable {
-            boost::asio::io_context io;
+            asio::io_context io;
             WampServer server{io, 0, config};
             ready.set_value({server.port(), &io, &server.shard()});
             server.start();
@@ -157,7 +157,7 @@ public:
 private:
     std::thread thread_;
     uint16_t port_ = 0;
-    boost::asio::io_context* io_ = nullptr;
+    asio::io_context* io_ = nullptr;
     Shard* shard_ = nullptr;  // owned by the router thread; the drop counter is atomic
 };
 
@@ -216,8 +216,8 @@ struct PubSubState {
     Clock::time_point last_event = Clock::now();
 };
 
-awaitable<void> sleep_for(boost::asio::io_context& io, std::chrono::microseconds d) {
-    boost::asio::steady_timer timer{io};
+awaitable<void> sleep_for(asio::io_context& io, std::chrono::microseconds d) {
+    asio::steady_timer timer{io};
     timer.expires_after(d);
     co_await timer.async_wait(use_awaitable);
 }
@@ -229,7 +229,7 @@ double seconds(Clock::time_point a, Clock::time_point b) {
 // ----------------------------------------------------------------------------
 // PubSub: 1 publisher -> N subscribers
 // ----------------------------------------------------------------------------
-awaitable<void> run_pubsub(boost::asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port,
+awaitable<void> run_pubsub(asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port,
                            const EmbeddedRouter* router) {
     const std::string kTopic = "load.pubsub." + std::to_string(o.instance);
 
@@ -304,7 +304,7 @@ awaitable<void> run_pubsub(boost::asio::io_context& io, ClientPool& pool, const 
 // ----------------------------------------------------------------------------
 // RPC: N concurrent callers -> 1 callee (echo)
 // ----------------------------------------------------------------------------
-awaitable<void> run_rpc(boost::asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port) {
+awaitable<void> run_rpc(asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port) {
     const std::string kProcedure = "load.echo." + std::to_string(o.instance);
 
     auto callee_ptr = std::make_shared<WampClient>(io);
@@ -368,7 +368,7 @@ awaitable<void> run_rpc(boost::asio::io_context& io, ClientPool& pool, const Opt
 // ----------------------------------------------------------------------------
 // Idle: open N sessions (RawSocket + HELLO/WELCOME), hold them, report the connect rate
 // ----------------------------------------------------------------------------
-awaitable<void> run_idle(boost::asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port) {
+awaitable<void> run_idle(asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port) {
     constexpr size_t kConcurrent = 64;  // connects in flight, so the router sees a burst rather than a trickle
     std::printf("\n== Idle: %zu connections, %zu in flight ==\n", o.connections, kConcurrent);
 
@@ -429,7 +429,7 @@ int main(int argc, char** argv) {
         std::printf("target router %s:%u\n", opts.host.c_str(), port);
     }
 
-    boost::asio::io_context io;
+    asio::io_context io;
     ClientPool pool;
     bool failed = false;
     co_spawn(io, [&]() -> awaitable<void> {

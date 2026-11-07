@@ -22,8 +22,8 @@
 // nothing (plain), then reads fixed-size messages. Its *thread CPU time* is measured, so the numbers
 // are what one router core pays, independent of the client threads that generate the load.
 
-#include <boost/asio.hpp>
-#include <boost/asio/ssl.hpp>
+#include <asio.hpp>
+#include <asio/ssl.hpp>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -32,8 +32,7 @@
 #include <thread>
 #include <vector>
 
-namespace asio = boost::asio;
-namespace ssl = boost::asio::ssl;
+namespace ssl = asio::ssl;
 using asio::ip::tcp;
 
 namespace {

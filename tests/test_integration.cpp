@@ -18,7 +18,7 @@
 #include "include/wamp_serializer.hpp"
 #include "include/raw_socket.hpp"
 #include "include/crypto_utils.hpp"
-#include <boost/asio.hpp>
+#include <asio.hpp>
 #include <thread>
 #include <chrono>
 #include <queue>
@@ -31,7 +31,6 @@
 
 using namespace wamp;
 using namespace std::chrono_literals;
-namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
 
 // Helper function to create test ServerConfig for integration tests
@@ -61,7 +60,7 @@ static bool read_exact(tcp::socket& socket, std::span<uint8_t> buf,
         if (ready < 0 && errno == EINTR) continue;
         if (ready <= 0) return false;
 
-        boost::system::error_code ec;
+        std::error_code ec;
         const size_t n = socket.read_some(asio::buffer(buf.data() + got, buf.size() - got), ec);
         if (ec) return false;
         got += n;
@@ -93,7 +92,7 @@ public:
             tcp::resolver resolver(io_);
             auto endpoints = resolver.resolve("127.0.0.1", std::to_string(port));
 
-            boost::system::error_code ec;
+            std::error_code ec;
             asio::connect(socket_, endpoints, ec);
             if (ec) {
                 spdlog::error("Client TCP connect failed: {}", ec.message());
@@ -134,7 +133,7 @@ public:
 
     void disconnect() {
         if (socket_.is_open()) {
-            boost::system::error_code ec;
+            std::error_code ec;
             socket_.close(ec);
         }
     }
@@ -634,7 +633,7 @@ public:
             tcp::resolver resolver(io_);
             auto endpoints = resolver.resolve("127.0.0.1", std::to_string(port));
 
-            boost::system::error_code ec;
+            std::error_code ec;
             asio::connect(socket_, endpoints, ec);
             if (ec) return false;
 
@@ -712,7 +711,7 @@ public:
 
     void disconnect() {
         if (socket_.is_open()) {
-            boost::system::error_code ec;
+            std::error_code ec;
             socket_.close(ec);
         }
     }

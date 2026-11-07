@@ -85,7 +85,7 @@ int main(int argc, char* argv[]) {
         std::print("\n");
         std::print("Press Ctrl+C to stop\n\n");
 
-        boost::asio::io_context io_context;
+        asio::io_context io_context;
 
         wamp::WampTlsServer server{io_context, config};
         server.start();

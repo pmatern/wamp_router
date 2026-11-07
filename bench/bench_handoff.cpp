@@ -22,7 +22,7 @@
 // Also: refcount traffic when several threads copy/destroy one shared frame, and the price of cloning
 // a frame instead of sharing it.
 
-#include <boost/asio.hpp>
+#include <asio.hpp>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -156,15 +156,15 @@ double spsc_ring(const Frame& frame, size_t n) {
 
 // --- asio::post from one io_context thread to another -------------------------------------------
 double asio_post(const Frame& frame, size_t n, size_t batch) {
-    boost::asio::io_context target;
-    auto guard = boost::asio::make_work_guard(target);
+    asio::io_context target;
+    auto guard = asio::make_work_guard(target);
     std::atomic<size_t> received{0};
     std::thread consumer([&] { target.run(); });
 
     auto t0 = Clock::now();
     for (size_t i = 0; i < n; i += batch) {
         // One post carries a batch, like draining a lane into the consumer's loop
-        boost::asio::post(target, [&received, batch, batch_frames = std::vector<Frame>(batch, frame)] {
+        asio::post(target, [&received, batch, batch_frames = std::vector<Frame>(batch, frame)] {
             received.fetch_add(batch, std::memory_order_relaxed);
         });
     }

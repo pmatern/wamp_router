@@ -15,7 +15,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <nlohmann/json.hpp>
-#include <boost/asio/io_context.hpp>
+#include <asio/io_context.hpp>
 #include "include/pubsub_handler.hpp"
 #include "include/procedure_handler.hpp"
 #include "include/wamp_serializer.hpp"
@@ -46,7 +46,7 @@ std::vector<uint8_t> payload_of(const std::vector<uint8_t>& frame) {
 // Pop one frame from a session's event channel (empty if none queued)
 std::vector<uint8_t> pop_frame(EventChannel& channel) {
     std::vector<uint8_t> out;
-    channel.try_receive([&](boost::system::error_code ec, EventToSend ev) {
+    channel.try_receive([&](std::error_code ec, EventToSend ev) {
         if (!ec && ev.event_data) {
             out = *ev.event_data;
         }
@@ -56,7 +56,7 @@ std::vector<uint8_t> pop_frame(EventChannel& channel) {
 
 // Registers a channel for each session id and removes them on destruction
 struct Sessions {
-    boost::asio::io_context io;
+    asio::io_context io;
     std::vector<uint64_t> ids;
 
     std::shared_ptr<EventChannel> add(uint64_t id) {
@@ -344,7 +344,7 @@ std::vector<MessageType> message_types(std::span<const uint8_t> bytes) {
 }  // namespace
 
 TEST_CASE("WampSession processes pipelined frames in one read", "[protocol][session]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     ServerConfig config;
     WampSession session{io, config, test_shard()};
     session.on_connect();
@@ -364,7 +364,7 @@ TEST_CASE("WampSession processes pipelined frames in one read", "[protocol][sess
 
 TEST_CASE("WampSession handles thousands of pipelined frames split at arbitrary points", "[protocol][session]") {
     // A 64 KiB read can carry hundreds of small frames; consuming them must not shift the buffer per frame.
-    boost::asio::io_context io;
+    asio::io_context io;
     ServerConfig config;
     WampSession session{io, config, test_shard()};
     session.on_connect();
@@ -406,7 +406,7 @@ TEST_CASE("WampSession delivers every fire-and-forget PUBLISH in a burst", "[pro
     auto subscriber = s.add(910041);
     (void)PubSubHandler::handle_subscribe(kRealm(), SubscribeMessage{1, {}, "proto.burst"}, 910041);
 
-    boost::asio::io_context io;
+    asio::io_context io;
     ServerConfig config;
     WampSession publisher{io, config, test_shard()};
 
@@ -428,7 +428,7 @@ TEST_CASE("WampSession delivers every fire-and-forget PUBLISH in a burst", "[pro
 }
 
 TEST_CASE("WampSession handles frames split across reads", "[protocol][session]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     ServerConfig config;
     WampSession session{io, config, test_shard()};
 

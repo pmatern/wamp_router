@@ -18,14 +18,14 @@ This router acts as the central message broker, routing messages between clients
 - **CBOR Serialization**: Compact binary message format
 - **TLS 1.3 Support**: Encrypted transport with optional client certificates
 - **WAMP-Cryptosign Authentication**: Ed25519 signature-based authentication
-- **C++20 Coroutines**: Asynchronous I/O using `boost::asio::awaitable`
-- **Event Channels**: Efficient message delivery using Boost.Asio experimental channels
+- **C++20 Coroutines**: Asynchronous I/O using `asio::awaitable`
+- **Event Channels**: Efficient message delivery using Asio experimental channels
 - **Session Management**: Automatic cleanup on disconnect
 - **Modern C++23**: Uses `std::expected`, `std::span`, ranges, etc.
 
 ## Dependencies
 
-- **Boost.Asio**: Asynchronous networking and coroutines
+- **Asio** (standalone): Asynchronous networking and coroutines
 - **OpenSSL**: TLS 1.3 support and Ed25519 cryptography
 - **nlohmann-json**: CBOR serialization
 - **fmt**: String formatting
@@ -409,8 +409,8 @@ Dropped events are counted (`EventChannelRegistry::dropped_count()`) and logged 
 1. **Header-Only Implementation**: All protocol logic in `include/` for easy integration
 2. **TLS 1.3**: Encrypted transport using OpenSSL with optional mutual TLS
 3. **WAMP-Cryptosign**: Ed25519 signature-based authentication (optional)
-4. **C++20 Coroutines**: Using `boost::asio::awaitable` for clean async code
-5. **Event Channels**: `boost::asio::experimental::channel` for efficient message delivery
+4. **C++20 Coroutines**: Using `asio::awaitable` for clean async code
+5. **Event Channels**: `asio::experimental::channel` for efficient message delivery
 6. **Single-Threaded**: One `io_context` thread (can be extended to thread pool)
 7. **Session-per-Coroutine**: Each client connection is a coroutine
 8. **RawSocket Transport**: Binary TCP framing (4-byte header + payload)
@@ -486,7 +486,7 @@ gdb ./build/wamp_router
 ## References
 
 - [WAMP Protocol Specification](https://wamp-proto.org/spec)
-- [Boost.Asio Documentation](https://www.boost.org/doc/libs/release/doc/html/boost_asio.html)
+- [Asio Documentation](https://think-async.com/Asio/asio-1.32.0/doc/)
 - [CBOR Specification](https://cbor.io/)
 - [C++20 Coroutines](https://en.cppreference.com/w/cpp/language/coroutines)
 

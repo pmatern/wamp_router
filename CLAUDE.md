@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a C++23 WAMP (Web Application Messaging Protocol) router implementation using RawSocket transport with CBOR serialization. The project runs inside a Docker container (`cpp23-builder`) that provides Clang 18+, CMake, Ninja, and vcpkg for dependency management.
 
-**Key Architecture**: Single-threaded asynchronous I/O using C++20 coroutines with Boost.Asio. The router implements the WAMP protocol's core features: RPC (CALL/REGISTER/YIELD) and PubSub (PUBLISH/SUBSCRIBE/EVENT). The architecture uses `awaitable` coroutines and concurrent operations via `parallel_group` for handling both socket I/O and event channel notifications.
+**Key Architecture**: Single-threaded asynchronous I/O using C++20 coroutines with standalone Asio (no Boost). The router implements the WAMP protocol's core features: RPC (CALL/REGISTER/YIELD) and PubSub (PUBLISH/SUBSCRIBE/EVENT). The architecture uses `awaitable` coroutines and concurrent operations via `parallel_group` for handling both socket I/O and event channel notifications.
 
 **Outstanding work:** see [TODO.md](TODO.md) for the prioritized task list. Update it as items are completed.
 
@@ -362,7 +362,7 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 
 #### EventChannel (event_channel.hpp)
 - Part of the Shard: `shard.channels` is an instance of `EventChannelRegistry`, not a static class.
-- Wraps `boost::asio::experimental::channel<void(boost::system::error_code, Event)>`
+- Wraps `asio::experimental::channel<void(std::error_code, Event)>`
 - Registry maintains one channel per session_id
 - Used to push EVENT and INVOCATION/RESULT messages to sessions asynchronously
 - Channel receives are co_awaited in `handle_wamp_session`'s parallel_group
@@ -384,7 +384,7 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 - **SessionScopeIdGenerator**: Generates IDs per-session (request_id) - currently unused (clients generate request_ids)
 
 ### Async I/O Pattern: C++20 Coroutines
-- All I/O operations use `boost::asio::awaitable<T>` coroutines
+- All I/O operations use `asio::awaitable<T>` coroutines
 - `co_await` suspends until async operation completes, resuming with result
 - `as_tuple(use_awaitable)` returns `[error_code, result]` tuple instead of throwing
 - `parallel_group` enables concurrent waiting on multiple async operations
@@ -420,13 +420,12 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 6. Look up pending call in InvocationTracker, send RESULT via EventChannel to caller
 
 ### Dependencies
-- **Boost.Asio**: Asynchronous networking, coroutines (`io_context`, `tcp::acceptor`, `awaitable`, `experimental::channel`)
-- **Boost.Asio.SSL**: TLS 1.3 support (`ssl::context`, `ssl::stream<tcp::socket>`)
-- **OpenSSL**: TLS implementation (required by Boost.Asio.SSL)
+- **Asio** (standalone, `asio` in vcpkg; `std::error_code`): Asynchronous networking, coroutines (`io_context`, `tcp::acceptor`, `awaitable`, `experimental::channel`)
+- **Asio SSL**: TLS 1.3 support (`ssl::context`, `ssl::stream<tcp::socket>`)
+- **OpenSSL**: TLS implementation (required by Asio SSL)
 - **toml11**: TOML configuration file parsing
-- **fmt**: String formatting
 - **spdlog**: Structured logging
-- **nlohmann-json**: CBOR for the session handshake/auth messages only; everything on the message hot path uses `include/cbor.hpp`
+- **nlohmann-json**: tests only, as an independent CBOR oracle for `include/cbor.hpp`
 - **Catch2**: Unit testing framework
 
 ### Important Build Details

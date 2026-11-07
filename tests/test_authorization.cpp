@@ -14,7 +14,7 @@
 
 
 #include <catch2/catch_test_macros.hpp>
-#include <boost/asio/io_context.hpp>
+#include <asio/io_context.hpp>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include "include/authorizer.hpp"
@@ -168,7 +168,7 @@ void require_not_authorized(const std::vector<uint8_t>& reply, MessageType reque
 
 TEST_CASE("Session enforces role permissions", "[authz][wamp_session]") {
     auto kp = make_keypair();
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = authz_config(kp.public_hex);
     WampSession session{io, config, test_shard()};
 
@@ -212,7 +212,7 @@ TEST_CASE("Session enforces role permissions", "[authz][wamp_session]") {
 
 TEST_CASE("Authid without a role can connect but do nothing", "[authz][wamp_session]") {
     auto kp = make_keypair();
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = authz_config(kp.public_hex);
     WampSession session{io, config, test_shard()};
 
@@ -226,7 +226,7 @@ TEST_CASE("Authid without a role can connect but do nothing", "[authz][wamp_sess
 }
 
 TEST_CASE("Without auth keys nothing is restricted", "[authz][wamp_session]") {
-    boost::asio::io_context io;
+    asio::io_context io;
     ServerConfig config;
     config.max_pending_invocations = 1000;
     WampSession session{io, config, test_shard()};
@@ -245,7 +245,7 @@ TEST_CASE("Without auth keys nothing is restricted", "[authz][wamp_session]") {
 
 TEST_CASE("Session only admits authids to their allowed realms", "[authz][realm][wamp_session]") {
     auto kp = make_keypair();
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = authz_config(kp.public_hex);
     config.auth_realms["alice"] = {"com.example.realm", "second.realm"};
     WampSession session{io, config, test_shard()};
@@ -275,7 +275,7 @@ TEST_CASE("Session only admits authids to their allowed realms", "[authz][realm]
 
 TEST_CASE("An authid with no realm list cannot join anywhere", "[authz][realm][wamp_session]") {
     auto kp = make_keypair();
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = authz_config(kp.public_hex);
     config.auth_realms.erase("bob");
     WampSession session{io, config, test_shard()};
@@ -294,7 +294,7 @@ TEST_CASE("An authid with no realm list cannot join anywhere", "[authz][realm][w
 
 TEST_CASE("Roles can differ per realm", "[authz][realm][wamp_session]") {
     auto kp = make_keypair();
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = authz_config(kp.public_hex);
 
     Permissions readonly;
@@ -324,7 +324,7 @@ TEST_CASE("Roles can differ per realm", "[authz][realm][wamp_session]") {
 
 TEST_CASE("Authenticated sessions in different realms are isolated", "[authz][realm][wamp_session]") {
     auto kp = make_keypair();
-    boost::asio::io_context io;
+    asio::io_context io;
     auto config = authz_config(kp.public_hex);
     config.auth_realms["alice"] = {"com.example.realm", "second.realm"};
 
@@ -342,13 +342,13 @@ TEST_CASE("Authenticated sessions in different realms are isolated", "[authz][re
     auto channel = test_shard().channels.find(w1.session_id);
     REQUIRE(channel != nullptr);
     bool got_event = false;
-    channel->try_receive([&](boost::system::error_code, EventToSend) { got_event = true; });
+    channel->try_receive([&](std::error_code, EventToSend) { got_event = true; });
     REQUIRE_FALSE(got_event);
 
     // ...while a publish in its own realm does (alice is publisher-capable; use a second session)
     WampSession publisher{io, config, test_shard()};
     (void)establish(publisher, kp, "alice", "com.example.realm");
     (void)send(publisher, serialize_publish(PublishMessage{2, {}, "com.example.news"}));
-    channel->try_receive([&](boost::system::error_code, EventToSend) { got_event = true; });
+    channel->try_receive([&](std::error_code, EventToSend) { got_event = true; });
     REQUIRE(got_event);
 }

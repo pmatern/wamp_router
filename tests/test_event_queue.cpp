@@ -14,7 +14,7 @@
 
 
 #include <catch2/catch_test_macros.hpp>
-#include <boost/asio.hpp>
+#include <asio.hpp>
 #include "include/shard.hpp"
 
 using namespace wamp;
@@ -49,7 +49,7 @@ EventToSend make_event(uint8_t tag) {
 
 std::optional<uint8_t> receive_tag(EventChannel& channel) {
     std::optional<uint8_t> tag;
-    channel.try_receive([&](boost::system::error_code ec, EventToSend ev) {
+    channel.try_receive([&](std::error_code ec, EventToSend ev) {
         if (!ec) {
             tag = (*ev.event_data)[0];
         }
@@ -58,7 +58,7 @@ std::optional<uint8_t> receive_tag(EventChannel& channel) {
 }
 
 struct ChannelFixture {
-    boost::asio::io_context io;
+    asio::io_context io;
     std::shared_ptr<EventChannel> channel;
 
     ChannelFixture() : channel(test_shard().channels.get_or_create(kSession, io)) {}
@@ -131,23 +131,23 @@ TEST_CASE("deliver_blocked waits for the subscriber to drain", "[event_queue]") 
     std::chrono::milliseconds flush_time{0};
 
     // Sender: waits for room
-    boost::asio::co_spawn(fx.io, [&]() -> boost::asio::awaitable<void> {
+    asio::co_spawn(fx.io, [&]() -> asio::awaitable<void> {
         co_await test_shard().channels.deliver_blocked(test_shard().channels.take_blocked());
         flush_time = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
         flushed = true;
-    }, boost::asio::detached);
+    }, asio::detached);
 
     // Slow subscriber: drains one event every 30 ms
-    boost::asio::co_spawn(fx.io, [&]() -> boost::asio::awaitable<void> {
-        boost::asio::steady_timer timer{fx.io};
+    asio::co_spawn(fx.io, [&]() -> asio::awaitable<void> {
+        asio::steady_timer timer{fx.io};
         for (int i = 0; i < 3; ++i) {
             timer.expires_after(30ms);
-            co_await timer.async_wait(boost::asio::use_awaitable);
+            co_await timer.async_wait(asio::use_awaitable);
             if (auto tag = receive_tag(*fx.channel)) {
                 received.push_back(*tag);
             }
         }
-    }, boost::asio::detached);
+    }, asio::detached);
 
     fx.io.run_for(3s);
 
@@ -170,11 +170,11 @@ TEST_CASE("deliver_blocked drops after the backpressure timeout", "[event_queue]
     const auto start = std::chrono::steady_clock::now();
     std::chrono::milliseconds flush_time{0};
 
-    boost::asio::co_spawn(fx.io, [&]() -> boost::asio::awaitable<void> {
+    asio::co_spawn(fx.io, [&]() -> asio::awaitable<void> {
         co_await test_shard().channels.deliver_blocked(test_shard().channels.take_blocked());
         flush_time = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
         flushed = true;
-    }, boost::asio::detached);
+    }, asio::detached);
 
     fx.io.run_for(2s);
 
@@ -195,10 +195,10 @@ TEST_CASE("Stalled subscribers are skipped after repeated timeouts", "[event_que
 
     auto flush = [&] {
         bool done = false;
-        boost::asio::co_spawn(fx.io, [&]() -> boost::asio::awaitable<void> {
+        asio::co_spawn(fx.io, [&]() -> asio::awaitable<void> {
             co_await test_shard().channels.deliver_blocked(test_shard().channels.take_blocked());
             done = true;
-        }, boost::asio::detached);
+        }, asio::detached);
         fx.io.restart();
         fx.io.run_for(2s);
         REQUIRE(done);
@@ -233,10 +233,10 @@ TEST_CASE("slow_subscriber_limit 0 never skips", "[event_queue]") {
     for (int i = 0; i < 3; ++i) {
         REQUIRE(test_shard().channels.deliver(kSession, make_event(1)) == DeliveryResult::DEFERRED);
         bool done = false;
-        boost::asio::co_spawn(fx.io, [&]() -> boost::asio::awaitable<void> {
+        asio::co_spawn(fx.io, [&]() -> asio::awaitable<void> {
             co_await test_shard().channels.deliver_blocked(test_shard().channels.take_blocked());
             done = true;
-        }, boost::asio::detached);
+        }, asio::detached);
         fx.io.restart();
         fx.io.run_for(2s);
         REQUIRE(done);

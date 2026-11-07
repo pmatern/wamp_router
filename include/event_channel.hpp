@@ -16,14 +16,14 @@
 #pragma once
 
 #include "config.hpp"
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/deferred.hpp>
-#include <boost/asio/experimental/channel.hpp>
-#include <boost/asio/experimental/parallel_group.hpp>
-#include <boost/asio/io_context.hpp>
-#include <boost/asio/steady_timer.hpp>
-#include <boost/asio/this_coro.hpp>
-#include <boost/asio/use_awaitable.hpp>
+#include <asio/awaitable.hpp>
+#include <asio/deferred.hpp>
+#include <asio/experimental/channel.hpp>
+#include <asio/experimental/parallel_group.hpp>
+#include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <memory>
@@ -50,7 +50,7 @@ struct EventToSend {
     {}
 };
 
-using EventChannel = boost::asio::experimental::channel<void(boost::system::error_code, EventToSend)>;
+using EventChannel = asio::experimental::channel<void(std::error_code, EventToSend)>;
 
 // ============================================================================
 // EventChannelRegistry - Manages event channels for active sessions
@@ -104,7 +104,7 @@ public:
 
     std::shared_ptr<EventChannel> get_or_create(
         uint64_t session_id,
-        boost::asio::io_context& io
+        asio::io_context& io
     ) {
         auto& channels = channels_;
 
@@ -142,7 +142,7 @@ public:
         auto& channels = channels_;
         auto it = channels.find(session_id);
         if (it != channels.end()) {
-            return it->second->try_send(boost::system::error_code{}, std::move(event));
+            return it->second->try_send(std::error_code{}, std::move(event));
         }
         return false;
     }
@@ -156,7 +156,7 @@ public:
             return DeliveryResult::DROPPED_NO_SESSION;
         }
 
-        if (channel->try_send(boost::system::error_code{}, event)) {
+        if (channel->try_send(std::error_code{}, event)) {
             clear_strikes(session_id);
             return DeliveryResult::QUEUED;
         }
@@ -186,13 +186,13 @@ public:
 
     // Wait for room in each recipient's queue, in order. One deadline covers the whole batch;
     // sends still blocked when it expires are dropped and counted.
-    boost::asio::awaitable<void> deliver_blocked(std::vector<BlockedSend> blocked) {
+    asio::awaitable<void> deliver_blocked(std::vector<BlockedSend> blocked) {
         if (blocked.empty()) {
             co_return;
         }
 
-        auto executor = co_await boost::asio::this_coro::executor;
-        boost::asio::steady_timer deadline{executor, settings_.backpressure_timeout};
+        auto executor = co_await asio::this_coro::executor;
+        asio::steady_timer deadline{executor, settings_.backpressure_timeout};
         bool expired = false;
 
         for (auto& send : blocked) {
@@ -203,12 +203,12 @@ public:
             }
 
             // The loser of wait_for_one may still have completed; check the send's own result
-            auto [order, ec_send, ec_timer] = co_await boost::asio::experimental::make_parallel_group(
-                channel->async_send(boost::system::error_code{}, std::move(send.event), boost::asio::deferred),
-                deadline.async_wait(boost::asio::deferred)
+            auto [order, ec_send, ec_timer] = co_await asio::experimental::make_parallel_group(
+                channel->async_send(std::error_code{}, std::move(send.event), asio::deferred),
+                deadline.async_wait(asio::deferred)
             ).async_wait(
-                boost::asio::experimental::wait_for_one(),
-                boost::asio::use_awaitable
+                asio::experimental::wait_for_one(),
+                asio::use_awaitable
             );
             (void)ec_timer;
 
