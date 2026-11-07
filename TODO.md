@@ -39,7 +39,8 @@ Do the protocol gaps (arguments forwarding in particular) first so benchmarks me
 - [x] Stage 0.5: Asio io_uring backend evaluated and rejected (40% slower on RPC, 50-80% more kernel CPU in the Linux VM; see docs/threading-analysis.md). Stage 0 is finished.
 - [x] Re-profiled on AWS EC2 (c7i.2xlarge router core + 1-3 load-generator instances, results in docs/threading-analysis.md): RPC 100-118k calls/s and about 4.8 us per delivered event on one core. Found and fixed a quadratic buffer erase in `WampSession` (-20% fan-out CPU). `wamp_load --instance N` lets several processes share one router.
 - [ ] Cheap user-space follow-ups from the EC2 profile: cache the event channel in the session instead of `EventChannelRegistry::find` per delivery; reduce asio overhead on the delivery path (coroutine resumes, channel operations).
-- [ ] Thread-per-core, shared-nothing router (staged: `Shard` object replacing the process-wide statics; N shards with an acceptor and SPSC lanes; replicated interest/registration tables with cross-shard pub/sub and RPC; per-shard metrics and logging). Needs Stage 0 and the bare-metal profile first.
+- [x] Stage 1 of the thread-per-core plan: `Shard` (include/shard.hpp) owns the event channels, pending-call tracker, realms and id generators; no process-wide mutable state remains; each server has its own shard.
+- [ ] Thread-per-core, shared-nothing router (remaining stages: N shards with an acceptor and SPSC lanes; replicated interest/registration tables with cross-shard pub/sub and RPC; per-shard metrics and logging). Needs Stage 0 and the bare-metal profile first.
 
 ## Backlog
 - [x] Roles and authorization per authid: `[auth.roles]` + `[[roles.<name>.rules]]` (exact/prefix URIs; call, register, publish, subscribe), default-deny once `[auth.keys]` is set, `wamp.error.not_authorized`. Not done: wildcard URI patterns, reloading permissions without a restart.

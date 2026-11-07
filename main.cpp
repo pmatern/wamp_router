@@ -50,9 +50,6 @@ int main(int argc, char* argv[]) {
         spdlog::set_level(config.log_level);
         spdlog::set_pattern("[%Y-%m-%d %H:%M:%S] [%^%l%$] %v");
 
-        wamp::ProcedureHandler::set_max_pending_invocations(
-            config.max_pending_invocations);
-
         fmt::print("\n");
         fmt::print("╔════════════════════════════════════════╗\n");
         fmt::print("║   WAMP Router (RawSocket + CBOR)      ║\n");

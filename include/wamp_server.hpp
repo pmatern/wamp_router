@@ -16,6 +16,7 @@
 #pragma once
 
 #include "wamp_session.hpp"
+#include "shard.hpp"
 #include "event_channel.hpp"
 #include "config.hpp"
 #include "procedure_handler.hpp"
@@ -205,8 +206,8 @@ handle_socket_read_completion(
 
     // Backpressure: if delivering this input's events/invocations hit a full subscriber queue,
     // stop reading from this client until the subscribers catch up (bounded by the timeout)
-    if (auto blocked = EventChannelRegistry::take_blocked(); !blocked.empty()) {
-        co_await EventChannelRegistry::deliver_blocked(std::move(blocked));
+    if (auto blocked = protocol.shard().channels.take_blocked(); !blocked.empty()) {
+        co_await protocol.shard().channels.deliver_blocked(std::move(blocked));
     }
 
     if (!result->empty()) {
@@ -304,7 +305,10 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
 
 template<typename SocketType>
 inline boost::asio::awaitable<std::expected<void, std::error_code>>
-handle_wamp_session(SocketType socket, boost::asio::io_context& io, const ServerConfig& config) {
+handle_wamp_session(SocketType socket, boost::asio::io_context& io, const ServerConfig& config,
+                    std::shared_ptr<Shard> shard) {
+    // `shard` is held by this coroutine frame, so the shard outlives the session even if the server
+    // object is destroyed first (e.g. io_context shutdown destroys suspended sessions)
     ReadState<SocketType> read_state;
 
     auto remote_endpoint = get_remote_endpoint(socket);
@@ -329,7 +333,7 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
 
     spdlog::info("WAMP session started with {}", remote_address);
 
-    WampSession protocol{io, config};
+    WampSession protocol{io, config, *shard};
     protocol.on_connect();
 
     // Until the WAMP session is established nothing can be queued for the client, so a plain
@@ -347,7 +351,7 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
 
     // Established: one coroutine reads, another writes queued events; whichever ends first
     // (disconnect, error) cancels the other
-    auto event_channel = EventChannelRegistry::get_or_create(protocol.session_id(), io);
+    auto event_channel = shard->channels.get_or_create(protocol.session_id(), io);
     spdlog::debug("Event channel acquired for session {}", protocol.session_id());
 
     WriteLock write_lock{io};
@@ -375,14 +379,14 @@ handle_wamp_session(SocketType socket, boost::asio::io_context& io, const Server
 }
 
 // Periodically fails pending calls whose callee has not answered in time.
-inline boost::asio::awaitable<void> call_timeout_sweeper() {
+inline boost::asio::awaitable<void> call_timeout_sweeper(std::shared_ptr<Shard> shard) {
     auto executor = co_await boost::asio::this_coro::executor;
     boost::asio::steady_timer timer(executor);
     for (;;) {
         timer.expires_after(std::chrono::milliseconds(50));
         auto [ec] = co_await timer.async_wait(boost::asio::as_tuple(boost::asio::use_awaitable));
         if (ec) co_return;
-        ProcedureHandler::expire_calls();
+        ProcedureHandler::expire_calls(*shard);
     }
 }
 
@@ -393,18 +397,21 @@ public:
         , acceptor_(io_context, tcp::endpoint(tcp::v4(), port))
         , bound_port_(acceptor_.local_endpoint().port())
         , config_(config)
+        , shard_(std::make_shared<Shard>(ShardConfig::from(config)))
     {
-        EventChannelRegistry::configure(config.events);
-        ProcedureHandler::set_default_call_timeout(config.call_timeout);
     }
 
     void start() {
-        boost::asio::co_spawn(io_context_, call_timeout_sweeper(), boost::asio::detached);
+        boost::asio::co_spawn(io_context_, call_timeout_sweeper(shard_), boost::asio::detached);
         boost::asio::co_spawn(
             io_context_,
             accept_loop(),
             boost::asio::detached
         );
+    }
+
+    [[nodiscard]] Shard& shard() const {
+        return *shard_;
     }
 
     [[nodiscard]] unsigned short port() const {
@@ -433,7 +440,7 @@ private:
 
             boost::asio::co_spawn(
                 acceptor_.get_executor(),
-                handle_wamp_session<tcp::socket>(std::move(socket), io_context_, config_),
+                handle_wamp_session<tcp::socket>(std::move(socket), io_context_, config_, shard_),
                 boost::asio::detached
             );
         }
@@ -443,6 +450,7 @@ private:
     tcp::acceptor acceptor_;
     unsigned short bound_port_;
     const ServerConfig& config_;
+    std::shared_ptr<Shard> shard_;  // this server's routing state, shared with its sessions
 };
 
 // ============================================================================
@@ -459,19 +467,22 @@ public:
         , acceptor_(io_context, tcp::endpoint(tcp::v4(), config.port))
         , bound_port_(acceptor_.local_endpoint().port())
         , config_(config)
+        , shard_(std::make_shared<Shard>(ShardConfig::from(config)))
     {
-        EventChannelRegistry::configure(config.events);
-        ProcedureHandler::set_default_call_timeout(config.call_timeout);
         setup_ssl_context(config.tls);
     }
 
     void start() {
-        boost::asio::co_spawn(io_context_, call_timeout_sweeper(), boost::asio::detached);
+        boost::asio::co_spawn(io_context_, call_timeout_sweeper(shard_), boost::asio::detached);
         boost::asio::co_spawn(
             io_context_,
             accept_loop(),
             boost::asio::detached
         );
+    }
+
+    [[nodiscard]] Shard& shard() const {
+        return *shard_;
     }
 
     [[nodiscard]] unsigned short port() const {
@@ -549,7 +560,7 @@ private:
 
             boost::asio::co_spawn(
                 acceptor_.get_executor(),
-                handle_wamp_session<ssl_socket>(std::move(tls_socket), io_context_, config_),
+                handle_wamp_session<ssl_socket>(std::move(tls_socket), io_context_, config_, shard_),
                 boost::asio::detached
             );
         }
@@ -560,6 +571,7 @@ private:
     tcp::acceptor acceptor_;
     unsigned short bound_port_;
     const ServerConfig& config_;
+    std::shared_ptr<Shard> shard_;  // this server's routing state, shared with its sessions
 };
 
 } // namespace wamp

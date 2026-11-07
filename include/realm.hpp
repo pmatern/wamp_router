@@ -24,30 +24,38 @@
 
 namespace wamp {
 
+class Shard;
+
 // ============================================================================
-// Realm - the routing state of one WAMP realm
+// Realm - the routing state of one WAMP realm (within one Shard)
 // ============================================================================
 // Topics and procedures are only visible inside their realm: the same URI in two realms refers to
 // two unrelated topics/procedures. Sessions are bound to one realm for their lifetime.
 struct Realm {
+    explicit Realm(Shard& owner) : shard(owner) {}
+
+    Shard& shard;  // the shard that owns this realm: channels, invocations and id generators live there
     SubscriptionManager subscriptions;
     RegistrationManager registrations;
 };
 
-// Process-wide set of realms, created on first use. Not synchronized (single io_context thread).
+// The realms of one Shard, created on first use. Not synchronized: a shard is owned by one thread.
 class RealmRegistry {
 public:
-    // The returned reference stays valid for the life of the process
-    [[nodiscard]] static Realm& get(std::string_view name) {
-        auto& map = realms();
-        if (auto it = map.find(name); it != map.end()) {
+    explicit RealmRegistry(Shard& owner) : owner_(owner) {}
+    RealmRegistry(const RealmRegistry&) = delete;
+    RealmRegistry& operator=(const RealmRegistry&) = delete;
+
+    // The returned reference stays valid for the life of the registry
+    [[nodiscard]] Realm& get(std::string_view name) {
+        if (auto it = realms_.find(name); it != realms_.end()) {
             return *it->second;
         }
-        return *map.emplace(std::string{name}, std::make_unique<Realm>()).first->second;
+        return *realms_.emplace(std::string{name}, std::make_unique<Realm>(owner_)).first->second;
     }
 
-    [[nodiscard]] static size_t count() {
-        return realms().size();
+    [[nodiscard]] size_t count() const {
+        return realms_.size();
     }
 
 private:
@@ -56,10 +64,8 @@ private:
         size_t operator()(std::string_view s) const noexcept { return std::hash<std::string_view>{}(s); }
     };
 
-    static std::unordered_map<std::string, std::unique_ptr<Realm>, StringHash, std::equal_to<>>& realms() {
-        static std::unordered_map<std::string, std::unique_ptr<Realm>, StringHash, std::equal_to<>> map;
-        return map;
-    }
+    Shard& owner_;
+    std::unordered_map<std::string, std::unique_ptr<Realm>, StringHash, std::equal_to<>> realms_;
 };
 
 } // namespace wamp

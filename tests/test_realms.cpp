@@ -41,32 +41,39 @@ std::vector<uint8_t> pop_frame(EventChannel& channel) {
 // Two sessions in realm A and one in realm B, with their event channels
 struct TwoRealms {
     boost::asio::io_context io;
-    Realm& a = RealmRegistry::get("isolation.a");
-    Realm& b = RealmRegistry::get("isolation.b");
+    Shard shard;
+    Realm& a = shard.realms.get("isolation.a");
+    Realm& b = shard.realms.get("isolation.b");
     static constexpr uint64_t kA1 = 920001, kA2 = 920002, kB1 = 920003;
-    std::shared_ptr<EventChannel> ch_a1 = EventChannelRegistry::get_or_create(kA1, io);
-    std::shared_ptr<EventChannel> ch_a2 = EventChannelRegistry::get_or_create(kA2, io);
-    std::shared_ptr<EventChannel> ch_b1 = EventChannelRegistry::get_or_create(kB1, io);
+    std::shared_ptr<EventChannel> ch_a1 = shard.channels.get_or_create(kA1, io);
+    std::shared_ptr<EventChannel> ch_a2 = shard.channels.get_or_create(kA2, io);
+    std::shared_ptr<EventChannel> ch_b1 = shard.channels.get_or_create(kB1, io);
 
     ~TwoRealms() {
         for (auto id : {kA1, kA2}) {
             PubSubHandler::cleanup_session(a, id);
             ProcedureHandler::cleanup_session(a, id);
-            EventChannelRegistry::remove(id);
+            shard.channels.remove(id);
         }
         PubSubHandler::cleanup_session(b, kB1);
         ProcedureHandler::cleanup_session(b, kB1);
-        EventChannelRegistry::remove(kB1);
+        shard.channels.remove(kB1);
     }
 };
 
 }  // namespace
 
 TEST_CASE("RealmRegistry returns one stable Realm per name", "[realm]") {
-    Realm& first = RealmRegistry::get("realm.stable");
-    Realm& again = RealmRegistry::get(std::string{"realm.stable"});
+    Shard shard;
+    Realm& first = shard.realms.get("realm.stable");
+    Realm& again = shard.realms.get(std::string{"realm.stable"});
     REQUIRE(&first == &again);
-    REQUIRE(&first != &RealmRegistry::get("realm.other"));
+    REQUIRE(&first != &shard.realms.get("realm.other"));
+    REQUIRE(&first.shard == &shard);
+
+    // another shard has its own, unrelated realm of the same name
+    Shard other;
+    REQUIRE(&other.realms.get("realm.stable") != &first);
 }
 
 TEST_CASE("PUBLISH only reaches subscribers in the publisher's realm", "[realm][pubsub]") {

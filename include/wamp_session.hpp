@@ -50,9 +50,10 @@ enum class SessionProtocolState {
 // ============================================================================
 class WampSession {
 public:
-    explicit WampSession(boost::asio::io_context& io, const ServerConfig& config)
+    explicit WampSession(boost::asio::io_context& io, const ServerConfig& config, Shard& shard)
         : io_(io)
         , config_(config)
+        , shard_(shard)
         , state_(SessionProtocolState::AWAITING_RAWSOCKET_HANDSHAKE)
         , expected_payload_length_(0)
         , session_id_(0)
@@ -70,6 +71,10 @@ public:
         if (!disconnected_) {
             on_disconnect();
         }
+    }
+
+    [[nodiscard]] Shard& shard() const {
+        return shard_;
     }
 
     // Get session ID (0 if not yet established)
@@ -98,7 +103,7 @@ public:
                 PubSubHandler::cleanup_session(*realm_ptr_, session_id_);
                 ProcedureHandler::cleanup_session(*realm_ptr_, session_id_);
             }
-            EventChannelRegistry::remove(session_id_);
+            shard_.channels.remove(session_id_);
         }
 
         spdlog::info("WAMP session disconnected");
@@ -136,7 +141,7 @@ private:
         buffer_.insert(buffer_.end(), data.begin(), data.end());
         output_buffer_.clear();
         // Sends parked by earlier callers that never flushed them must not leak into this session's turn
-        EventChannelRegistry::clear_blocked();
+        shard_.channels.clear_blocked();
 
         spdlog::debug("Received {} bytes, buffer now {} bytes in state {}",
                      data.size(), unread(), state_name());
@@ -424,9 +429,9 @@ private:
         if (config_.auth_keys.empty()) {
             spdlog::info("No authentication configured, establishing session for realm '{}'", realm_);
 
-            session_id_ = generate_session_id();
+            session_id_ = shard_.ids.session.generate();
             wamp_session_established_ = true;
-            realm_ptr_ = &RealmRegistry::get(realm_);
+            realm_ptr_ = &shard_.realms.get(realm_);
 
             WelcomeMessage welcome{session_id_, realm_};
             auto welcome_cbor = serialize_welcome(welcome);
@@ -547,15 +552,15 @@ private:
             return std::span<const uint8_t>(response_buffer_);
         }
 
-        session_id_ = generate_session_id();
+        session_id_ = shard_.ids.session.generate();
         wamp_session_established_ = true;
-        realm_ptr_ = &RealmRegistry::get(realm_);
+        realm_ptr_ = &shard_.realms.get(realm_);
         state_ = SessionProtocolState::AWAITING_FRAME_HEADER;
 
         spdlog::info("Authentication successful: session_id={}, authid={}, realm={}",
                     session_id_, pending_authid_, realm_);
 
-        EventChannelRegistry::get_or_create(session_id_, io_);
+        shard_.channels.get_or_create(session_id_, io_);
 
         // Resolve the authid's permissions; an authid without a role may connect but do nothing
         static const Permissions no_permissions;
@@ -746,6 +751,7 @@ private:
                 }
 
                 auto handle_result = ProcedureHandler::handle_invocation_error(
+                    shard_,
                     *error_result,
                     session_id_
                 );
@@ -827,6 +833,7 @@ private:
                 }
 
                 auto handle_result = ProcedureHandler::handle_yield(
+                    shard_,
                     *yield_result,
                     session_id_
                 );
@@ -845,11 +852,6 @@ private:
                             static_cast<int>(msg_type));
                 return std::span<const uint8_t>{};
         }
-    }
-
-    static uint64_t generate_session_id() {
-        static GlobalIdGenerator id_gen;
-        return id_gen.generate();
     }
 
     [[nodiscard]] const char* state_name() const {
@@ -872,6 +874,7 @@ private:
 private:
     boost::asio::io_context& io_;
     const ServerConfig& config_;  // Server configuration (includes auth keys)
+    Shard& shard_;                // The shard (channels, pending calls, realms, ids) this session runs on
     SessionProtocolState state_;
     bool disconnected_ = false;
     std::vector<uint8_t> output_buffer_;  // Responses accumulated during one process() call

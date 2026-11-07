@@ -18,7 +18,7 @@
 #include "wamp_messages.hpp"
 #include "wamp_serializer.hpp"
 #include "wamp_id.hpp"
-#include "realm.hpp"
+#include "shard.hpp"
 #include "event_channel.hpp"
 #include "raw_socket.hpp"
 #include <spdlog/spdlog.h>
@@ -52,8 +52,7 @@ public:
         spdlog::debug("SUBSCRIBE request_id={}, topic={}, session={}",
                      subscribe.request_id, subscribe.topic, session_id);
 
-        static RouterScopeIdGenerator sub_id_gen;
-        uint64_t subscription_id = sub_id_gen.generate();
+        uint64_t subscription_id = realm.shard.ids.subscription.generate();
 
         sub_manager.subscribe(subscription_id, subscribe.topic, session_id);
 
@@ -105,8 +104,7 @@ public:
         spdlog::debug("PUBLISH request_id={}, topic={}, session={}",
                      publish.request_id, publish.topic, session_id);
 
-        static GlobalIdGenerator pub_id_gen;
-        uint64_t publication_id = pub_id_gen.generate();
+        uint64_t publication_id = realm.shard.ids.publication.generate();
 
         // exclude_me defaults to true per the WAMP spec: the publisher doesn't receive its own event
         bool exclude_me = true;
@@ -137,7 +135,7 @@ public:
                 auto event_data = std::make_shared<std::vector<uint8_t>>(
                     event_template->frame_for(subscription_id));
 
-                if (accepted(EventChannelRegistry::deliver(subscriber_session,
+                if (accepted(realm.shard.channels.deliver(subscriber_session,
                     EventToSend{subscriber_session, std::move(event_data)}))) {
                     ++sent_count;
                     spdlog::debug("Sent EVENT to session {} via channel (subscription_id={})",

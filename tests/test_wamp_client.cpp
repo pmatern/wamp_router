@@ -559,7 +559,7 @@ std::pair<size_t, uint64_t> run_burst(OverflowPolicy policy, size_t queue_size, 
     uint16_t port = find_available_port();
     WampServer server{io, port, config};   // applies config.events to the channel registry
     server.start();
-    EventChannelRegistry::reset_dropped_count();
+    server.shard().channels.reset_dropped_count();
 
     WampClient sub{io};
     WampClient pub{io};
@@ -576,7 +576,7 @@ std::pair<size_t, uint64_t> run_burst(OverflowPolicy policy, size_t queue_size, 
         }
 
         // Every event ends up either delivered or counted as dropped
-        for (int i = 0; i < 300 && delivered + EventChannelRegistry::dropped_count() < burst; ++i) {
+        for (int i = 0; i < 300 && delivered + server.shard().channels.dropped_count() < burst; ++i) {
             co_await sleep_ms(io, 10);
         }
         co_await pub.disconnect();
@@ -585,8 +585,7 @@ std::pair<size_t, uint64_t> run_burst(OverflowPolicy policy, size_t queue_size, 
     }, detached);
 
     io.run_for(std::chrono::seconds(8));
-    auto result = std::make_pair(delivered, EventChannelRegistry::dropped_count());
-    EventChannelRegistry::configure({});
+    auto result = std::make_pair(delivered, server.shard().channels.dropped_count());
     return result;
 }
 
@@ -795,4 +794,57 @@ TEST_CASE("WampClient - Messages larger than the read scratch buffer arrive inta
     REQUIRE(sizes.size() == 2);
     REQUIRE(sizes[0] == big.size());
     REQUIRE(sizes[1] == big.size());
+}
+
+TEST_CASE("WampClient - Two routers in one process share no state", "[wamp_client][shard]") {
+    // Each server owns its Shard, so the same topic and procedure on two servers are unrelated
+    io_context io;
+    ServerConfig config;
+    WampServer server_a{io, find_available_port(), config};
+    WampServer server_b{io, find_available_port(), config};
+    server_a.start();
+    server_b.start();
+
+    WampClient sub_a{io};
+    WampClient pub_b{io};
+    WampClient callee_a{io};
+    WampClient caller_b{io};
+
+    int events_on_a = 0;
+    bool procedure_missing_on_b = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await sub_a.connect("127.0.0.1", server_a.port(), "shared.realm");
+        co_await pub_b.connect("127.0.0.1", server_b.port(), "shared.realm");
+        co_await callee_a.connect("127.0.0.1", server_a.port(), "shared.realm");
+        co_await caller_b.connect("127.0.0.1", server_b.port(), "shared.realm");
+
+        co_await sub_a.subscribe("com.test.topic", [&](const EventMessage&) { ++events_on_a; });
+        co_await callee_a.register_procedure("com.test.proc",
+            [](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                co_return YieldMessage{inv.request_id, {}};
+            });
+
+        (void)co_await pub_b.publish("com.test.topic", true);   // acknowledged, on the other server
+        try {
+            (void)co_await caller_b.call("com.test.proc");
+        } catch (const WampException& e) {
+            procedure_missing_on_b = e.error_uri == "wamp.error.no_such_procedure";
+        }
+
+        boost::asio::steady_timer timer{io};
+        timer.expires_after(std::chrono::milliseconds(200));
+        co_await timer.async_wait(use_awaitable);
+
+        co_await sub_a.disconnect();
+        co_await pub_b.disconnect();
+        co_await callee_a.disconnect();
+        co_await caller_b.disconnect();
+    }, detached);
+
+    io.run_for(std::chrono::seconds(5));
+
+    REQUIRE(events_on_a == 0);
+    REQUIRE(procedure_missing_on_b);
+    REQUIRE(&server_a.shard() != &server_b.shard());
 }

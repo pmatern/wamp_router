@@ -235,12 +235,28 @@ TEST_CASE("InvocationTracker session cleanup", "[procedure_handler][invocation]"
     }
 }
 
-TEST_CASE("ProcedureHandler configuration", "[procedure_handler]") {
-    SECTION("Set and get max pending invocations") {
-        ProcedureHandler::set_max_pending_invocations(5000);
-        REQUIRE(ProcedureHandler::get_max_pending_invocations() == 5000);
+TEST_CASE("Shard configuration", "[procedure_handler][shard]") {
+    SECTION("pending invocation capacity and call timeout come from the config") {
+        Shard shard{{.max_pending_invocations = 5000, .call_timeout = std::chrono::milliseconds{1234}}};
+        REQUIRE(shard.invocations.max_capacity() == 5000);
+        REQUIRE(shard.call_timeout == std::chrono::milliseconds{1234});
+    }
 
-        ProcedureHandler::set_max_pending_invocations(10000);
-        REQUIRE(ProcedureHandler::get_max_pending_invocations() == 10000);
+    SECTION("a ServerConfig maps onto a ShardConfig, defaulting an unset capacity") {
+        ServerConfig server;
+        server.call_timeout = std::chrono::milliseconds{50};
+        auto shard_config = ShardConfig::from(server);
+        REQUIRE(shard_config.max_pending_invocations == 10000);
+        REQUIRE(shard_config.call_timeout == std::chrono::milliseconds{50});
+        server.max_pending_invocations = 42;
+        REQUIRE(ShardConfig::from(server).max_pending_invocations == 42);
+    }
+
+    SECTION("shards do not share state") {
+        Shard a, b;
+        a.invocations.track(1, PendingCall{5, 100});
+        REQUIRE(a.invocations.pending_count() == 1);
+        REQUIRE(b.invocations.pending_count() == 0);
+        REQUIRE(a.ids.invocation.generate() == b.ids.invocation.generate());  // independent sequences
     }
 }

@@ -24,11 +24,17 @@ using namespace wamp;
 
 namespace {
 
+// Routing state shared by the sessions and handlers a test builds by hand (one per test file)
+static Shard& test_shard() {
+    static Shard shard;
+    return shard;
+}
+
 constexpr size_t kFrameHeader = 4;
 
 // Handlers are called directly in a single realm; sessions in these tests join it too
 Realm& kRealm() {
-    return RealmRegistry::get("test.realm");
+    return test_shard().realms.get("test.realm");
 }
 
 std::vector<uint8_t> payload_of(const std::vector<uint8_t>& frame) {
@@ -54,13 +60,13 @@ struct Sessions {
 
     std::shared_ptr<EventChannel> add(uint64_t id) {
         ids.push_back(id);
-        return EventChannelRegistry::get_or_create(id, io);
+        return test_shard().channels.get_or_create(id, io);
     }
     ~Sessions() {
         for (auto id : ids) {
             PubSubHandler::cleanup_session(kRealm(), id);
             ProcedureHandler::cleanup_session(kRealm(), id);
-            EventChannelRegistry::remove(id);
+            test_shard().channels.remove(id);
         }
     }
 };
@@ -260,7 +266,7 @@ TEST_CASE("RPC forwards args and callee errors", "[protocol][rpc]") {
     SECTION("Callee ERROR is forwarded to the caller as ERROR for CALL") {
         ErrorMessage callee_error{MessageType::INVOCATION, invocation->request_id,
                                   {{"message", std::string{"bad"}}}, "app.error.bad", args, kw};
-        auto resp = ProcedureHandler::handle_invocation_error(callee_error, 910031);
+        auto resp = ProcedureHandler::handle_invocation_error(test_shard(), callee_error, 910031);
         REQUIRE(resp.has_value());
         REQUIRE(resp->empty());
 
@@ -272,7 +278,7 @@ TEST_CASE("RPC forwards args and callee errors", "[protocol][rpc]") {
         REQUIRE(err->arguments == args);
 
         // Invocation is consumed; a late YIELD is ignored
-        (void)ProcedureHandler::handle_yield(YieldMessage{invocation->request_id, {}}, 910031);
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation->request_id, {}}, 910031);
         REQUIRE(pop_frame(*ch_caller).empty());
     }
 
@@ -288,7 +294,7 @@ TEST_CASE("RPC forwards args and callee errors", "[protocol][rpc]") {
 
     SECTION("ERROR for unknown invocation is ignored") {
         ErrorMessage stray{MessageType::INVOCATION, 987654321, {}, "app.error.x"};
-        auto resp = ProcedureHandler::handle_invocation_error(stray, 910031);
+        auto resp = ProcedureHandler::handle_invocation_error(test_shard(), stray, 910031);
         REQUIRE(resp.has_value());
         REQUIRE(pop_frame(*ch_caller).empty());
     }
@@ -339,7 +345,7 @@ std::vector<MessageType> message_types(std::span<const uint8_t> bytes) {
 TEST_CASE("WampSession processes pipelined frames in one read", "[protocol][session]") {
     boost::asio::io_context io;
     ServerConfig config;
-    WampSession session{io, config};
+    WampSession session{io, config, test_shard()};
     session.on_connect();
 
     std::vector<uint8_t> input = handshake_bytes();
@@ -359,7 +365,7 @@ TEST_CASE("WampSession handles thousands of pipelined frames split at arbitrary 
     // A 64 KiB read can carry hundreds of small frames; consuming them must not shift the buffer per frame.
     boost::asio::io_context io;
     ServerConfig config;
-    WampSession session{io, config};
+    WampSession session{io, config, test_shard()};
     session.on_connect();
 
     std::vector<uint8_t> input = handshake_bytes();
@@ -387,7 +393,7 @@ TEST_CASE("WampSession handles thousands of pipelined frames split at arbitrary 
     REQUIRE(std::all_of(types.begin() + 1, types.end(), [](auto t) { return t == MessageType::SUBSCRIBED; }));
 
     // and all in one read
-    WampSession whole{io, config};
+    WampSession whole{io, config, test_shard()};
     whole.on_connect();
     auto result = whole.process(std::span{input.data(), input.size()});
     REQUIRE(result.has_value());
@@ -401,7 +407,7 @@ TEST_CASE("WampSession delivers every fire-and-forget PUBLISH in a burst", "[pro
 
     boost::asio::io_context io;
     ServerConfig config;
-    WampSession publisher{io, config};
+    WampSession publisher{io, config, test_shard()};
 
     std::vector<uint8_t> input = handshake_bytes();
     append(input, frame_of(serialize_hello(HelloMessage::create_client("test.realm"))));
@@ -423,7 +429,7 @@ TEST_CASE("WampSession delivers every fire-and-forget PUBLISH in a burst", "[pro
 TEST_CASE("WampSession handles frames split across reads", "[protocol][session]") {
     boost::asio::io_context io;
     ServerConfig config;
-    WampSession session{io, config};
+    WampSession session{io, config, test_shard()};
 
     auto handshake = handshake_bytes();
     REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
@@ -460,23 +466,23 @@ TEST_CASE("Unanswered calls time out", "[protocol][rpc][timeout]") {
     auto ch_caller = s.add(910042);
     REQUIRE(ProcedureHandler::handle_register(kRealm(), RegisterMessage{1, {}, "proto.slow"}, 910041).has_value());
 
-    const auto saved = ProcedureHandler::get_default_call_timeout();
+    const auto saved = test_shard().call_timeout;
     struct Restore {
         milliseconds t;
-        ~Restore() { ProcedureHandler::set_default_call_timeout(t); }
+        ~Restore() { test_shard().call_timeout = t; }
     } restore{saved};
 
     SECTION("CALL timeout option expires the call with wamp.error.timeout") {
-        ProcedureHandler::set_default_call_timeout(0ms);
+        test_shard().call_timeout = 0ms;
         WampDict opts{{"timeout", int64_t{100}}};
         REQUIRE(ProcedureHandler::handle_call(kRealm(), CallMessage{60, opts, "proto.slow"}, 910042).has_value());
         auto invocation = deserialize_invocation(payload_of(pop_frame(*ch_callee)));
         REQUIRE(invocation.has_value());
 
-        REQUIRE(ProcedureHandler::expire_calls(steady_clock::now()) == 0);
+        REQUIRE(ProcedureHandler::expire_calls(test_shard(), steady_clock::now()) == 0);
         REQUIRE(pop_frame(*ch_caller).empty());
 
-        REQUIRE(ProcedureHandler::expire_calls(steady_clock::now() + 1s) == 1);
+        REQUIRE(ProcedureHandler::expire_calls(test_shard(), steady_clock::now() + 1s) == 1);
 
         // The callee is told to stop
         auto interrupt = deserialize_interrupt(payload_of(pop_frame(*ch_callee)));
@@ -490,32 +496,32 @@ TEST_CASE("Unanswered calls time out", "[protocol][rpc][timeout]") {
         REQUIRE(err->error_uri == "wamp.error.timeout");
 
         // A late YIELD is ignored
-        (void)ProcedureHandler::handle_yield(YieldMessage{invocation->request_id, {}}, 910041);
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation->request_id, {}}, 910041);
         REQUIRE(pop_frame(*ch_caller).empty());
     }
 
     SECTION("Default timeout applies when the CALL has no option") {
-        ProcedureHandler::set_default_call_timeout(200ms);
+        test_shard().call_timeout = 200ms;
         REQUIRE(ProcedureHandler::handle_call(kRealm(), CallMessage{61, {}, "proto.slow"}, 910042).has_value());
-        REQUIRE(ProcedureHandler::expire_calls(steady_clock::now() + 1s) == 1);
+        REQUIRE(ProcedureHandler::expire_calls(test_shard(), steady_clock::now() + 1s) == 1);
         auto err = deserialize_error(payload_of(pop_frame(*ch_caller)));
         REQUIRE(err.has_value());
         REQUIRE(err->error_uri == "wamp.error.timeout");
     }
 
     SECTION("No timeout configured: call never expires") {
-        ProcedureHandler::set_default_call_timeout(0ms);
+        test_shard().call_timeout = 0ms;
         REQUIRE(ProcedureHandler::handle_call(kRealm(), CallMessage{62, {}, "proto.slow"}, 910042).has_value());
-        REQUIRE(ProcedureHandler::expire_calls(steady_clock::now() + hours(24)) == 0);
+        REQUIRE(ProcedureHandler::expire_calls(test_shard(), steady_clock::now() + hours(24)) == 0);
         REQUIRE(pop_frame(*ch_caller).empty());
     }
 
     SECTION("Answered calls do not time out") {
-        ProcedureHandler::set_default_call_timeout(100ms);
+        test_shard().call_timeout = 100ms;
         REQUIRE(ProcedureHandler::handle_call(kRealm(), CallMessage{63, {}, "proto.slow"}, 910042).has_value());
         auto invocation = deserialize_invocation(payload_of(pop_frame(*ch_callee)));
         REQUIRE(invocation.has_value());
-        (void)ProcedureHandler::handle_yield(YieldMessage{invocation->request_id, {}}, 910041);
-        REQUIRE(ProcedureHandler::expire_calls(steady_clock::now() + 1s) == 0);
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation->request_id, {}}, 910041);
+        REQUIRE(ProcedureHandler::expire_calls(test_shard(), steady_clock::now() + 1s) == 0);
     }
 }

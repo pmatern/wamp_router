@@ -37,6 +37,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 using namespace wamp;
@@ -132,16 +133,16 @@ bool parse(int argc, char** argv, Options& o) {
 class EmbeddedRouter {
 public:
     explicit EmbeddedRouter(ServerConfig config) {
-        std::promise<std::pair<uint16_t, boost::asio::io_context*>> ready;
+        std::promise<std::tuple<uint16_t, boost::asio::io_context*, Shard*>> ready;
         auto future = ready.get_future();
         thread_ = std::thread([ready = std::move(ready), config = std::move(config)]() mutable {
             boost::asio::io_context io;
             WampServer server{io, 0, config};
-            ready.set_value({server.port(), &io});
+            ready.set_value({server.port(), &io, &server.shard()});
             server.start();
             io.run();
         });
-        std::tie(port_, io_) = future.get();
+        std::tie(port_, io_, shard_) = future.get();
     }
     ~EmbeddedRouter() {
         io_->stop();
@@ -151,11 +152,13 @@ public:
     EmbeddedRouter& operator=(const EmbeddedRouter&) = delete;
 
     [[nodiscard]] uint16_t port() const { return port_; }
+    [[nodiscard]] uint64_t dropped() const { return shard_->channels.dropped_count(); }
 
 private:
     std::thread thread_;
     uint16_t port_ = 0;
     boost::asio::io_context* io_ = nullptr;
+    Shard* shard_ = nullptr;  // owned by the router thread; the drop counter is atomic
 };
 
 int64_t now_ns() {
@@ -227,7 +230,7 @@ double seconds(Clock::time_point a, Clock::time_point b) {
 // PubSub: 1 publisher -> N subscribers
 // ----------------------------------------------------------------------------
 awaitable<void> run_pubsub(boost::asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port,
-                           bool embedded) {
+                           const EmbeddedRouter* router) {
     const std::string kTopic = "load.pubsub." + std::to_string(o.instance);
 
     // Event callbacks can fire after this coroutine returns, so they share ownership of the stats
@@ -288,9 +291,8 @@ awaitable<void> run_pubsub(boost::asio::io_context& io, ClientPool& pool, const 
     std::printf("%-16s %.0f events/s\n", "delivery rate",
                 static_cast<double>(delivered) / std::max(seconds(start, end), 1e-9));
     state->latency.print("latency");
-    if (embedded) {
-        std::printf("%-16s %llu\n", "router drops",
-                    static_cast<unsigned long long>(EventChannelRegistry::dropped_count()));
+    if (router) {
+        std::printf("%-16s %llu\n", "router drops", static_cast<unsigned long long>(router->dropped()));
     }
 
     co_await disconnect_quietly(publisher);
@@ -419,7 +421,6 @@ int main(int argc, char** argv) {
         ServerConfig config;
         config.events.size = opts.queue_size;
         config.events.overflow = opts.overflow == "drop" ? OverflowPolicy::DROP : OverflowPolicy::BACKPRESSURE;
-        EventChannelRegistry::reset_dropped_count();
         router = std::make_unique<EmbeddedRouter>(std::move(config));
         port = router->port();
         std::printf("embedded router on 127.0.0.1:%u (shares CPUs with the load clients), "
@@ -434,7 +435,7 @@ int main(int argc, char** argv) {
     co_spawn(io, [&]() -> awaitable<void> {
         try {
             if (opts.mode == "pubsub" || opts.mode == "both") {
-                co_await run_pubsub(io, pool, opts, opts.host, port, router != nullptr);
+                co_await run_pubsub(io, pool, opts, opts.host, port, router.get());
             }
             if (opts.mode == "rpc" || opts.mode == "both") {
                 co_await run_rpc(io, pool, opts, opts.host, port);

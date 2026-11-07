@@ -222,6 +222,8 @@ messages are strictly request/response.
 
 ### Stage 1: a `Shard` object instead of process-wide statics
 
+**Status: done** (`include/shard.hpp`). `EventChannelRegistry`, `InvocationTracker`, `RealmRegistry`, the id generators and the call-timeout settings now live in a `Shard` that each server owns and passes to its sessions, handlers and sweeper; `Realm` keeps a reference to its shard. Nothing mutable is process-wide any more (only a `thread_local` read scratch buffer, which is per-thread by design). Two servers in one process share no state (test), and `N=1` behaviour and performance are unchanged. The original plan:
+
 Move everything that is global today into one `Shard` that is passed by reference: `EventChannelRegistry` (channels, strikes,
 blocked-send list, drop counter), `InvocationTracker`, `RealmRegistry` and its `Realm`s, ID generators, call sweeper, and the
 `ProcedureHandler` settings. The session holds a `Shard&`. With one shard this is a behaviour-neutral refactor (and it makes the

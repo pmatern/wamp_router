@@ -261,6 +261,7 @@ wamp_router/
 ├── include/                   # Header-only implementation
 │   ├── config.hpp            # TOML configuration loader with auth keys support
 │   ├── authorizer.hpp        # Role permissions (Action, Permissions): exact/prefix URI rules
+│   ├── shard.hpp             # Shard: all routing state one thread owns (channels, pending calls, realms, ids)
 │   ├── realm.hpp             # Realm (per-realm subscriptions + registrations), RealmRegistry
 │   ├── crypto_utils.hpp      # Ed25519 signature verification, challenge generation
 │   ├── wamp_server.hpp       # WampServer (plain TCP for tests), WampTlsServer (TLS 1.3)
@@ -341,19 +342,25 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 - Calls into PubSubHandler and ProcedureHandler for message dispatch
 - Manages session ID (generated on HELLO, sent in WELCOME)
 
+#### Shard (shard.hpp)
+- Owns everything a router thread mutates: `EventChannelRegistry channels`, `InvocationTracker invocations`, `RealmRegistry realms`, the id generators and the default call timeout. There are no process-wide mutable statics.
+- One `Shard` per server (`WampServer::shard()`); sessions, handlers and the call sweeper receive it by reference, and each session coroutine also holds a `shared_ptr<Shard>` so it outlives the server object. A shard is single-threaded and unsynchronized, which is what lets several shards run side by side (one per core) without sharing mutable state.
+- Tests build their own `Shard` (a `test_shard()` helper per file) and pass it to `WampSession` and the handlers.
+
 #### PubSubHandler (pubsub_handler.hpp)
 - Handles SUBSCRIBE/PUBLISH messages
-- Maintains global SubscriptionManager (topic → subscription_id → session_id mappings)
+- Uses the SubscriptionManager of the session's `Realm` (topic → subscription_id → session_id mappings)
 - On PUBLISH: looks up subscribers, sends EVENT messages via EventChannel to each subscriber's session
 
 #### ProcedureHandler (procedure_handler.hpp)
 - Handles REGISTER/CALL/YIELD messages
-- Maintains global RegistrationManager (procedure URI → registration_id → session_id)
-- Maintains global InvocationTracker (pending CALLs awaiting YIELD responses)
+- Uses the RegistrationManager of the session's `Realm` (procedure URI → registration_id → session_id)
+- Uses the Shard's InvocationTracker (pending CALLs awaiting YIELD responses)
 - On CALL: finds callee, generates invocation_id, sends INVOCATION via EventChannel to callee
 - On YIELD: finds pending call, sends RESULT via EventChannel to caller
 
 #### EventChannel (event_channel.hpp)
+- Part of the Shard: `shard.channels` is an instance of `EventChannelRegistry`, not a static class.
 - Wraps `boost::asio::experimental::channel<void(boost::system::error_code, Event)>`
 - Registry maintains one channel per session_id
 - Used to push EVENT and INVOCATION/RESULT messages to sessions asynchronously

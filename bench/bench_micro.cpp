@@ -43,8 +43,13 @@ const bool kQuiet = (spdlog::set_level(spdlog::level::off), true);
 constexpr const char* kTopic = "com.bench.topic";
 constexpr const char* kProcedure = "com.bench.procedure";
 
+static Shard& test_shard() {
+    static Shard shard;
+    return shard;
+}
+
 Realm& kRealm() {
-    return RealmRegistry::get("bench.realm");
+    return test_shard().realms.get("bench.realm");
 }
 
 WampList make_args(size_t n) {
@@ -233,7 +238,7 @@ TEST_CASE("bench: publish fan-out", "[bench][handlers]") {
         for (uint64_t i = 0; i < n; ++i) {
             const uint64_t session = 9'100'000 + i;
             sessions.push_back(session);
-            channels.push_back(EventChannelRegistry::get_or_create(session, io));
+            channels.push_back(test_shard().channels.get_or_create(session, io));
             (void)PubSubHandler::handle_subscribe(kRealm(), SubscribeMessage{i + 1, {}, kTopic}, session);
         }
 
@@ -250,7 +255,7 @@ TEST_CASE("bench: publish fan-out", "[bench][handlers]") {
 
         for (auto session : sessions) {
             PubSubHandler::cleanup_session(kRealm(), session);
-            EventChannelRegistry::remove(session);
+            test_shard().channels.remove(session);
         }
     }
 }
@@ -259,8 +264,8 @@ TEST_CASE("bench: RPC round trip through the router", "[bench][handlers]") {
     boost::asio::io_context io;
     const uint64_t callee = 9'200'001;
     const uint64_t caller = 9'200'002;
-    auto callee_channel = EventChannelRegistry::get_or_create(callee, io);
-    auto caller_channel = EventChannelRegistry::get_or_create(caller, io);
+    auto callee_channel = test_shard().channels.get_or_create(callee, io);
+    auto caller_channel = test_shard().channels.get_or_create(caller, io);
     REQUIRE(ProcedureHandler::handle_register(kRealm(), RegisterMessage{1, {}, kProcedure}, callee).has_value());
 
     const WampList args = make_args(10);
@@ -280,7 +285,7 @@ TEST_CASE("bench: RPC round trip through the router", "[bench][handlers]") {
             }
         });
 
-        (void)ProcedureHandler::handle_yield(YieldMessage{invocation_id, {}, args, kw}, callee);
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation_id, {}, args, kw}, callee);
 
         bool delivered = false;
         caller_channel->try_receive([&](boost::system::error_code, EventToSend) { delivered = true; });
@@ -289,6 +294,6 @@ TEST_CASE("bench: RPC round trip through the router", "[bench][handlers]") {
 
     ProcedureHandler::cleanup_session(kRealm(), callee);
     ProcedureHandler::cleanup_session(kRealm(), caller);
-    EventChannelRegistry::remove(callee);
-    EventChannelRegistry::remove(caller);
+    test_shard().channels.remove(callee);
+    test_shard().channels.remove(caller);
 }

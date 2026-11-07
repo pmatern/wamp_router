@@ -55,10 +55,11 @@ using EventChannel = boost::asio::experimental::channel<void(boost::system::erro
 // ============================================================================
 // EventChannelRegistry - Manages event channels for active sessions
 // ============================================================================
+// One registry per Shard (see shard.hpp): it is owned by a single thread and not synchronized.
 // Each session has one bounded queue (router -> client). When a queue is full the configured
 // OverflowPolicy applies:
 //   DROP          - the event is discarded and counted.
-//   BACKPRESSURE  - the send is parked in a per-thread "blocked" list. The session coroutine that
+//   BACKPRESSURE  - the send is parked in a per-registry "blocked" list. The session coroutine that
 //                   triggered it takes the list right after processing its input and awaits
 //                   deliver_blocked(), so it stops reading its socket until the subscriber
 //                   catches up (TCP then pushes back on the sender). The wait is bounded by
@@ -89,52 +90,56 @@ struct BlockedSend {
 
 class EventChannelRegistry {
 public:
-    static void configure(const EventQueueConfig& config) {
-        settings() = config;
+    EventChannelRegistry() = default;
+    EventChannelRegistry(const EventChannelRegistry&) = delete;
+    EventChannelRegistry& operator=(const EventChannelRegistry&) = delete;
+
+    void configure(const EventQueueConfig& config) {
+        settings_ = config;
     }
 
-    [[nodiscard]] static const EventQueueConfig& config() {
-        return settings();
+    [[nodiscard]] const EventQueueConfig& config() {
+        return settings_;
     }
 
-    static std::shared_ptr<EventChannel> get_or_create(
+    std::shared_ptr<EventChannel> get_or_create(
         uint64_t session_id,
         boost::asio::io_context& io
     ) {
-        auto& channels = get_channels();
+        auto& channels = channels_;
 
         auto it = channels.find(session_id);
         if (it != channels.end()) {
             return it->second;
         }
 
-        auto channel = std::make_shared<EventChannel>(io, settings().size);
+        auto channel = std::make_shared<EventChannel>(io, settings_.size);
         channels[session_id] = channel;
 
-        spdlog::debug("Created event channel for session {} (capacity {})", session_id, settings().size);
+        spdlog::debug("Created event channel for session {} (capacity {})", session_id, settings_.size);
         return channel;
     }
 
-    static std::shared_ptr<EventChannel> find(uint64_t session_id) {
-        auto& channels = get_channels();
+    std::shared_ptr<EventChannel> find(uint64_t session_id) {
+        auto& channels = channels_;
         auto it = channels.find(session_id);
         return it != channels.end() ? it->second : nullptr;
     }
 
-    static void remove(uint64_t session_id) {
-        auto& channels = get_channels();
+    void remove(uint64_t session_id) {
+        auto& channels = channels_;
         auto it = channels.find(session_id);
         if (it != channels.end()) {
             it->second->close();
             channels.erase(it);
-            strikes().erase(session_id);
+            strikes_.erase(session_id);
             spdlog::debug("Removed event channel for session {}", session_id);
         }
     }
 
     // Non-blocking send; false if the session has no channel or its queue is full
-    static bool try_send(uint64_t session_id, EventToSend event) {
-        auto& channels = get_channels();
+    bool try_send(uint64_t session_id, EventToSend event) {
+        auto& channels = channels_;
         auto it = channels.find(session_id);
         if (it != channels.end()) {
             return it->second->try_send(boost::system::error_code{}, std::move(event));
@@ -144,7 +149,7 @@ public:
 
     // Queue an event for a session, applying the overflow policy if its queue is full.
     // may_defer=false forces DROP behaviour (for callers that cannot wait, e.g. disconnect cleanup).
-    static DeliveryResult deliver(uint64_t session_id, EventToSend event, bool may_defer = true) {
+    DeliveryResult deliver(uint64_t session_id, EventToSend event, bool may_defer = true) {
         auto channel = find(session_id);
         if (!channel || !channel->is_open()) {
             note_drop(session_id, "no open channel");
@@ -161,8 +166,8 @@ public:
             return DeliveryResult::DROPPED_FULL;
         }
 
-        if (may_defer && settings().overflow == OverflowPolicy::BACKPRESSURE) {
-            blocked_sends().push_back(BlockedSend{session_id, std::move(event)});
+        if (may_defer && settings_.overflow == OverflowPolicy::BACKPRESSURE) {
+            blocked_sends_.push_back(BlockedSend{session_id, std::move(event)});
             return DeliveryResult::DEFERRED;
         }
 
@@ -171,23 +176,23 @@ public:
     }
 
     // Hand over (and clear) the sends this thread parked since the last call
-    [[nodiscard]] static std::vector<BlockedSend> take_blocked() {
-        return std::exchange(blocked_sends(), {});
+    [[nodiscard]] std::vector<BlockedSend> take_blocked() {
+        return std::exchange(blocked_sends_, {});
     }
 
-    static void clear_blocked() {
-        blocked_sends().clear();
+    void clear_blocked() {
+        blocked_sends_.clear();
     }
 
     // Wait for room in each recipient's queue, in order. One deadline covers the whole batch;
     // sends still blocked when it expires are dropped and counted.
-    static boost::asio::awaitable<void> deliver_blocked(std::vector<BlockedSend> blocked) {
+    boost::asio::awaitable<void> deliver_blocked(std::vector<BlockedSend> blocked) {
         if (blocked.empty()) {
             co_return;
         }
 
         auto executor = co_await boost::asio::this_coro::executor;
-        boost::asio::steady_timer deadline{executor, settings().backpressure_timeout};
+        boost::asio::steady_timer deadline{executor, settings_.backpressure_timeout};
         bool expired = false;
 
         for (auto& send : blocked) {
@@ -220,69 +225,50 @@ public:
     }
 
     // True if the session has timed out slow_subscriber_limit waits in a row
-    [[nodiscard]] static bool is_slow(uint64_t session_id) {
-        const auto limit = settings().slow_subscriber_limit;
+    [[nodiscard]] bool is_slow(uint64_t session_id) {
+        const auto limit = settings_.slow_subscriber_limit;
         if (limit == 0) return false;
-        auto it = strikes().find(session_id);
-        return it != strikes().end() && it->second >= limit;
+        auto it = strikes_.find(session_id);
+        return it != strikes_.end() && it->second >= limit;
     }
 
     // Events dropped since startup (full queue under DROP, backpressure timeout, missing session)
-    [[nodiscard]] static uint64_t dropped_count() {
-        return dropped().load(std::memory_order_relaxed);
+    [[nodiscard]] uint64_t dropped_count() {
+        return dropped_.load(std::memory_order_relaxed);
     }
 
-    static void reset_dropped_count() {
-        dropped().store(0, std::memory_order_relaxed);
+    void reset_dropped_count() {
+        dropped_.store(0, std::memory_order_relaxed);
     }
 
 private:
-    static void add_strike(uint64_t session_id) {
-        const auto limit = settings().slow_subscriber_limit;
+    void add_strike(uint64_t session_id) {
+        const auto limit = settings_.slow_subscriber_limit;
         if (limit == 0) return;
-        if (++strikes()[session_id] == limit) {
+        if (++strikes_[session_id] == limit) {
             spdlog::warn("Session {} is a slow subscriber ({} backpressure timeouts in a row); "
                          "dropping its events while its queue is full", session_id, limit);
         }
     }
 
-    static void clear_strikes(uint64_t session_id) {
-        auto& s = strikes();
+    void clear_strikes(uint64_t session_id) {
+        auto& s = strikes_;
         if (!s.empty()) s.erase(session_id);
     }
 
-    static std::unordered_map<uint64_t, size_t>& strikes() {
-        static std::unordered_map<uint64_t, size_t> map;
-        return map;
-    }
-
     // Logs the first drop and then every 1000th so a stalled subscriber can't flood the log
-    static void note_drop(uint64_t session_id, const char* reason) {
-        const auto total = dropped().fetch_add(1, std::memory_order_relaxed) + 1;
+    void note_drop(uint64_t session_id, const char* reason) {
+        const auto total = dropped_.fetch_add(1, std::memory_order_relaxed) + 1;
         if (total == 1 || total % 1000 == 0) {
             spdlog::warn("Dropped event for session {} ({}); {} events dropped in total", session_id, reason, total);
         }
     }
 
-    static EventQueueConfig& settings() {
-        static EventQueueConfig config;
-        return config;
-    }
-
-    static std::atomic<uint64_t>& dropped() {
-        static std::atomic<uint64_t> count{0};
-        return count;
-    }
-
-    static std::vector<BlockedSend>& blocked_sends() {
-        static thread_local std::vector<BlockedSend> list;
-        return list;
-    }
-
-    static std::unordered_map<uint64_t, std::shared_ptr<EventChannel>>& get_channels() {
-        static std::unordered_map<uint64_t, std::shared_ptr<EventChannel>> channels;
-        return channels;
-    }
+    EventQueueConfig settings_;
+    std::atomic<uint64_t> dropped_{0};   // atomic so another thread can read the counter for metrics
+    std::vector<BlockedSend> blocked_sends_;
+    std::unordered_map<uint64_t, std::shared_ptr<EventChannel>> channels_;
+    std::unordered_map<uint64_t, size_t> strikes_;
 };
 
 } // namespace wamp

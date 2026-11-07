@@ -22,6 +22,12 @@
 
 using namespace wamp;
 
+// Routing state shared by the sessions and handlers a test builds by hand (one per test file)
+static Shard& test_shard() {
+    static Shard shard;
+    return shard;
+}
+
 TEST_CASE("Permissions: exact and prefix rules", "[authz]") {
     Permissions p;
     p.add_rule(Action::PUBLISH, "com.example.events", false);
@@ -164,7 +170,7 @@ TEST_CASE("Session enforces role permissions", "[authz][wamp_session]") {
     auto kp = make_keypair();
     boost::asio::io_context io;
     auto config = authz_config(kp.public_hex);
-    WampSession session{io, config};
+    WampSession session{io, config, test_shard()};
 
     auto welcome = establish(session, kp, "alice");
     REQUIRE(welcome.authrole == "user");
@@ -208,7 +214,7 @@ TEST_CASE("Authid without a role can connect but do nothing", "[authz][wamp_sess
     auto kp = make_keypair();
     boost::asio::io_context io;
     auto config = authz_config(kp.public_hex);
-    WampSession session{io, config};
+    WampSession session{io, config, test_shard()};
 
     auto welcome = establish(session, kp, "bob");
     REQUIRE(welcome.authrole == "none");
@@ -223,7 +229,7 @@ TEST_CASE("Without auth keys nothing is restricted", "[authz][wamp_session]") {
     boost::asio::io_context io;
     ServerConfig config;
     config.max_pending_invocations = 1000;
-    WampSession session{io, config};
+    WampSession session{io, config, test_shard()};
     session.on_connect();
 
     auto handshake = rawsocket::encode_handshake_request({
@@ -242,7 +248,7 @@ TEST_CASE("Session only admits authids to their allowed realms", "[authz][realm]
     boost::asio::io_context io;
     auto config = authz_config(kp.public_hex);
     config.auth_realms["alice"] = {"com.example.realm", "second.realm"};
-    WampSession session{io, config};
+    WampSession session{io, config, test_shard()};
 
     session.on_connect();
     auto handshake = rawsocket::encode_handshake_request({
@@ -272,7 +278,7 @@ TEST_CASE("An authid with no realm list cannot join anywhere", "[authz][realm][w
     boost::asio::io_context io;
     auto config = authz_config(kp.public_hex);
     config.auth_realms.erase("bob");
-    WampSession session{io, config};
+    WampSession session{io, config, test_shard()};
 
     session.on_connect();
     auto handshake = rawsocket::encode_handshake_request({
@@ -301,13 +307,13 @@ TEST_CASE("Roles can differ per realm", "[authz][realm][wamp_session]") {
     alice.by_realm["second.realm"] = "readonly";
     config.auth_roles["alice"] = alice;
 
-    WampSession first{io, config};
+    WampSession first{io, config, test_shard()};
     auto welcome1 = establish(first, kp, "alice", "com.example.realm");
     REQUIRE(welcome1.authrole == "user");
     REQUIRE(get_message_type_from_cbor(send(first, serialize_publish(
         PublishMessage{1, {{"acknowledge", true}}, "com.example.news"}))) == MessageType::PUBLISHED);
 
-    WampSession second{io, config};
+    WampSession second{io, config, test_shard()};
     auto welcome2 = establish(second, kp, "alice", "second.realm");
     REQUIRE(welcome2.authrole == "readonly");
     require_not_authorized(send(second, serialize_publish(
@@ -322,8 +328,8 @@ TEST_CASE("Authenticated sessions in different realms are isolated", "[authz][re
     auto config = authz_config(kp.public_hex);
     config.auth_realms["alice"] = {"com.example.realm", "second.realm"};
 
-    WampSession in_first{io, config};
-    WampSession in_second{io, config};
+    WampSession in_first{io, config, test_shard()};
+    WampSession in_second{io, config, test_shard()};
     auto w1 = establish(in_first, kp, "alice", "com.example.realm");
     auto w2 = establish(in_second, kp, "alice", "second.realm");
     REQUIRE(w1.session_id != w2.session_id);
@@ -333,14 +339,14 @@ TEST_CASE("Authenticated sessions in different realms are isolated", "[authz][re
 
     // Publishing the same topic from the other realm must not produce an EVENT for the first
     (void)send(in_second, serialize_publish(PublishMessage{1, {}, "com.example.news"}));
-    auto channel = EventChannelRegistry::find(w1.session_id);
+    auto channel = test_shard().channels.find(w1.session_id);
     REQUIRE(channel != nullptr);
     bool got_event = false;
     channel->try_receive([&](boost::system::error_code, EventToSend) { got_event = true; });
     REQUIRE_FALSE(got_event);
 
     // ...while a publish in its own realm does (alice is publisher-capable; use a second session)
-    WampSession publisher{io, config};
+    WampSession publisher{io, config, test_shard()};
     (void)establish(publisher, kp, "alice", "com.example.realm");
     (void)send(publisher, serialize_publish(PublishMessage{2, {}, "com.example.news"}));
     channel->try_receive([&](boost::system::error_code, EventToSend) { got_event = true; });
