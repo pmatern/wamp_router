@@ -23,6 +23,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/benchmark/catch_benchmark.hpp>
 #include <asio/io_context.hpp>
+#include <spdlog/sinks/null_sink.h>
 #include <spdlog/spdlog.h>
 #include "include/authorizer.hpp"
 #include "include/invocation_tracker.hpp"
@@ -151,6 +152,50 @@ TEST_CASE("bench: deserialize", "[bench][serializer]") {
 // ============================================================================
 // RawSocket framing
 // ============================================================================
+
+TEST_CASE("bench: malformed input", "[bench][serializer][malformed]") {
+    const WampList args = make_args(10);
+    const WampDict kw = make_kw();
+    const auto valid = serialize_call(CallMessage{1, {}, kProcedure, args, kw});
+
+    // Cut in the middle of the arguments: cbor::DecodeError is thrown and caught inside decode
+    const std::vector<uint8_t> truncated(valid.begin(), valid.begin() + static_cast<std::ptrdiff_t>(valid.size() / 2));
+    // Too few array elements: rejected before any field is read (no exception)
+    std::vector<uint8_t> short_array;
+    { cbor::Writer w{short_array}; w.write_array(2); w.write_uint(static_cast<uint64_t>(MessageType::CALL)); w.write_uint(1); }
+    // A text string where the request id should be: the extractor throws
+    std::vector<uint8_t> wrong_type;
+    {
+        cbor::Writer w{wrong_type};
+        w.write_array(5);
+        w.write_uint(static_cast<uint64_t>(MessageType::CALL));
+        w.write_text("not a number");
+        w.write_map(0);
+        w.write_text(kProcedure);
+        w.write_array(0);
+    }
+    // Not an array at all
+    const std::vector<uint8_t> garbage(64, 0xFF);
+
+    BENCHMARK("valid CALL (10 args + kw)") { return deserialize_call(valid); };
+    BENCHMARK("truncated CALL (exception)") { return deserialize_call(truncated); };
+    BENCHMARK("wrong field type (exception)") { return deserialize_call(wrong_type); };
+    BENCHMARK("short array (no exception)") { return deserialize_call(short_array); };
+    BENCHMARK("garbage bytes (no exception)") { return deserialize_call(garbage); };
+
+    // The same failures when the router logs them: an error line per malformed message, formatted and
+    // handed to a sink that discards it (the cost of the log call itself, async queue excluded)
+    auto previous = spdlog::default_logger();
+    auto null_logger = std::make_shared<spdlog::logger>("null", std::make_shared<spdlog::sinks::null_sink_mt>());
+    null_logger->set_level(spdlog::level::err);
+    spdlog::set_default_logger(null_logger);
+    BENCHMARK("truncated CALL, error line logged") {
+        auto r = deserialize_call(truncated);
+        spdlog::error("Failed to deserialize CALL");
+        return r;
+    };
+    spdlog::set_default_logger(previous);
+}
 
 TEST_CASE("bench: rawsocket framing", "[bench][rawsocket]") {
     const std::vector<uint8_t> small(128, 0xAB);

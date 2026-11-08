@@ -21,6 +21,10 @@ max_connections = "auto"
 # balancer or NAT, where many clients share one address.
 max_connections_per_ip = 0
 
+# A session that sends this many undecodable messages in a row (a good message resets the count) is
+# aborted with wamp.error.protocol_violation and closed. 0 = never.
+max_malformed_messages = 10
+
 [server.tls]
 # Path to TLS certificate (PEM format)
 cert = "/path/to/cert.pem"

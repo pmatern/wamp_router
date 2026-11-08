@@ -538,10 +538,38 @@ private:
         if (!wamp_session_established_) {
             // First WAMP message after RawSocket handshake - should be HELLO
             return handle_hello_message(payload);
-        } else {
-            // Session is active, handle various message types
-            return handle_established_message(payload);
         }
+        // Session is active, handle various message types. Any message that decodes resets the count of
+        // malformed ones in a row (see malformed()).
+        malformed_this_message_ = false;
+        auto result = handle_established_message(payload);
+        if (!malformed_this_message_) malformed_in_a_row_ = 0;
+        return result;
+    }
+
+    // A message of a known type that does not decode. The session carries on, but a client that keeps
+    // sending them is broken or hostile (each costs a decode failure and a log line), so after
+    // max_malformed_messages in a row it gets ABORT wamp.error.protocol_violation and is closed.
+    [[nodiscard]] std::span<const uint8_t> malformed(const char* message_type) {
+        malformed_this_message_ = true;
+        ++malformed_in_a_row_;
+        const auto limit = config_.max_malformed_messages;
+        if (limit != 0 && malformed_in_a_row_ >= limit) {
+            spdlog::warn("Closing session {}: {} malformed messages in a row (last: {})", session_id_,
+                         malformed_in_a_row_, message_type);
+            WampDict details{{"message", std::string{"Too many malformed messages"}}};
+            response_buffer_ = rawsocket::create_wamp_message(
+                serialize_abort(AbortMessage{std::move(details), "wamp.error.protocol_violation"}));
+            state_ = SessionProtocolState::SHUTTING_DOWN;
+            close_requested_ = true;
+            return std::span<const uint8_t>(response_buffer_);
+        }
+        if (malformed_in_a_row_ == 1) {
+            spdlog::warn("Malformed {} from session {}", message_type, session_id_);
+        } else {
+            spdlog::debug("Malformed {} from session {} ({} in a row)", message_type, session_id_, malformed_in_a_row_);
+        }
+        return std::span<const uint8_t>{};
     }
 
     [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> handle_hello_message(
@@ -762,8 +790,7 @@ private:
 
                 auto goodbye_result = deserialize_goodbye(cbor_payload);
                 if (!goodbye_result.has_value()) {
-                    spdlog::error("Failed to deserialize GOODBYE");
-                    return std::span<const uint8_t>{};
+                    return malformed("GOODBYE");
                 }
 
                 const auto& goodbye = *goodbye_result;
@@ -783,8 +810,7 @@ private:
 
                 auto subscribe_result = deserialize_subscribe(cbor_payload);
                 if (!subscribe_result.has_value()) {
-                    spdlog::error("Failed to deserialize SUBSCRIBE");
-                    return std::span<const uint8_t>{};
+                    return malformed("SUBSCRIBE");
                 }
 
                 if (!is_authorized(Action::SUBSCRIBE, subscribe_result->topic)) {
@@ -806,8 +832,7 @@ private:
 
                 auto publish_result = deserialize_publish(cbor_payload);
                 if (!publish_result.has_value()) {
-                    spdlog::error("Failed to deserialize PUBLISH");
-                    return std::span<const uint8_t>{};
+                    return malformed("PUBLISH");
                 }
 
                 if (!is_authorized(Action::PUBLISH, publish_result->topic)) {
@@ -835,8 +860,7 @@ private:
 
                 auto unsubscribe_result = deserialize_unsubscribe(cbor_payload);
                 if (!unsubscribe_result.has_value()) {
-                    spdlog::error("Failed to deserialize UNSUBSCRIBE");
-                    return std::span<const uint8_t>{};
+                    return malformed("UNSUBSCRIBE");
                 }
 
                 response_buffer_ = PubSubHandler::handle_unsubscribe(
@@ -853,8 +877,7 @@ private:
 
                 auto unregister_result = deserialize_unregister(cbor_payload);
                 if (!unregister_result.has_value()) {
-                    spdlog::error("Failed to deserialize UNREGISTER");
-                    return std::span<const uint8_t>{};
+                    return malformed("UNREGISTER");
                 }
 
                 auto handle_result = ProcedureHandler::handle_unregister(
@@ -877,8 +900,7 @@ private:
 
                 auto error_result = deserialize_error(cbor_payload);
                 if (!error_result.has_value()) {
-                    spdlog::error("Failed to deserialize ERROR");
-                    return std::span<const uint8_t>{};
+                    return malformed("ERROR");
                 }
 
                 // Only ERROR replies to INVOCATION are meaningful for a router
@@ -908,8 +930,7 @@ private:
 
                 auto register_result = deserialize_register(cbor_payload);
                 if (!register_result.has_value()) {
-                    spdlog::error("Failed to deserialize REGISTER");
-                    return std::span<const uint8_t>{};
+                    return malformed("REGISTER");
                 }
 
                 if (!is_authorized(Action::REGISTER, register_result->procedure)) {
@@ -937,8 +958,7 @@ private:
 
                 auto call_result = deserialize_call(cbor_payload);
                 if (!call_result.has_value()) {
-                    spdlog::error("Failed to deserialize CALL");
-                    return std::span<const uint8_t>{};
+                    return malformed("CALL");
                 }
 
                 if (!is_authorized(Action::CALL, call_result->procedure)) {
@@ -966,8 +986,7 @@ private:
 
                 auto yield_result = deserialize_yield(cbor_payload);
                 if (!yield_result.has_value()) {
-                    spdlog::error("Failed to deserialize YIELD");
-                    return std::span<const uint8_t>{};
+                    return malformed("YIELD");
                 }
 
                 auto handle_result = ProcedureHandler::handle_yield(
@@ -1026,6 +1045,10 @@ private:
     std::optional<ws::FrameParser> ws_parser_;
     bool ws_upgraded_{false};
     bool close_requested_{false};
+
+    // Malformed messages (known type, undecodable body) since the last good one, see malformed()
+    size_t malformed_in_a_row_{0};
+    bool malformed_this_message_{false};
 
     // RawSocket parameters
     std::optional<rawsocket::Serializer> serializer_;

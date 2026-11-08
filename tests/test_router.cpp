@@ -802,6 +802,30 @@ struct BareConnection {
 
     void send(std::span<const uint8_t> data) { asio::write(socket, asio::buffer(data.data(), data.size())); }
 
+    // Exactly n bytes, or fewer if the peer closes / the time runs out
+    std::vector<uint8_t> read_n(size_t n, std::chrono::milliseconds timeout = 3s) {
+        std::vector<uint8_t> out;
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (out.size() < n && std::chrono::steady_clock::now() < deadline) {
+            pollfd p{socket.native_handle(), POLLIN, 0};
+            if (::poll(&p, 1, 50) <= 0) continue;
+            uint8_t buf[512];
+            std::error_code ec;
+            const auto got = socket.read_some(asio::buffer(buf, std::min(sizeof buf, n - out.size())), ec);
+            if (ec || got == 0) break;
+            out.insert(out.end(), buf, buf + got);
+        }
+        return out;
+    }
+
+    // One RawSocket frame's payload (empty if none arrives)
+    std::vector<uint8_t> read_frame(std::chrono::milliseconds timeout = 3s) {
+        auto header = read_n(4, timeout);
+        if (header.size() < 4) return {};
+        const size_t length = (size_t{header[1]} << 16) | (size_t{header[2]} << 8) | header[3];   // byte 0 is the frame type
+        return read_n(length, timeout);
+    }
+
     bool closed_within(std::chrono::milliseconds timeout) {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
@@ -1027,4 +1051,94 @@ TEST_CASE("Established sessions count against the limit and free it when they en
     CHECK(router.open_connections() == 0);
     WsTestClient again;
     CHECK(ws_join(again, router.port()));
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Malformed messages
+// ---------------------------------------------------------------------------------------------------
+namespace {
+
+// A SUBSCRIBE whose body does not decode (the request id is text)
+std::vector<uint8_t> bad_subscribe() {
+    std::vector<uint8_t> out;
+    cbor::Writer w{out};
+    w.write_array(4);
+    w.write_uint(static_cast<uint64_t>(MessageType::SUBSCRIBE));
+    w.write_text("not a request id");
+    w.write_map(0);
+    w.write_text("some.topic");
+    return out;
+}
+
+// Connects over RawSocket and joins; returns the connection ready for WAMP messages
+std::unique_ptr<BareConnection> raw_join(unsigned short port) {
+    auto c = std::make_unique<BareConnection>(port);
+    c->send(rawsocket::encode_handshake_request({.max_length = rawsocket::MaxLengthCode::BYTES_16M,
+                                                 .serializer = rawsocket::Serializer::CBOR}));
+    if (c->read_n(4).size() != 4) return nullptr;
+    c->send(rawsocket::create_wamp_message(serialize_hello(HelloMessage{"test.realm"})));
+    auto welcome = c->read_frame();
+    auto type = get_message_type_from_cbor(welcome);
+    if (!type || *type != MessageType::WELCOME) return nullptr;
+    return c;
+}
+
+bool raw_subscribe_works(BareConnection& c, uint64_t request_id) {
+    c.send(rawsocket::create_wamp_message(serialize_subscribe(SubscribeMessage{request_id, {}, "good.topic"})));
+    auto reply = c.read_frame();
+    auto type = get_message_type_from_cbor(reply);
+    return type && *type == MessageType::SUBSCRIBED;
+}
+
+}  // namespace
+
+TEST_CASE("A session that keeps sending undecodable messages is aborted and closed", "[router][malformed]") {
+    auto config = plain_config();
+    config.max_malformed_messages = 3;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    SECTION("RawSocket: ABORT wamp.error.protocol_violation, then the connection closes") {
+        auto c = raw_join(router.port());
+        REQUIRE(c);
+        for (int i = 0; i < 3; ++i) c->send(rawsocket::create_wamp_message(bad_subscribe()));
+        auto abort_frame = c->read_frame();
+        auto type = get_message_type_from_cbor(abort_frame);
+        REQUIRE(type);
+        CHECK(*type == MessageType::ABORT);
+        CHECK(deserialize_abort(abort_frame)->reason == "wamp.error.protocol_violation");
+        CHECK(c->closed_within(2s));
+    }
+    SECTION("good messages in between reset the count") {
+        auto c = raw_join(router.port());
+        REQUIRE(c);
+        for (int round = 0; round < 4; ++round) {
+            c->send(rawsocket::create_wamp_message(bad_subscribe()));
+            c->send(rawsocket::create_wamp_message(bad_subscribe()));
+            REQUIRE(raw_subscribe_works(*c, 100 + static_cast<uint64_t>(round)));   // still alive after 2 in a row
+        }
+    }
+    SECTION("WebSocket: ABORT, then a close frame") {
+        WsTestClient ws;
+        REQUIRE(ws_join(ws, router.port()));
+        for (int i = 0; i < 3; ++i) ws.send_binary(bad_subscribe());
+        auto abort_frame = ws_expect(ws, MessageType::ABORT);
+        REQUIRE(abort_frame);
+        auto close = ws.read_frame();
+        REQUIRE(close);
+        CHECK(close->opcode == 0x8);
+        CHECK(ws.closed_by_peer());
+    }
+}
+
+TEST_CASE("max_malformed_messages = 0 never closes the session", "[router][malformed]") {
+    auto config = plain_config();
+    config.max_malformed_messages = 0;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    auto c = raw_join(router.port());
+    REQUIRE(c);
+    for (int i = 0; i < 100; ++i) c->send(rawsocket::create_wamp_message(bad_subscribe()));
+    CHECK(raw_subscribe_works(*c, 7));
 }

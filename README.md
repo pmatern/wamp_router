@@ -55,6 +55,7 @@ threads = 1   # router threads, one shard each; "auto" = one per available CPU (
 handshake_timeout_ms = 10000   # a new connection must become a session (TLS, handshake, HELLO, auth) in this time; 0 = no limit
 max_connections = "auto"       # open connections allowed; "auto" = open-file limit minus a reserve, 0 = no limit
 max_connections_per_ip = 0     # per client address, 0 = no limit (leave off behind a proxy or NAT)
+max_malformed_messages = 10    # undecodable messages in a row before a session is aborted; 0 = never
 
 [server.tls]
 cert = "test_certs/cert.pem"
@@ -271,6 +272,10 @@ A client that connects and then sends nothing (or trickles bytes) would otherwis
 ### Connection limits
 
 `[server] max_connections` caps open connections (default `"auto"`: the process's open-file limit minus a reserve of 128; the router raises that limit to the hard limit at startup, and an integer or `0` for unlimited overrides it). `max_connections_per_ip` caps connections from one client address (default 0 = off; behind a proxy, load balancer or NAT every client shares an address, so leave it off there). A connection over a limit is closed immediately at accept, without a reply, and counted (`Router::rejected_connections()`, logged at shutdown, and the first rejection plus every 1,000th are logged as a warning). Limits count a connection from accept until its session ends, so connections still in the handshake count too. If the process does run out of descriptors anyway, the acceptor logs once per 1,000 errors and retries every 100 ms instead of spinning.
+
+### Malformed messages
+
+A message of a known type whose body does not decode (wrong field types, truncated) is dropped and the session carries on, but a client that keeps sending them is broken or hostile. After `[server] max_malformed_messages` of them in a row (default 10; any message that decodes resets the count; 0 = never) the router sends `ABORT wamp.error.protocol_violation` and closes the connection (WebSocket: a close frame follows). Only the first malformed message of a run is logged at warning level, the rest at debug. Decoding a bad message is not cheaper than a good one: the decoder reports failures with exceptions, which costs about 4-10 µs per message against 0.8 µs for a valid CALL (`wamp_bench "bench: malformed input"`). That is in the same range as the router's CPU cost per valid call, so malformed traffic is no better a denial-of-service lever than valid traffic; the limit above keeps one connection from sending it indefinitely.
 
 ### Authentication
 

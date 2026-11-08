@@ -30,6 +30,10 @@ Everything inside the router (handlers, `EventTemplate`, cross-shard frames) bui
 
 The acceptor thread asks a `ConnectionLimiter` (a mutex-protected total plus per-address counts, `connection_limiter.hpp`) before it hands a socket to a shard, and the shard's session releases the slot when it ends. The mutex is taken twice per connection lifetime and never on the message path. Over a limit, the socket is closed at once and a counter is bumped. `[server] max_connections` defaults to "auto" (open-file limit minus 128; `main` raises the soft limit to the hard limit first). Accept errors such as EMFILE back off for 100 ms instead of spinning.
 
+### Malformed messages
+
+`WampSession::malformed()` counts messages of a known type that fail to decode; a message that decodes resets the count. At `[server] max_malformed_messages` in a row the session gets `ABORT wamp.error.protocol_violation` and `should_close()` makes the reader close after writing it (WebSocket sends a close frame as well). Decode failures are reported by exceptions inside `fast::decode` and cost about 4-10 µs against 0.8 µs for a valid message; this was measured and the decoder was left as is.
+
 ### Stalled connections
 
 `handle_wamp_session` arms a timer when a connection starts (`[server] handshake_timeout_ms`, default 10 s). If the session is not established when it fires (TLS handshake, RawSocket/WebSocket handshake, HELLO and authentication all count), it closes the socket, which fails whatever read or handshake the session coroutine is waiting in, and bumps `Shard::counters.handshake_timeouts`. The deadline is for the whole path, so trickling bytes does not extend it. Established sessions cancel the timer and may idle indefinitely.

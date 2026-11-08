@@ -825,3 +825,23 @@ key = ")" + key.path().string() + R"("
         CHECK_FALSE(load("max_connections_per_ip = -3\n").has_value());
     }
 }
+
+TEST_CASE("Config::load() max_malformed_messages", "[config][malformed]") {
+    TempCertFile cert("cert");
+    TempCertFile key("key");
+    auto load = [&](const std::string& server_line) {
+        std::string content = "[server]\nport = 8080\n" + server_line + R"(
+[server.tls]
+cert = ")" + cert.path().string() + R"("
+key = ")" + key.path().string() + R"("
+)";
+        TempConfigFile config(content);
+        return wamp::Config::load(config.path());
+    };
+
+    CHECK(load("")->max_malformed_messages == 10);
+    CHECK(load("max_malformed_messages = 3\n")->max_malformed_messages == 3);
+    CHECK(load("max_malformed_messages = 0\n")->max_malformed_messages == 0);
+    CHECK_FALSE(load("max_malformed_messages = -1\n").has_value());
+    CHECK_FALSE(load("max_malformed_messages = \"many\"\n").has_value());
+}

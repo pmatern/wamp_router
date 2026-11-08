@@ -156,6 +156,9 @@ struct ServerConfig {
     // behind a proxy or NAT every client shares an address, so leave it off there).
     std::optional<size_t> max_connections;
     size_t max_connections_per_ip{0};
+    // A session that sends this many undecodable messages in a row (a good one resets the count) is aborted
+    // with wamp.error.protocol_violation and closed. 0 = never.
+    size_t max_malformed_messages{10};
     size_t max_pending_invocations{};
     std::chrono::milliseconds call_timeout{30000};  // 0 disables
     EventQueueConfig events{};
@@ -242,6 +245,14 @@ public:
                     spdlog::error("[server] max_connections must be \"auto\" or an integer >= 0 (0 = unlimited)");
                     return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
                 }
+            }
+            if (server.contains("max_malformed_messages")) {
+                const auto value = toml::find<int64_t>(server, "max_malformed_messages");
+                if (value < 0) {
+                    spdlog::error("[server] max_malformed_messages must be 0 (never close) or greater");
+                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                }
+                config.max_malformed_messages = static_cast<size_t>(value);
             }
             if (server.contains("max_connections_per_ip")) {
                 const auto value = toml::find<int64_t>(server, "max_connections_per_ip");
