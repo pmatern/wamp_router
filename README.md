@@ -1,6 +1,6 @@
 # WAMP Router
 
-A header only C++23 implementation of a [WAMP](https://wamp-proto.org/) (Web Application Messaging Protocol) router using RawSocket transport with CBOR serialization.
+A header only C++23 implementation of a [WAMP](https://wamp-proto.org/) (Web Application Messaging Protocol) router using CBOR serialization over RawSocket or WebSocket (`wamp.2.cbor`) transport, on one port.
 
 ## What is WAMP?
 
@@ -14,7 +14,7 @@ This router acts as the central message broker, routing messages between clients
 
 - **RPC Support**: Full `CALL`, `REGISTER`, `YIELD`, `INVOCATION`, `RESULT` workflow
 - **PubSub Support**: `SUBSCRIBE`, `PUBLISH`, `EVENT` messaging
-- **RawSocket Transport**: Binary TCP protocol (not WebSocket)
+- **RawSocket and WebSocket Transport**: both on the same port, told apart by the first byte of the connection (WebSocket uses the `wamp.2.cbor` subprotocol; JSON and MessagePack are not supported yet)
 - **CBOR Serialization**: Compact binary message format
 - **TLS 1.3 Support**: Encrypted transport with optional client certificates
 - **WAMP-Cryptosign Authentication**: Ed25519 signature-based authentication
@@ -62,6 +62,11 @@ key = "test_certs/key.pem"
 [server.rpc]
 max_pending_invocations = 10000
 call_timeout_ms = 30000   # callee answer deadline, 0 = none; a CALL's "timeout" option overrides it
+
+[server.websocket]
+enabled = true            # accept WebSocket (wamp.2.cbor) upgrades on the same port
+allowed_origins = []      # empty = any origin; otherwise a request with an Origin header must match one entry exactly
+# max_message_size = 16777215   # bytes (the maximum)
 
 # Per-session event queue and overflow policy: see "Event queue and backpressure" below
 # [server.events]
@@ -238,13 +243,23 @@ ctest --test-dir build-local --output-on-failure
 
 ## Connecting Clients
 
-The router uses WAMP RawSocket transport with CBOR serialization over TLS 1.3:
+The router uses CBOR serialization over TLS 1.3, with either WAMP RawSocket or WebSocket transport. Both are served on the same port; the router looks at the first byte of each connection (`0x7F` = RawSocket, `G` of `GET` = WebSocket upgrade):
 
 - **Protocol**: WAMP v2
-- **Transport**: RawSocket over TLS 1.3 (TCP)
-- **Serializer**: CBOR (not JSON)
+- **Transport**: RawSocket, or WebSocket (RFC 6455, subprotocol `wamp.2.cbor`), over TLS 1.3 (TCP)
+- **Serializer**: CBOR only (JSON and MessagePack are not supported yet)
 - **Default Port**: Configured in config.toml (typically 8080)
 - **Authentication**: WAMP-Cryptosign with Ed25519 signatures (optional)
+
+### WebSocket
+
+A client opens a normal WebSocket connection (`ws://` or, with TLS, `wss://`; any path) and offers the `wamp.2.cbor` subprotocol. Each WAMP message is one binary WebSocket message. Behavior:
+
+- **Handshake:** the router answers `101` with `Sec-WebSocket-Protocol: wamp.2.cbor`. Requests that do not offer that subprotocol get `400`, a version other than 13 gets `426`, and a disallowed origin gets `403`; the connection is then closed.
+- **Origin check:** browsers send an `Origin` header and cannot be stopped from opening connections to any host, so set `[server.websocket] allowed_origins` to the sites that may use the router. A request with an `Origin` that is not on the list is refused; requests without one (non-browser clients) are accepted. An empty list accepts any origin.
+- **Frames:** fragmented messages are reassembled, pings are answered with pongs, and a client close frame is echoed before the connection is closed. After a WAMP GOODBYE the router sends a close frame. Client frames must be masked and use no extensions (no `permessage-deflate`); text frames are refused with close code 1003 because they belong to `wamp.2.json`.
+- **Limits:** a message may be at most `max_message_size` bytes (default and maximum 16,777,215, the same limit as RawSocket). The router does not send pings of its own.
+- **Everything else is shared:** authentication, realms, authorization and routing are identical to RawSocket, and WebSocket and RawSocket sessions see each other's events and calls, also across shards.
 
 ### Authentication
 
@@ -339,7 +354,7 @@ runner = ApplicationRunner(
 runner.run(MyComponent)
 ```
 
-Output:
+To use WebSocket instead, change only the URL to `wss://localhost:8080/ws` (also run and verified; the router logs `WebSocket upgrade complete`). Output:
 
 ```
 Authenticated as admin (role admin)
@@ -448,7 +463,7 @@ Dropped events are counted (`EventChannelRegistry::dropped_count()`) and logged 
 5. **Event Channels**: `asio::experimental::channel` for efficient message delivery
 6. **Thread per shard**: `[server] threads` runs that many shards, each with its own `io_context` and routing state (default 1); sessions on different shards still reach each other (pub/sub and RPC are routed across shards) (see [docs/architecture.md](docs/architecture.md))
 7. **Session-per-Coroutine**: Each client connection is a coroutine
-8. **RawSocket Transport**: Binary TCP framing (4-byte header + payload)
+8. **RawSocket and WebSocket Transport**: RawSocket is binary TCP framing (4-byte header + payload); WebSocket (`include/websocket.hpp`) is detected on the same port by the first byte. The router builds every outgoing message in RawSocket framing and a WebSocket session re-wraps it as a binary message when writing (the payload bytes are shared, not copied)
 9. **CBOR Serialization**: Compact binary format, direct codec in `include/cbor.hpp`
 
 ### Message Flow

@@ -52,7 +52,8 @@ Do the protocol gaps (arguments forwarding in particular) first so benchmarks me
 ## Backlog
 - [x] Roles and authorization per authid: `[auth.roles]` + `[[roles.<name>.rules]]` (exact/prefix URIs; call, register, publish, subscribe), default-deny once `[auth.keys]` is set, `wamp.error.not_authorized`. Not done: wildcard URI patterns, reloading permissions without a restart.
 - [x] Realm support: Cryptosign signs the raw challenge bytes as the spec does; subscriptions and registrations are isolated per realm (`Realm` in `include/realm.hpp`, one pair of managers per realm, cached by the session; the invocation tracker and event channels stay global); `[auth.realms]` lists the realms each authid may join; `[auth.roles]` may give a role per realm. For the threading review: a `Realm` is the natural shard unit.
-- [ ] WebSocket transport; JSON and MessagePack serializers.
+- [x] WebSocket transport (`include/websocket.hpp`, `wamp.2.cbor` only): same port as RawSocket, detected by the first byte; upgrade validation with an origin allow-list (`[server.websocket]`), fragmentation, ping/pong, close handshake; tests in `tests/test_websocket.cpp` and `tests/test_router.cpp`; verified with Autobahn|Python over `wss://`. No permessage-deflate, no router-initiated pings (not needed yet).
+- [ ] JSON (`wamp.2.json`, WebSocket text frames) and MessagePack (`wamp.2.msgpack`) serializers. The CBOR codec is used directly by `wamp_serializer.hpp`, `WampSession` and the handlers (`get_message_type_from_cbor`, `serialize_*`), and `EventTemplate` splices CBOR bytes by layout, so this needs a serializer seam (per-session codec) and a JSON `EventTemplate`; RawSocket would also need to accept serializer 1 (JSON) / 2 (MessagePack) in its handshake.
 - [ ] Pattern-based subscriptions/registrations, call cancellation, progressive results.
 
 ## Dependencies (after Stage 0)
