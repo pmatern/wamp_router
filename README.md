@@ -27,8 +27,7 @@ This router acts as the central message broker, routing messages between clients
 
 - **Asio** (standalone): Asynchronous networking and coroutines
 - **OpenSSL**: TLS 1.3 support and Ed25519 cryptography
-- **nlohmann-json**: CBOR serialization
-- **fmt**: String formatting
+- **nlohmann-json**: tests only, as an independent oracle for the CBOR codec (`include/cbor.hpp`)
 - **spdlog**: Structured logging
 - **toml11**: TOML configuration parsing
 - **Catch2**: Unit testing framework
@@ -417,7 +416,7 @@ Dropped events are counted (`EventChannelRegistry::dropped_count()`) and logged 
 6. **Thread per shard**: `[server] threads` runs that many shards, each with its own `io_context` and routing state (default 1); sessions on different shards still reach each other (pub/sub and RPC are routed across shards) (see docs/threading-analysis.md)
 7. **Session-per-Coroutine**: Each client connection is a coroutine
 8. **RawSocket Transport**: Binary TCP framing (4-byte header + payload)
-9. **CBOR Serialization**: Compact binary format via nlohmann-json
+9. **CBOR Serialization**: Compact binary format, direct codec in `include/cbor.hpp`
 
 ### Message Flow
 

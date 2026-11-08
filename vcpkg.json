@@ -1,5 +1,5 @@
 {
-  "name": "tcp-echo-server",
+  "name": "wamp-router",
   "version": "0.1.0",
   "dependencies": [
     "asio",

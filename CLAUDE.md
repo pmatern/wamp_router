@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a C++23 WAMP (Web Application Messaging Protocol) router implementation using RawSocket transport with CBOR serialization. The project runs inside a Docker container (`cpp23-builder`) that provides Clang 18+, CMake, Ninja, and vcpkg for dependency management.
 
-**Key Architecture**: Single-threaded asynchronous I/O using C++20 coroutines with standalone Asio (no Boost). The router implements the WAMP protocol's core features: RPC (CALL/REGISTER/YIELD) and PubSub (PUBLISH/SUBSCRIBE/EVENT). The architecture uses `awaitable` coroutines and concurrent operations via `parallel_group` for handling both socket I/O and event channel notifications.
+**Key Architecture**: Thread-per-core, shared-nothing asynchronous I/O (N shard threads, default 1, plus an acceptor thread; see `docs/architecture.md`) using C++20 coroutines with standalone Asio (no Boost). The router implements the WAMP protocol's core features: RPC (CALL/REGISTER/YIELD) and PubSub (PUBLISH/SUBSCRIBE/EVENT). The architecture uses `awaitable` coroutines and concurrent operations via `parallel_group` for handling both socket I/O and event channel notifications.
 
 **Outstanding work:** see [TODO.md](TODO.md) for the prioritized task list. Update it as items are completed.
 
@@ -246,6 +246,8 @@ wamp_router/
 ├── config/                    # Configuration templates
 │   ├── clang-format          # Clang-format template
 │   └── vcpkg-baseline.json   # vcpkg version pinning
+├── docs/                      # architecture.md (threads, coordination), threading-analysis.md (profile, measurements)
+├── bench/                     # wamp_bench, wamp_load, wamp_profile_router, wamp_handoff_bench, wamp_tls_probe
 ├── scripts/                   # Docker wrapper scripts and utilities
 │   ├── build.sh              # Build Docker image
 │   ├── cmake-build.sh        # Configure and build project
@@ -295,7 +297,16 @@ wamp_router/
     ├── test_procedure_handler.cpp
     ├── test_config.cpp
     ├── test_wamp_client.cpp
-    └── test_integration.cpp
+    ├── test_integration.cpp
+    ├── test_protocol_gaps.cpp
+    ├── test_event_queue.cpp
+    ├── test_authorization.cpp
+    ├── test_router.cpp
+    ├── test_logging.cpp
+    ├── test_cpu_limits.cpp
+    ├── test_cbor.cpp
+    ├── test_realms.cpp
+    └── test_crypto_utils.cpp
 ```
 
 ## Code Architecture
@@ -488,10 +499,10 @@ The router uses TOML configuration files (config.toml or test_config.toml) for a
 - Optional authentication keys for WAMP-Cryptosign, plus `[auth.roles]` / `[[roles.<name>.rules]]` authorization (default-deny once keys exist; see `include/authorizer.hpp`)
 
 ### Performance Considerations
-- **Single-threaded**: Currently runs on single io_context thread. For multi-threading, create thread pool calling `io_context.run()`
+- **Threads**: `[server] threads` shards, each one thread with its own `io_context` and `Shard`; no shared routing state, cross-shard traffic goes through `ShardGroup` (`docs/architecture.md`)
 - **Buffer sizes**: 8KB buffers in handle_wamp_session. Adjust for large payloads
 - **Event channels**: One bounded channel per session (`[server.events] queue_size`, default 100). When a queue is full, `overflow = "backpressure"` (default) suspends the sending session until the subscriber drains it (bounded by `backpressure_timeout_ms`), `"drop"` discards and counts the event. See `EventChannelRegistry` in `event_channel.hpp`.
-- **ID generation**: Atomic counters, lock-free
+- **ID generation**: Per-shard generators (`Shard::ids`); session and publication ids are random global-scope ids, the rest sequential per shard
 
 ## Testing
 
@@ -513,6 +524,7 @@ Tests use Catch2 framework with CTest integration:
 - **test_cbor.cpp**: Direct CBOR codec vs nlohmann (byte-identical output, decoding, malformed/fuzzed input)
 - **test_realms.cpp**: Realm isolation of topics and procedures
 - **test_crypto_utils.cpp**: Ed25519 signature verification and challenge generation
+- **test_logging.cpp**: Async logger (slow sink does not stall the caller), shard tag on log lines
 
 ### Benchmarks
 
@@ -529,7 +541,7 @@ Run specific test: `./scripts/run.sh ./build/wamp_tests "[test name]"`
 - **Port Mapping**: When using Docker, use `-p` flag with run.sh to expose container ports (e.g., `-p 8080:8080`)
 - **vcpkg Manifest Mode**: Uses manifest mode (vcpkg.json), not classic mode
 - **Coroutine Requirement**: C++20 coroutines required (Clang 18+ or compatible compiler)
-- **Single-threaded**: io_context runs on main thread; handlers must not block
+- **One thread per shard**: a shard's state is touched only by its own thread, and handlers must not block; anything cross-shard goes through `ShardGroup`
 - **Build Directories**:
   - `build/`: Docker container builds (Clang 18 + libc++)
   - `build-local/`: Local machine builds (when using CMake presets directly)
