@@ -494,3 +494,40 @@ TEST_CASE("Router::stats() counts work per shard and stop() leaves the inboxes e
     router.stop();
     REQUIRE(router.stats()[1].inbox_depth == 0);
 }
+
+TEST_CASE("stop() delivers cross-shard messages that are still queued", "[router][crossshard]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    asio::io_context io;
+    WampClient publisher{io};   // shard 0
+    WampClient subscriber{io};  // shard 1
+    constexpr int kEvents = 2000;   // below the high-water mark, so the publisher is never slowed
+    bool published = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await publisher.connect("127.0.0.1", router.port(), "test.realm");
+        co_await subscriber.connect("127.0.0.1", router.port(), "test.realm");
+        co_await subscriber.subscribe("drain.t", [](const EventMessage&) {});
+
+        router.post_to_shard(1, [] { std::this_thread::sleep_for(1s); });   // shard 1 cannot drain its inbox
+        for (int n = 0; n < kEvents; ++n) {
+            (void)co_await publisher.publish("drain.t", WampList{int64_t{n}}, {}, /*acknowledge=*/false);
+        }
+        published = true;
+        io.stop();
+    }, detached);
+    io.run_for(10s);
+    REQUIRE(published);
+    for (int i = 0; i < 20 && router.stats()[0].publishes < kEvents; ++i) std::this_thread::sleep_for(10ms);
+
+    const auto before = router.stats();
+    REQUIRE(before[0].publishes == kEvents);
+    REQUIRE(before[1].inbox_depth > 0);   // still queued behind the stalled shard
+
+    router.stop();                        // must wait for them
+    const auto after = router.stats();
+    CHECK(after[1].inbox_received == kEvents);
+    CHECK(after[1].inbox_depth == 0);
+    CHECK(after[1].inbox_dropped == 0);
+}

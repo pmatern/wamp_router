@@ -140,6 +140,12 @@ public:
         });
     }
 
+    // Runs `fn` on shard `index`'s thread (tests use it to stall a shard)
+    template<typename F>
+    void post_to_shard(size_t index, F&& fn) {
+        asio::post(workers_.at(index)->io, std::forward<F>(fn));
+    }
+
     [[nodiscard]] unsigned short port() const { return bound_port_; }
     [[nodiscard]] size_t shard_count() const { return workers_.size(); }
 
