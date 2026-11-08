@@ -283,59 +283,68 @@ match = "prefix"          # "exact" (default) or "prefix"
 allow = ["call", "publish", "subscribe"]   # also: "register"
 ```
 
-Access is default-deny: SUBSCRIBE, PUBLISH, REGISTER and CALL need a matching rule, and denied requests get `wamp.error.not_authorized`. An unacknowledged PUBLISH that is denied gets no reply, as the WAMP spec requires. An authid with no role can connect but cannot do anything. The role name is reported as `authrole` in WELCOME. With authentication disabled nothing is restricted. A permission check costs roughly 25-70 ns.
+Access is default-deny: SUBSCRIBE, PUBLISH, REGISTER and CALL need a matching rule, and denied requests get `wamp.error.not_authorized`. An unacknowledged PUBLISH that is denied gets no reply, as the WAMP spec requires. An authid with no role can connect but cannot do anything. The role name is reported as `authrole` in WELCOME. With authentication disabled nothing is restricted. A permission check costs roughly 25-40 ns.
 
 ### Example: Python Client (with authentication)
 
-Illustrative only: it has not been run against this router, and the `rawsocket://` URL and transport setup depend on your Autobahn version. The router needs RawSocket framing, CBOR and TLS 1.3 from the client.
+Tested with Autobahn|Python 24.4.2 (Twisted) against this router (port 8080, run from the repository root), using the keys, realms and roles from `config.toml` (`admin` may register and call in `realm1`) and the certificate from `scripts/gen-test-certs.sh`. The private key is the public RFC 8032 test key behind `config.toml`'s `admin` entry; never use it outside testing. Install with `pip install "autobahn[twisted,serialization,encryption]" pynacl`. Autobahn speaks RawSocket through the `rs://` (plain) and `rss://` (TLS) URL schemes.
 
 ```python
+from autobahn.twisted.util import sleep
 from autobahn.twisted.wamp import ApplicationSession, ApplicationRunner
+from autobahn.wamp.serializer import CBORSerializer
+from autobahn.wamp.types import PublishOptions
 from nacl.signing import SigningKey
-from nacl.encoding import HexEncoder
+from twisted.internet import reactor
+from twisted.internet.ssl import Certificate, CertificateOptions
+
+# The Ed25519 private key (32-byte seed) whose public key is configured under [auth.keys]
+SEED = bytes.fromhex("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")
 
 class MyComponent(ApplicationSession):
-    def __init__(self, config):
-        super().__init__(config)
-        # Load Ed25519 private key
-        self.signing_key = SigningKey(
-            b'your_32_byte_private_key_here',  # 32 bytes
-            encoder=HexEncoder
-        )
+    def onConnect(self):
+        self.join(self.config.realm, authmethods=["cryptosign"], authid="admin")
 
     def onChallenge(self, challenge):
         if challenge.method == "cryptosign":
-            # Sign the raw challenge bytes (the 32 bytes behind the hex string)
-            challenge = bytes.fromhex(challenge.extra["challenge"])
-            return self.signing_key.sign(challenge).signature.hex()
+            # Sign the raw challenge bytes (the 32 bytes behind the hex string); reply with the hex signature
+            raw = bytes.fromhex(challenge.extra["challenge"])
+            return SigningKey(SEED).sign(raw).signature.hex()
 
     async def onJoin(self, details):
-        print(f"Authenticated as: {details.authid}")
+        print(f"Authenticated as {details.authid} (role {details.authrole})")
 
-        # Subscribe to a topic
-        def on_event(msg):
-            print(f"Got event: {msg}")
+        await self.subscribe(lambda msg: print(f"Got event: {msg}"), "com.example.topic")
+        self.publish("com.example.topic", "Hello WAMP!", options=PublishOptions(exclude_me=False))
 
-        await self.subscribe(on_event, 'com.example.topic')
+        await self.register(lambda a, b: a + b, "com.example.add")
+        print(f"Result: {await self.call('com.example.add', 2, 3)}")
 
-        # Publish to a topic
-        self.publish('com.example.topic', 'Hello WAMP!')
+        await sleep(0.2)
+        self.leave()
 
-        # Call a remote procedure
-        result = await self.call('com.example.add', 2, 3)
-        print(f"Result: {result}")
+    def onLeave(self, details):
+        reactor.stop()
+
+# Trust the router's certificate (here the self-signed one from scripts/gen-test-certs.sh)
+with open("test_certs/cert.pem") as f:
+    ssl = CertificateOptions(trustRoot=Certificate.loadPEM(f.read()))
 
 runner = ApplicationRunner(
-    url="rawsocket://localhost:8080",  # RawSocket over TLS
-    realm="com.example.realm",
-    serializers=['cbor'],
-    authentication={
-        'cryptosign': {
-            'authid': 'user1'
-        }
-    }
+    url="rss://localhost:8080",   # RawSocket over TLS ("rs://" is RawSocket without TLS)
+    realm="realm1",
+    serializers=[CBORSerializer()],
+    ssl=ssl,
 )
 runner.run(MyComponent)
+```
+
+Output:
+
+```
+Authenticated as admin (role admin)
+Got event: Hello WAMP!
+Result: 5
 ```
 
 ## Benchmarks
@@ -352,19 +361,19 @@ Baseline (Release, Intel i7-1068NG7 @ 2.3 GHz, single thread, mean of 50 samples
 
 | Benchmark | Mean |
 |---|---|
-| Serialize CALL / EVENT, no args | 60 ns / 47 ns (was 0.62 / 0.50 µs) |
-| Serialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 0.27 – 0.38 µs (was 1.9 – 2.8 µs) |
-| Deserialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 0.82 – 0.93 µs (was 4.5 – 5.1 µs); message type peek 13 ns |
-| RawSocket frame 128 B / 16 KiB | 52 ns / 146 ns |
-| `for_each_subscriber` (in place), 1 / 100 / 10,000 subscribers | 25 ns / 198 ns / 19 µs |
-| `get_subscribers` (copies the id set), 1 / 100 / 10,000 subscribers | 59 ns / 274 ns / 26 µs |
-| `find_callee` (1,000 registrations) | 32 ns |
-| Invocation tracker track + retrieve | 87 ns |
-| EVENT per subscriber: full serialize + frame / `EventTemplate::frame_for` | 2.6 µs / 55 ns |
-| PUBLISH fan-out to 1 / 10 / 100 subscribers (incl. drain) | 3.1 µs / 4.7 µs / 18.8 µs (was 3.1 / 28 / 279 µs) |
-| CALL → INVOCATION → YIELD → RESULT through the handlers (no socket I/O) | 3.5 µs (was 12.5 µs) |
+| Serialize CALL / EVENT, no args | 64 ns / 46 ns (was 0.62 / 0.50 µs) |
+| Serialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 0.26 – 0.29 µs (was 1.9 – 2.8 µs) |
+| Deserialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 0.83 – 0.92 µs (was 4.5 – 5.1 µs); message type peek 11 ns |
+| RawSocket frame 128 B / 16 KiB | 54 ns / 171 ns |
+| `for_each_subscriber` (in place), 1 / 100 / 10,000 subscribers | 29 ns / 226 ns / 21 µs |
+| `get_subscribers` (copies the id set), 1 / 100 / 10,000 subscribers | 67 ns / 274 ns / 18 µs |
+| `find_callee` (1,000 registrations) | 35 ns |
+| Invocation tracker track + retrieve | 90 ns |
+| EVENT per subscriber: full serialize + frame / `EventTemplate::frame_for` | 0.33 µs / 62 ns |
+| PUBLISH fan-out to 1 / 10 / 100 subscribers (incl. drain) | 1.5 µs / 3.0 µs / 16.6 µs (was 3.1 / 28 / 279 µs) |
+| CALL → INVOCATION → YIELD → RESULT through the handlers (no socket I/O) | 4.0 µs (was 12.5 µs) |
 
-These are in-process numbers: they exclude socket I/O and TLS. Before the direct CBOR codec (`include/cbor.hpp`) the cost was dominated by (de)serialization through nlohmann::json. PUBLISH fan-out serializes the EVENT once and stamps in each subscriber's subscription id (`EventTemplate`), so it costs about 0.15 µs per subscriber instead of 2.8 µs.
+These are in-process numbers: they exclude socket I/O and TLS. Before the direct CBOR codec (`include/cbor.hpp`) the cost was dominated by (de)serialization through nlohmann::json. PUBLISH fan-out serializes the EVENT once and stamps in each subscriber's subscription id (`EventTemplate`), so a subscriber costs about 62 ns (`frame_for`) instead of a full serialize and frame each time (0.33 µs now, 2.6 µs with the old nlohmann path).
 
 ### Load test
 
@@ -377,20 +386,21 @@ cmake --build build-local-release --target wamp_load
 ./build-local-release/wamp_load --mode rpc --callers 50 --calls 200
 ```
 
-Baseline (Release, same machine as above, embedded router, 10 positional arguments per message):
+Baseline (Release, same machine as above, embedded router, one shard thread, 10 positional arguments per message; the publisher waits for each PUBLISHED acknowledgement):
 
 | Scenario | Result |
 |---|---|
-| RPC, 1 caller, 5,000 calls | 4.3k calls/s, p50 0.22 ms, p99 0.39 ms |
-| RPC, 10 callers x 1,000 calls | 13.6k calls/s, p50 0.66 ms, p99 1.4 ms |
-| RPC, 50 callers x 200 calls | 12.1k calls/s, p50 3.4 ms, p99 11.7 ms |
-| PubSub, 10 subscribers, 2,000 events/s | 0 lost, p50 0.20 ms, p99 4.4 ms |
-| PubSub, 10 subscribers, 5,000 events/s | 0 lost, p50 0.18 ms, p99 7.4 ms |
-| PubSub, 100 subscribers, 1,000 events/s | 0 lost, p50 1.6 ms, p99 2.6 ms (was p99 39 ms) |
-| PubSub, 10 subscribers, unpaced (`--rate 0`), backpressure | 0 lost; publisher throttled to ~19k msg/s |
-| PubSub, 10 subscribers, unpaced, `--overflow drop` | 98% lost |
+| RPC, 1 caller, 5,000 calls | 7.8k calls/s, p50 0.12 ms, p99 0.29 ms |
+| RPC, 10 callers x 1,000 calls | 29.7k calls/s, p50 0.29 ms, p99 1.1 ms |
+| RPC, 50 callers x 200 calls | 30.1k calls/s, p50 1.5 ms, p99 7.6 ms |
+| PubSub, 10 subscribers, 2,000 events/s | 0 lost, p50 0.13 ms, p99 0.46 ms |
+| PubSub, 10 subscribers, 5,000 events/s | 0 lost, p50 0.10 ms, p99 0.60 ms |
+| PubSub, 100 subscribers, 1,000 events/s | 0 lost, p50 0.45 ms, p99 1.8 ms |
+| PubSub, 10 subscribers, unpaced (`--rate 0`), 200,000 events | 0 lost, 32k events/s published, 324k deliveries/s |
 
-The direct CBOR codec raised the load-test rates again (RPC with 10 callers 17.8k -> 29k calls/s, router CPU -35%; unpaced 10-subscriber fan-out router CPU -65%). The session reader/writer split earlier raised unpaced 10-subscriber fan-out from 46k to 84k events/s (see [docs/threading-analysis.md](docs/threading-analysis.md)). RPC rows above were measured before the event-queue work; a rerun gives about 18k calls/s with 10 callers (p50 0.55 ms, p99 0.8–1.1 ms).
+Both overflow policies lose nothing in this closed-loop test, because the publisher waits for each acknowledgement and the subscribers keep up. The policies are exercised by `tests/test_event_queue.cpp`. Earlier versions of this table showed losses with `--overflow drop`; that no longer reproduces. (The unpaced PubSub run delivers 10x its publish rate because each event goes to 10 subscribers.)
+
+The reader/writer split and the direct CBOR codec are what moved these numbers (see [docs/threading-analysis.md](docs/threading-analysis.md)).
 
 ### Scaling across threads
 
