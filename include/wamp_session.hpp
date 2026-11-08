@@ -25,8 +25,10 @@
 #include "config.hpp"
 #include "authorizer.hpp"
 #include "crypto_utils.hpp"
+#include "websocket.hpp"
 #include <asio/io_context.hpp>
 #include <spdlog/spdlog.h>
+#include <optional>
 #include <vector>
 #include <span>
 #include <expected>
@@ -80,6 +82,19 @@ public:
     // Get session ID (0 if not yet established)
     [[nodiscard]] uint64_t session_id() const {
         return session_id_;
+    }
+
+    // True if the client connected with a WebSocket upgrade instead of the RawSocket handshake. All frames
+    // the router builds are RawSocket frames (4-byte header + CBOR); a WebSocket session re-wraps them as
+    // binary messages when writing (see ws_wrap and session_writer).
+    [[nodiscard]] bool is_websocket() const {
+        return transport_ == Transport::WEBSOCKET;
+    }
+
+    // True when the last process() output (a close frame or an HTTP error) is the final thing to send:
+    // the caller writes it and then closes the connection
+    [[nodiscard]] bool should_close() const {
+        return close_requested_;
     }
 
     // Check if WAMP session is established (HELLO/WELCOME handshake complete)
@@ -147,6 +162,19 @@ private:
         spdlog::debug("Received {} bytes, buffer now {} bytes in state {}",
                      data.size(), unread(), state_name());
 
+        // The first byte tells the transports apart: RawSocket starts with 0x7F, an HTTP upgrade with "GET "
+        if (transport_ == Transport::UNDECIDED && unread() > 0) {
+            if (buffer_[read_pos_] == 'G' && config_.websocket.enabled) {
+                transport_ = Transport::WEBSOCKET;
+                ws_parser_.emplace(config_.websocket.max_message_size);
+            } else {
+                transport_ = Transport::RAWSOCKET;
+            }
+        }
+        if (transport_ == Transport::WEBSOCKET) {
+            return process_websocket();
+        }
+
         bool progressed = false;
         while (true) {
             const auto state_before = state_;
@@ -199,6 +227,115 @@ private:
     }
 
 private:
+    // ------------------------------------------------------------------------
+    // WebSocket (wamp.2.cbor)
+    // ------------------------------------------------------------------------
+    // Appends the RawSocket frames in `frames` to output_buffer_ as binary WebSocket messages
+    void ws_wrap(std::span<const uint8_t> frames) {
+        while (frames.size() >= rawsocket::FRAME_HEADER_SIZE) {
+            auto header = rawsocket::decode_frame_header(frames);
+            if (!header || frames.size() < rawsocket::FRAME_HEADER_SIZE + header->payload_length) break;
+            const auto payload = frames.subspan(rawsocket::FRAME_HEADER_SIZE, header->payload_length);
+            if (header->type == rawsocket::FrameType::REGULAR) {
+                ws::append_frame(output_buffer_, ws::Opcode::BINARY, payload);
+            }
+            frames = frames.subspan(rawsocket::FRAME_HEADER_SIZE + header->payload_length);
+        }
+    }
+
+    // Ends the connection after the pending output is written
+    void ws_close(uint16_t code) {
+        ws::append_close(output_buffer_, code);
+        close_requested_ = true;
+        state_ = SessionProtocolState::SHUTTING_DOWN;
+    }
+
+    // One complete binary message from the client: the same WAMP handling as a RawSocket frame payload
+    [[nodiscard]] std::expected<void, std::error_code> ws_message(const std::vector<uint8_t>& payload) {
+        std::expected<std::span<const uint8_t>, std::error_code> result{std::span<const uint8_t>{}};
+        if (expect_authenticate_) {
+            // After CHALLENGE only AUTHENTICATE is acceptable
+            auto type = get_message_type_from_cbor(payload);
+            if (!type.has_value() || *type != MessageType::AUTHENTICATE) {
+                spdlog::error("Expected AUTHENTICATE message, got something else");
+                response_buffer_ = rawsocket::create_wamp_message(serialize_abort(
+                    AbortMessage::create_not_authorized("Expected AUTHENTICATE message")));
+                ws_wrap(response_buffer_);
+                ws_close(ws::kCloseNormal);
+                return {};
+            }
+            expect_authenticate_ = false;
+            result = handle_authenticate_message(payload);
+        } else {
+            result = handle_wamp_message(payload);
+        }
+        if (!result.has_value()) {
+            return std::unexpected{result.error()};
+        }
+        ws_wrap(*result);
+        if (state_ == SessionProtocolState::SHUTTING_DOWN) {   // GOODBYE was answered
+            ws_close(ws::kCloseNormal);
+        }
+        return {};
+    }
+
+    [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> process_websocket() {
+        if (close_requested_) {   // already closing: ignore whatever else the client sends
+            read_pos_ = buffer_.size();
+            return std::span<const uint8_t>(output_buffer_);
+        }
+
+        if (!ws_upgraded_) {
+            auto request = ws::parse_upgrade(unread_span(), config_.websocket.allowed_origins);
+            if (request.status == ws::UpgradeStatus::INCOMPLETE) {
+                return std::span<const uint8_t>{};
+            }
+            if (request.status != ws::UpgradeStatus::OK) {
+                spdlog::warn("Rejected WebSocket upgrade (status {})", static_cast<int>(request.status));
+                const auto response = ws::error_response(request.status);
+                output_buffer_.assign(response.begin(), response.end());
+                read_pos_ = buffer_.size();
+                close_requested_ = true;
+                state_ = SessionProtocolState::SHUTTING_DOWN;
+                return std::span<const uint8_t>(output_buffer_);
+            }
+            read_pos_ += request.consumed;
+            const auto response = ws::upgrade_response(request.key);
+            output_buffer_.assign(response.begin(), response.end());
+            ws_upgraded_ = true;
+            state_ = SessionProtocolState::AWAITING_FRAME_HEADER;
+            spdlog::info("WebSocket upgrade complete (origin '{}'), awaiting WAMP HELLO", request.origin);
+        }
+
+        while (!close_requested_) {
+            auto parsed = ws_parser_->next(unread_span());
+            read_pos_ += parsed.consumed;
+            switch (parsed.kind) {
+                case ws::Parsed::Kind::NEED_MORE:
+                    return std::span<const uint8_t>(output_buffer_);
+                case ws::Parsed::Kind::MESSAGE:
+                    if (auto handled = ws_message(parsed.payload); !handled) {
+                        return std::unexpected{handled.error()};
+                    }
+                    break;
+                case ws::Parsed::Kind::PING:
+                    ws::append_frame(output_buffer_, ws::Opcode::PONG, parsed.payload);
+                    break;
+                case ws::Parsed::Kind::PONG:
+                    break;
+                case ws::Parsed::Kind::CLOSE:   // echo the peer's status code, then close
+                    ws_close(parsed.code == 1005 ? ws::kCloseNormal : parsed.code);
+                    break;
+                case ws::Parsed::Kind::FAIL:
+                    spdlog::warn("WebSocket protocol violation, closing with {}", parsed.code);
+                    ws_close(parsed.code);
+                    break;
+            }
+        }
+        read_pos_ = buffer_.size();
+        return std::span<const uint8_t>(output_buffer_);
+    }
+
     // Process RawSocket handshake (expecting 4 bytes)
     [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> process_rawsocket_handshake() {
         if (unread() < rawsocket::HANDSHAKE_SIZE) {
@@ -882,6 +1019,13 @@ private:
     std::vector<uint8_t> buffer_;          // Accumulates partial reads
     size_t read_pos_{0};                   // Bytes of buffer_ already consumed (dropped at the end of process())
     std::vector<uint8_t> response_buffer_;  // Reusable buffer for responses
+
+    // Which transport the client chose (decided by the first byte), and the WebSocket state
+    enum class Transport { UNDECIDED, RAWSOCKET, WEBSOCKET };
+    Transport transport_{Transport::UNDECIDED};
+    std::optional<ws::FrameParser> ws_parser_;
+    bool ws_upgraded_{false};
+    bool close_requested_{false};
 
     // RawSocket parameters
     std::optional<rawsocket::Serializer> serializer_;

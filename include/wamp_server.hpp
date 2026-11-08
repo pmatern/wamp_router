@@ -239,6 +239,15 @@ handle_socket_read_completion(
         spdlog::debug("Sent {} bytes to {}", bytes_written, remote_address);
     }
 
+    if (protocol.should_close()) {
+        // The final bytes (a WebSocket close frame or an HTTP error) are out: close our side, but let the
+        // client read them first
+        std::error_code ignored;
+        socket.lowest_layer().shutdown(asio::socket_base::shutdown_send, ignored);
+        protocol.on_disconnect();
+        co_return std::unexpected{make_error_code(std::errc::connection_aborted)};
+    }
+
     co_return true;  // Continue processing
 }
 
@@ -264,9 +273,13 @@ session_reader(SocketType& socket, ReadState<SocketType>& state, WampSession& pr
 template<typename SocketType>
 inline asio::awaitable<std::expected<void, std::error_code>>
 session_writer(SocketType& socket, EventChannel& channel, const std::string& remote_address,
-               WriteLock& write_lock) {
+               WriteLock& write_lock, bool websocket) {
     std::vector<std::shared_ptr<const std::vector<uint8_t>>> frames;
     std::vector<asio::const_buffer> buffers;
+    // WebSocket: the router's frames are [4-byte RawSocket header][payload]; each is sent as a binary
+    // message made of a small WebSocket header (kept here, addresses stable) and the shared payload, unmodified
+    std::vector<ws::FrameHeaderBytes> ws_headers;
+    ws_headers.reserve(kMaxBatchFrames + 1);
 
     while (true) {
         auto [ec_channel, first] = co_await channel.async_receive(
@@ -278,11 +291,20 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
 
         frames.clear();
         buffers.clear();
+        ws_headers.clear();
         size_t bytes = 0;
         auto add = [&](std::error_code ec, EventToSend event) {
             if (!ec && event.event_data) {
                 bytes += event.event_data->size();
-                buffers.emplace_back(event.event_data->data(), event.event_data->size());
+                if (websocket) {
+                    if (event.event_data->size() <= rawsocket::FRAME_HEADER_SIZE) return;
+                    const auto payload_size = event.event_data->size() - rawsocket::FRAME_HEADER_SIZE;
+                    ws_headers.push_back(ws::encode_header(ws::Opcode::BINARY, payload_size));
+                    buffers.emplace_back(ws_headers.back().bytes.data(), ws_headers.back().size);
+                    buffers.emplace_back(event.event_data->data() + rawsocket::FRAME_HEADER_SIZE, payload_size);
+                } else {
+                    buffers.emplace_back(event.event_data->data(), event.event_data->size());
+                }
                 frames.push_back(std::move(event.event_data));
             }
         };
@@ -369,7 +391,7 @@ handle_wamp_session(SocketType socket, asio::io_context& io, const ServerConfig&
                 session_reader(socket, read_state, protocol, remote_address, write_lock),
                 asio::deferred),
             asio::co_spawn(executor,
-                session_writer(socket, *event_channel, remote_address, write_lock),
+                session_writer(socket, *event_channel, remote_address, write_lock, protocol.is_websocket()),
                 asio::deferred)
         ).async_wait(asio::experimental::wait_for_one(), asio::use_awaitable);
 
