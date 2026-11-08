@@ -159,6 +159,9 @@ struct ServerConfig {
     // A session that sends this many undecodable messages in a row (a good one resets the count) is aborted
     // with wamp.error.protocol_violation and closed. 0 = never.
     size_t max_malformed_messages{10};
+    // On shutdown every established session is sent GOODBYE (wamp.close.system_shutdown) and the router waits
+    // this long for them to leave before cutting the rest. 0 = send it and stop at once.
+    std::chrono::milliseconds shutdown_grace{3000};
     size_t max_pending_invocations{};
     std::chrono::milliseconds call_timeout{30000};  // 0 disables
     EventQueueConfig events{};
@@ -245,6 +248,14 @@ public:
                     spdlog::error("[server] max_connections must be \"auto\" or an integer >= 0 (0 = unlimited)");
                     return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
                 }
+            }
+            if (server.contains("shutdown_grace_ms")) {
+                const auto ms = toml::find<int64_t>(server, "shutdown_grace_ms");
+                if (ms < 0) {
+                    spdlog::error("[server] shutdown_grace_ms must be 0 or greater");
+                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                }
+                config.shutdown_grace = std::chrono::milliseconds{ms};
             }
             if (server.contains("max_malformed_messages")) {
                 const auto value = toml::find<int64_t>(server, "max_malformed_messages");

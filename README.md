@@ -56,6 +56,7 @@ handshake_timeout_ms = 10000   # a new connection must become a session (TLS, ha
 max_connections = "auto"       # open connections allowed; "auto" = open-file limit minus a reserve, 0 = no limit
 max_connections_per_ip = 0     # per client address, 0 = no limit (leave off behind a proxy or NAT)
 max_malformed_messages = 10    # undecodable messages in a row before a session is aborted; 0 = never
+shutdown_grace_ms = 3000       # on shutdown, how long sessions get to leave after GOODBYE; 0 = do not wait
 
 [server.tls]
 cert = "test_certs/cert.pem"
@@ -272,6 +273,10 @@ A client that connects and then sends nothing (or trickles bytes) would otherwis
 ### Connection limits
 
 `[server] max_connections` caps open connections (default `"auto"`: the process's open-file limit minus a reserve of 128; the router raises that limit to the hard limit at startup, and an integer or `0` for unlimited overrides it). `max_connections_per_ip` caps connections from one client address (default 0 = off; behind a proxy, load balancer or NAT every client shares an address, so leave it off there). A connection over a limit is closed immediately at accept, without a reply, and counted (`Router::rejected_connections()`, logged at shutdown, and the first rejection plus every 1,000th are logged as a warning). Limits count a connection from accept until its session ends, so connections still in the handshake count too. If the process does run out of descriptors anyway, the acceptor logs once per 1,000 errors and retries every 100 ms instead of spinning.
+
+### Shutdown
+
+On SIGINT/SIGTERM the router stops accepting, delivers the cross-shard messages already queued, and then sends every established session `GOODBYE wamp.close.system_shutdown` (queued after whatever that session was already due to receive, so no event is cut off). The router closes each connection once its GOODBYE is written (a WebSocket session also gets a close frame with code 1001) and waits up to `[server] shutdown_grace_ms` (default 3,000; 0 = do not wait) for all sessions to be gone, then stops the shard threads. Connections still in their handshake have nothing to be told; they are cut after the grace period (or when the router object is destroyed). A session whose output queue is completely full cannot be sent the GOODBYE and is cut at the deadline. Tested with Autobahn|Python on both transports: each client reports leaving with `wamp.close.system_shutdown`, and the router exits in about 40 ms.
 
 ### Malformed messages
 

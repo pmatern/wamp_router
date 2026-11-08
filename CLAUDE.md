@@ -502,6 +502,7 @@ gdb ./build/wamp_router
 The router uses TOML configuration files (config.toml or test_config.toml) for all settings:
 - Server port, TLS certificate paths, logging level
 - `threads` (`[server]`) - router threads / shards (default 1, `"auto"` = available CPUs); sessions on different shards still reach each other, see Router
+- `shutdown_grace_ms` (`[server]`) - how long `Router::stop()` waits for sessions to leave after sending each GOODBYE `wamp.close.system_shutdown` (default 3000, 0 = no wait); the writer closes a connection after writing a frame marked `EventToSend::close_after`
 - `max_malformed_messages` (`[server]`) - undecodable messages in a row before a session is ABORTed with `wamp.error.protocol_violation` and closed (default 10, 0 = never); counted in `WampSession::malformed()`
 - `max_connections` / `max_connections_per_ip` (`[server]`) - open connection caps (default `"auto"` = open-file limit minus 128, and 0 = off); enforced by the acceptor through `ConnectionLimiter` (`connection_limiter.hpp`), which the session releases when it ends
 - `handshake_timeout_ms` (`[server]`) - deadline for a new connection to become an established session (default 10000, 0 disables); enforced in `handle_wamp_session` with a timer that closes the socket

@@ -302,8 +302,10 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
         buffers.clear();
         ws_headers.clear();
         size_t bytes = 0;
+        bool closing = false;   // a close_after frame is in this batch: nothing after it is sent
         auto add = [&](std::error_code ec, EventToSend event) {
-            if (!ec && event.event_data) {
+            if (!ec && event.event_data && !closing) {
+                closing = event.close_after;
                 bytes += event.event_data->size();
                 if (websocket) {
                     if (event.event_data->size() <= rawsocket::FRAME_HEADER_SIZE) return;
@@ -318,7 +320,7 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
             }
         };
         add(ec_channel, std::move(first));
-        while (frames.size() < kMaxBatchFrames && bytes < kMaxBatchBytes &&
+        while (!closing && frames.size() < kMaxBatchFrames && bytes < kMaxBatchBytes &&
                channel.try_receive(add)) {
         }
 
@@ -337,6 +339,19 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
         }
 
         spdlog::debug("Sent {} events ({} bytes) to {}", frames.size(), bytes_written, remote_address);
+
+        if (closing) {
+            // The router is shutting down and the GOODBYE is out: end the WebSocket properly (1001 going
+            // away), close our side and let the session end
+            if (websocket) {
+                static constexpr std::array<uint8_t, 4> kCloseGoingAway{0x88, 0x02, 0x03, 0xE9};
+                (void)co_await asio::async_write(socket, asio::buffer(kCloseGoingAway),
+                                                 asio::as_tuple(asio::use_awaitable));
+            }
+            std::error_code ignored;
+            socket.lowest_layer().shutdown(asio::socket_base::shutdown_send, ignored);
+            co_return std::expected<void, std::error_code>{};
+        }
     }
 }
 

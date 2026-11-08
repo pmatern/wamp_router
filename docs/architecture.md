@@ -70,7 +70,7 @@ Scheduling within a shard is cooperative and single-threaded: asio resumes a cor
 | **Backpressure**: `wait_for_room` | destination inbox → sender session | Destinations at or above 4,096 queued messages are reported to the sending session, which stops reading its socket and polls `depth` every 100 µs until it is under 2,048 or `backpressure_timeout_ms` passes. Only events are dropped at the 65,536 hard cap; calls and results never are. |
 | **Counters**: sessions, accepted, publishes, calls, drops, inbox depth/received/dropped | any thread reads (`Router::stats()`) | Relaxed atomics. |
 | **Logging**: bounded queue (default 8192 lines) | all threads → writer | A full queue overwrites the oldest line and counts it. The shard-tag map has a mutex that only the writer reads on the hot side. |
-| **Shutdown** | main / acceptor → shards | `stop()` closes the acceptor, polls until every inbox is empty (up to 2 s, 1 ms steps), stops each shard's `io_context`, then joins the threads. |
+| **Shutdown** | main / acceptor → shards | `stop()` closes the acceptor, polls until every inbox is empty (up to 2 s, 1 ms steps), posts a GOODBYE (`wamp.close.system_shutdown`, marked `close_after`) to every session through its event channel so it lands after the events already queued, waits up to `[server] shutdown_grace_ms` for the sessions to end (their writer closes the connection after writing it), stops each shard's `io_context`, then joins the threads. |
 
 ## What decides where work runs
 
@@ -88,7 +88,7 @@ Scheduling within a shard is cooperative and single-threaded: asio resumes a cor
 * **One callee per procedure** means a hot procedure is limited to one core (many procedures spread evenly).
 * **Waking an idle shard** costs about 0.2–0.3 ms per crossing on EC2 (not visible under load). A spin-before-sleep option would remove it at the price of CPU; not built.
 * **Inbox is a mutex vector**, not an SPSC ring. The measurements showed no contention; the two were never benchmarked against each other.
-* **Shutdown does not send GOODBYE;** open sessions are cut when the shard threads stop.
+* **Connections still in their handshake at shutdown** are not told anything; they are cut after the grace period.
 
 ## Measured scaling (EC2, router pinned to 1 / 2 / 4 cores)
 

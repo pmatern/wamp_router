@@ -1142,3 +1142,90 @@ TEST_CASE("max_malformed_messages = 0 never closes the session", "[router][malfo
     for (int i = 0; i < 100; ++i) c->send(rawsocket::create_wamp_message(bad_subscribe()));
     CHECK(raw_subscribe_works(*c, 7));
 }
+
+// ---------------------------------------------------------------------------------------------------
+// Graceful shutdown
+// ---------------------------------------------------------------------------------------------------
+TEST_CASE("stop() sends GOODBYE to every open session, after the events already queued for it", "[router][shutdown]") {
+    auto config = plain_config();
+    config.shutdown_grace = 3s;
+    Router router{config, Router::Transport::PLAIN, 2};
+    router.start();
+
+    WsTestClient ws;                          // shard 0, subscribed
+    REQUIRE(ws_join(ws, router.port()));
+    ws.send_binary(serialize_subscribe(SubscribeMessage{1, {}, "bye.topic"}));
+    REQUIRE(ws_expect(ws, MessageType::SUBSCRIBED));
+
+    auto raw = raw_join(router.port());       // shard 1, publisher and a plain bystander
+    REQUIRE(raw);
+    auto bystander = raw_join(router.port());
+    REQUIRE(bystander);
+    constexpr int kEvents = 20;
+    for (int i = 0; i < kEvents; ++i) {
+        raw->send(rawsocket::create_wamp_message(serialize_publish(PublishMessage{
+            static_cast<uint64_t>(10 + i), {{"acknowledge", true}}, "bye.topic", {std::string{"e"}}})));
+        auto published = get_message_type_from_cbor(raw->read_frame());
+        REQUIRE(published);
+        REQUIRE(*published == MessageType::PUBLISHED);
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    std::thread stopper{[&] { router.stop(); }};
+
+    // the WebSocket client sees all its events, then GOODBYE, then a going-away close, then EOF
+    for (int i = 0; i < kEvents; ++i) REQUIRE(ws_expect(ws, MessageType::EVENT));
+    auto goodbye = ws_expect(ws, MessageType::GOODBYE);
+    REQUIRE(goodbye);
+    CHECK(deserialize_goodbye(*goodbye)->reason == "wamp.close.system_shutdown");
+    auto close = ws.read_frame();
+    REQUIRE(close);
+    CHECK(close->opcode == 0x8);
+    CHECK(close->payload == std::vector<uint8_t>{0x03, 0xE9});
+    CHECK(ws.closed_by_peer());
+
+    // the RawSocket sessions get GOODBYE and EOF
+    for (auto* c : {raw.get(), bystander.get()}) {
+        auto type = get_message_type_from_cbor(c->read_frame());
+        REQUIRE(type);
+        CHECK(*type == MessageType::GOODBYE);
+        CHECK(c->closed_within(2s));
+    }
+
+    stopper.join();
+    CHECK(std::chrono::steady_clock::now() - start < 2s);   // did not sit out the 3 s grace
+    CHECK(router.open_connections() == 0);
+}
+
+TEST_CASE("stop() is bounded by shutdown_grace when a connection never leaves", "[router][shutdown]") {
+    auto config = plain_config();
+    config.shutdown_grace = 400ms;
+    config.handshake_timeout = 0ms;          // the silent connection would otherwise be timed out first
+    auto router = std::make_unique<Router>(config, Router::Transport::PLAIN, 1);
+    router->start();
+
+    BareConnection silent{router->port()};    // never completes a handshake, so it gets no GOODBYE
+    std::this_thread::sleep_for(100ms);
+    REQUIRE(router->open_connections() == 1);
+
+    const auto start = std::chrono::steady_clock::now();
+    router->stop();
+    const auto took = std::chrono::steady_clock::now() - start;
+    CHECK(took >= 350ms);                     // waited the whole grace for it
+    CHECK(took < 2s);                         // and then gave up
+    router.reset();                           // its socket lives in a stopped shard until the Router is destroyed
+    CHECK(silent.closed_within(1s));
+}
+
+TEST_CASE("shutdown_grace = 0 does not wait", "[router][shutdown]") {
+    auto config = plain_config();
+    config.shutdown_grace = 0ms;
+    config.handshake_timeout = 0ms;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+    BareConnection silent{router.port()};
+    std::this_thread::sleep_for(100ms);
+    const auto start = std::chrono::steady_clock::now();
+    router.stop();
+    CHECK(std::chrono::steady_clock::now() - start < 300ms);
+}

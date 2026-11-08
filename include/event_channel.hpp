@@ -41,6 +41,7 @@ namespace wamp {
 struct EventToSend {
     uint64_t target_session_id{};
     std::shared_ptr<const std::vector<uint8_t>> event_data;  // Shared between all recipients
+    bool close_after{false};   // the session's writer closes the connection once this is written (shutdown)
 
     EventToSend() = default;
 
@@ -135,6 +136,20 @@ public:
             strikes_.erase(session_id);
             spdlog::debug("Removed event channel for session {}", session_id);
         }
+    }
+
+    // Queues `frame` last in every open session's queue and tells its writer to close the connection once
+    // it is written (the shutdown GOODBYE). Returns how many sessions it was queued for; a session whose
+    // queue is full is left for the caller's deadline.
+    size_t send_final_to_all(const std::shared_ptr<const std::vector<uint8_t>>& frame) {
+        size_t queued = 0;
+        for (auto& [session_id, channel] : channels_) {
+            if (!channel->is_open()) continue;
+            EventToSend event{session_id, frame};
+            event.close_after = true;
+            if (channel->try_send(std::error_code{}, std::move(event))) ++queued;
+        }
+        return queued;
     }
 
     // Non-blocking send; false if the session has no channel or its queue is full

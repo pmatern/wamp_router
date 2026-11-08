@@ -25,6 +25,10 @@ max_connections_per_ip = 0
 # aborted with wamp.error.protocol_violation and closed. 0 = never.
 max_malformed_messages = 10
 
+# On shutdown (SIGINT/SIGTERM) every session is sent GOODBYE (wamp.close.system_shutdown) and the router
+# waits up to this many milliseconds for them to leave before cutting the rest. 0 = do not wait.
+shutdown_grace_ms = 3000
+
 [server.tls]
 # Path to TLS certificate (PEM format)
 cert = "/path/to/cert.pem"

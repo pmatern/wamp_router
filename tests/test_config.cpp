@@ -845,3 +845,22 @@ key = ")" + key.path().string() + R"("
     CHECK_FALSE(load("max_malformed_messages = -1\n").has_value());
     CHECK_FALSE(load("max_malformed_messages = \"many\"\n").has_value());
 }
+
+TEST_CASE("Config::load() shutdown_grace_ms", "[config][shutdown]") {
+    TempCertFile cert("cert");
+    TempCertFile key("key");
+    auto load = [&](const std::string& server_line) {
+        std::string content = "[server]\nport = 8080\n" + server_line + R"(
+[server.tls]
+cert = ")" + cert.path().string() + R"("
+key = ")" + key.path().string() + R"("
+)";
+        TempConfigFile config(content);
+        return wamp::Config::load(config.path());
+    };
+
+    CHECK(load("")->shutdown_grace == std::chrono::milliseconds{3000});
+    CHECK(load("shutdown_grace_ms = 500\n")->shutdown_grace == std::chrono::milliseconds{500});
+    CHECK(load("shutdown_grace_ms = 0\n")->shutdown_grace == std::chrono::milliseconds{0});
+    CHECK_FALSE(load("shutdown_grace_ms = -5\n").has_value());
+}

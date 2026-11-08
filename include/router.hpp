@@ -100,7 +100,8 @@ public:
 
     static constexpr std::chrono::milliseconds kShutdownGrace{2000};
 
-    // Stops accepting, drains the cross-shard inboxes (up to kShutdownGrace) and closes the sessions; safe to call from any thread, more than once
+    // Stops accepting, drains the cross-shard inboxes (up to kShutdownGrace), says GOODBYE to every session and waits
+    // up to [server] shutdown_grace_ms for them to leave, then stops the threads; safe to call from any thread, more than once
     void stop() {
         if (!started_.load() || stopped_.exchange(true)) return;
         asio::post(accept_io_, [this] {
@@ -119,6 +120,27 @@ public:
         }
         if (const auto left = group_->pending(); left > 0) {
             spdlog::warn("Shutdown: {} cross-shard message(s) were not delivered", left);
+        }
+        // Tell every session the router is going away (GOODBYE queued after whatever it was already sent;
+        // the session's writer closes the connection once it is written) and give them time to leave.
+        // Connections still in their handshake have nothing to be told and are cut with the threads.
+        const auto goodbye = std::make_shared<const std::vector<uint8_t>>(rawsocket::create_wamp_message(
+            serialize_goodbye(GoodbyeMessage::create_system_shutdown())));
+        for (auto& worker : workers_) {
+            asio::post(worker->io, [shard = worker->shard, goodbye] { (void)shard->channels.send_final_to_all(goodbye); });
+        }
+        const auto sessions_deadline = std::chrono::steady_clock::now() + config_.shutdown_grace;
+        auto open_sessions = [this] {
+            size_t n = 0;
+            for (const auto& worker : workers_) n += worker->sessions.load(std::memory_order_relaxed);
+            return n;
+        };
+        while (open_sessions() > 0 && std::chrono::steady_clock::now() < sessions_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        if (const auto left = open_sessions(); left > 0) {
+            spdlog::warn("Shutdown: cutting {} session(s) that did not leave within {} ms", left,
+                         config_.shutdown_grace.count());
         }
         for (auto& worker : workers_) {
             worker->io.stop();
