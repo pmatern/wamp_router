@@ -20,6 +20,7 @@ This router acts as the central message broker, routing messages between clients
 - **WAMP-Cryptosign Authentication**: Ed25519 signature-based authentication
 - **C++20 Coroutines**: Asynchronous I/O using `asio::awaitable`
 - **Event Channels**: Efficient message delivery using Asio experimental channels
+- **Thread per core**: `[server] threads` runs that many shards; pub/sub and RPC are routed across them (see [docs/architecture.md](docs/architecture.md))
 - **Session Management**: Automatic cleanup on disconnect
 - **Modern C++23**: Uses `std::expected`, `std::span`, ranges, etc.
 
@@ -43,22 +44,27 @@ The router requires a TOML configuration file specifying TLS certificates and au
 ./scripts/gen-test-certs.sh
 ```
 
-This creates `test_certs/server.crt`, `test_certs/server.key`, and `test_certs/ca.crt`.
+This creates a self-signed certificate and key: `test_certs/cert.pem` and `test_certs/key.pem`.
 
 ### Create config.toml
 
 ```toml
 [server]
 port = 8080
+threads = 1   # router threads, one shard each; "auto" = one per available CPU (container-aware)
 
 [server.tls]
-cert = "test_certs/server.crt"
-key = "test_certs/server.key"
-# ca = "test_certs/ca.crt"  # Optional: for client certificate verification
+cert = "test_certs/cert.pem"
+key = "test_certs/key.pem"
+# ca = "test_certs/ca.pem"  # Optional: for client certificate verification
 # require_client_cert = false  # Optional: require client certificates
 
 [server.rpc]
 max_pending_invocations = 10000
+call_timeout_ms = 30000   # callee answer deadline, 0 = none; a CALL's "timeout" option overrides it
+
+# Per-session event queue and overflow policy: see "Event queue and backpressure" below
+# [server.events]
 
 [logging]
 level = "info"  # trace, debug, info, warn, error, critical
@@ -111,13 +117,13 @@ export VCPKG_ROOT=/path/to/vcpkg
 
 # 4. Configure and build
 cmake --preset local-release
-cmake --build build-local
+cmake --build build-local-release
 
 # 5. Run tests
-./build-local/wamp_tests
+./build-local-release/wamp_tests
 
 # 6. Run the router with configuration
-./build-local/wamp_router --config config.toml
+./build-local-release/wamp_router --config config.toml
 ```
 
 ## Building
@@ -159,14 +165,14 @@ cmake --build build-local
 
 # Release build
 cmake --preset local-release
-cmake --build build-local
+cmake --build build-local-release
 
 # System packages (no vcpkg)
 cmake --preset system-packages
 cmake --build build-system
 ```
 
-**Build artifacts:** `./build-local/` or `./build-system/`
+**Build artifacts:** `./build-local/` (debug), `./build-local-release/` (release) or `./build-system/`
 
 ## Running
 
@@ -246,8 +252,8 @@ If `[auth.keys]` is configured in config.toml, clients must authenticate using W
 
 1. Client sends HELLO with `authid` and `authmethods=["cryptosign"]`
 2. Router responds with CHALLENGE containing a random nonce
-3. Client signs `challenge|session_id|authid|authrole` with Ed25519 private key
-4. Client sends AUTHENTICATE with the signature
+3. Client signs the raw challenge bytes (the 32 bytes behind the hex string) with its Ed25519 private key
+4. Client sends AUTHENTICATE with the hex-encoded 64-byte signature (`signature||challenge`, 96 bytes, is also accepted)
 5. Router verifies signature against public key from config
 6. If valid, router sends WELCOME and session is established
 
@@ -280,6 +286,8 @@ allow = ["call", "publish", "subscribe"]   # also: "register"
 Access is default-deny: SUBSCRIBE, PUBLISH, REGISTER and CALL need a matching rule, and denied requests get `wamp.error.not_authorized`. An unacknowledged PUBLISH that is denied gets no reply, as the WAMP spec requires. An authid with no role can connect but cannot do anything. The role name is reported as `authrole` in WELCOME. With authentication disabled nothing is restricted. A permission check costs roughly 25-70 ns.
 
 ### Example: Python Client (with authentication)
+
+Illustrative only: it has not been run against this router, and the `rawsocket://` URL and transport setup depend on your Autobahn version. The router needs RawSocket framing, CBOR and TLS 1.3 from the client.
 
 ```python
 from autobahn.twisted.wamp import ApplicationSession, ApplicationRunner
@@ -384,6 +392,19 @@ Baseline (Release, same machine as above, embedded router, 10 positional argumen
 
 The direct CBOR codec raised the load-test rates again (RPC with 10 callers 17.8k -> 29k calls/s, router CPU -35%; unpaced 10-subscriber fan-out router CPU -65%). The session reader/writer split earlier raised unpaced 10-subscriber fan-out from 46k to 84k events/s (see [docs/threading-analysis.md](docs/threading-analysis.md)). RPC rows above were measured before the event-queue work; a rerun gives about 18k calls/s with 10 callers (p50 0.55 ms, p99 0.8–1.1 ms).
 
+### Scaling across threads
+
+Measured on EC2 (c7i.4xlarge router pinned to 1 / 2 / 4 cores, `wamp_load` on separate c7i.2xlarge hosts, plain TCP, 10 positional arguments); details and method in [docs/threading-analysis.md](docs/threading-analysis.md):
+
+| Workload | 1 thread | 2 threads | 4 threads |
+|---|---|---|---|
+| RPC, each client calls itself (calls/s) | 60k | 132k | 221k |
+| RPC, callers and callee on different shards (calls/s) | 130k | 192k | 327k |
+| Pub/sub, each client publishes to itself (publishes/s) | 87k | 167k | 259k |
+| Pub/sub fan-out across shards, 10 subscribers per topic (deliveries/s) | 278k | 570-590k | 0.92-1.18M |
+
+Crossing shards adds roughly 0.2-0.3 ms per crossing on an idle router (RPC p50 1.3 ms with one thread, 1.7-2.0 ms with two); under load the difference mostly disappears.
+
 ### Profiling and threading analysis
 
 `wamp_profile_router` (plain-TCP router, logging off), `wamp_load --mode idle --connections N` (open and hold N sessions), `wamp_handoff_bench` (cross-thread handoff costs) and `wamp_tls_probe` (TLS 1.3 handshake and record costs) support the profile in [docs/threading-analysis.md](docs/threading-analysis.md), which also holds the recommended thread-per-core design. The current threading architecture is described in [docs/architecture.md](docs/architecture.md).
@@ -402,6 +423,8 @@ backpressure_timeout_ms = 1000   # longest a sender waits for queue space
 - **`backpressure` (default):** when a subscriber's queue is full, the session that triggered the delivery (the publisher, or the callee sending a YIELD) stops reading its socket until the subscriber catches up, so TCP flow control slows the sender. Nothing is lost. A slow subscriber therefore slows every publisher to its topics; `backpressure_timeout_ms` bounds that stall, after which the event is dropped and counted. It also breaks wait cycles between sessions that publish to each other.
 - **`drop`:** the event is discarded and counted. The publisher is never slowed.
 
+Across shards, a publisher or caller whose destination shard has a backlog (4,096 queued cross-shard messages) is slowed the same way until the backlog is under 2,048 (see [docs/architecture.md](docs/architecture.md)).
+
 Dropped events are counted (`EventChannelRegistry::dropped_count()`) and logged at warning level: the first drop, then every 1,000th. Use `wamp_load --queue-size N --overflow drop|backpressure` to compare the policies.
 
 ## Architecture
@@ -413,7 +436,7 @@ Dropped events are counted (`EventChannelRegistry::dropped_count()`) and logged 
 3. **WAMP-Cryptosign**: Ed25519 signature-based authentication (optional)
 4. **C++20 Coroutines**: Using `asio::awaitable` for clean async code
 5. **Event Channels**: `asio::experimental::channel` for efficient message delivery
-6. **Thread per shard**: `[server] threads` runs that many shards, each with its own `io_context` and routing state (default 1); sessions on different shards still reach each other (pub/sub and RPC are routed across shards) (see docs/threading-analysis.md)
+6. **Thread per shard**: `[server] threads` runs that many shards, each with its own `io_context` and routing state (default 1); sessions on different shards still reach each other (pub/sub and RPC are routed across shards) (see [docs/architecture.md](docs/architecture.md))
 7. **Session-per-Coroutine**: Each client connection is a coroutine
 8. **RawSocket Transport**: Binary TCP framing (4-byte header + payload)
 9. **CBOR Serialization**: Compact binary format, direct codec in `include/cbor.hpp`
@@ -476,13 +499,13 @@ AWAITING_FRAME_HEADER (loop)
 ### Debugging
 
 ```bash
-# Enable debug logging in main.cpp
-spdlog::set_level(spdlog::level::debug);
+# Enable debug logging: set level = "debug" under [logging] in the config file
+# (test_config.toml already does)
 
 # Debug in container with GDB
 ./scripts/shell.sh
 gdb ./build/wamp_router
-(gdb) run 8080
+(gdb) run --config test_config.toml
 ```
 
 ## References
