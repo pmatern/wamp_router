@@ -263,6 +263,7 @@ wamp_router/
 │   ├── authorizer.hpp        # Role permissions (Action, Permissions): exact/prefix URI rules
 │   ├── cpu_limits.hpp        # Container-aware CPU budget (cgroup quota, affinity, ECS task metadata)
 │   ├── router.hpp            # Router: N shards, one thread each, acceptor hands connections to the least-loaded shard
+│   ├── shard_group.hpp       # ShardGroup: cross-shard topic interest + inboxes for cross-shard PUBLISH
 │   ├── shard.hpp             # Shard: all routing state one thread owns (channels, pending calls, realms, ids)
 │   ├── realm.hpp             # Realm (per-realm subscriptions + registrations), RealmRegistry
 │   ├── crypto_utils.hpp      # Ed25519 signature verification, challenge generation
@@ -346,7 +347,7 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 
 #### Router (router.hpp)
 - `Router(config, Transport::PLAIN|TLS, threads)` starts one acceptor thread and N worker threads, each with its own `io_context(1)` and `Shard`. The acceptor passes each accepted socket (as a native handle) to the shard with the fewest sessions; the TLS handshake and the whole session then run on that shard's thread. `main.cpp` uses it (`[server] threads`, default 1).
-- **Limitation:** sessions on different shards cannot reach each other yet (no cross-shard delivery), so more than one thread is only valid for workloads whose sessions are self-contained (`wamp_load --mode selfrpc|selfpubsub`) until the cross-shard stages land.
+- **Cross-shard:** pub/sub works across shards (`ShardGroup` in `shard_group.hpp`: replicated topic interest plus one inbox per shard). **Limitation:** RPC does not yet: a CALL only finds callees on the caller's shard, so with more than one thread RPC is only valid for self-contained workloads (`wamp_load --mode selfrpc`) until Stage 4.
 
 #### Shard (shard.hpp)
 - Owns everything a router thread mutates: `EventChannelRegistry channels`, `InvocationTracker invocations`, `RealmRegistry realms`, the id generators and the default call timeout. There are no process-wide mutable statics.
@@ -475,7 +476,7 @@ gdb ./build/wamp_router
 ### Configuration
 The router uses TOML configuration files (config.toml or test_config.toml) for all settings:
 - Server port, TLS certificate paths, logging level
-- `threads` (`[server]`) - router threads / shards (default 1, `"auto"` = available CPUs); see the cross-shard limitation under Router
+- `threads` (`[server]`) - router threads / shards (default 1, `"auto"` = available CPUs); see the RPC limitation under Router
 - `max_pending_invocations` - limits pending RPC calls (set via `ProcedureHandler::set_max_pending_invocations()`)
 - `call_timeout_ms` (`[server.rpc]`) - callee answer deadline, 0 disables; CALL `timeout` option overrides
 - `[server.events]` - `queue_size`, `overflow` (`backpressure` | `drop`), `backpressure_timeout_ms`, `slow_subscriber_limit`

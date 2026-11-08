@@ -19,6 +19,7 @@
 #include "wamp_serializer.hpp"
 #include "wamp_id.hpp"
 #include "shard.hpp"
+#include "shard_group.hpp"
 #include "event_channel.hpp"
 #include "raw_socket.hpp"
 #include <spdlog/spdlog.h>
@@ -35,10 +36,43 @@ namespace wamp {
 // ============================================================================
 class PubSubHandler {
 public:
+    // Tell the other shards whether this shard still has subscribers for a topic
+    static void interest_gained(Realm& realm, const std::string& topic) {
+        auto* group = realm.shard.group;
+        if (group && group->size() > 1 && realm.subscriptions.subscriber_count(topic) == 1) {
+            group->add_interest(realm.shard.index, realm.name, topic);
+        }
+    }
+
+    static void interest_lost(Realm& realm, const std::string& topic) {
+        auto* group = realm.shard.group;
+        if (group && group->size() > 1) {
+            group->remove_interest(realm.shard.index, realm.name, topic);
+        }
+    }
+
     static void cleanup_session(Realm& realm, uint64_t session_id) {
         auto& sub_manager = realm.subscriptions;
-        sub_manager.unsubscribe_session(session_id);
+        const auto emptied = sub_manager.unsubscribe_session(session_id);
+        for (const auto& topic : emptied) {
+            interest_lost(realm, topic);
+        }
         spdlog::debug("Cleaned up subscriptions for session {}", session_id);
+    }
+
+    // Runs on the destination shard's thread: deliver cross-shard PUBLISHes to this shard's subscribers
+    static asio::awaitable<void> deliver_remote(Shard& shard, std::vector<CrossPublishPtr> batch) {
+        for (const auto& message : batch) {
+            Realm& realm = shard.realms.get(message->realm);
+            realm.subscriptions.for_each_subscriber(message->topic,
+                [&](uint64_t subscription_id, uint64_t subscriber_session) {
+                    shard.channels.deliver(subscriber_session,
+                        EventToSend{subscriber_session, std::make_shared<std::vector<uint8_t>>(
+                                                            message->event.frame_for(subscription_id))});
+                });
+        }
+        // Queue-full sends were parked above; wait for room (bounded) before taking the next batch
+        co_await shard.channels.deliver_blocked(shard.channels.take_blocked());
     }
 
     // Handle SUBSCRIBE message
@@ -55,6 +89,7 @@ public:
         uint64_t subscription_id = realm.shard.ids.subscription.generate();
 
         sub_manager.subscribe(subscription_id, subscribe.topic, session_id);
+        interest_gained(realm, subscribe.topic);
 
         auto subscribed = SubscribedMessage{subscribe.request_id, subscription_id};
         auto subscribed_cbor = serialize_subscribed(subscribed);
@@ -85,6 +120,9 @@ public:
         }
 
         sub_manager.unsubscribe(unsubscribe.subscription_id);
+        if (sub_manager.subscriber_count(info->topic) == 0) {
+            interest_lost(realm, info->topic);
+        }
 
         spdlog::info("Sent UNSUBSCRIBED: request_id={}, subscription_id={}",
                     unsubscribe.request_id, unsubscribe.subscription_id);
@@ -145,6 +183,20 @@ public:
                                 subscriber_session);
                 }
             });
+
+        // Subscribers on other shards: one shared message per interested shard, not per subscriber
+        if (auto* group = realm.shard.group; group && group->size() > 1) {
+            const auto targets = group->interested(realm.shard.index, realm.name, publish.topic);
+            if (!targets.empty()) {
+                auto message = std::make_shared<const CrossPublish>(CrossPublish{
+                    realm.name, publish.topic,
+                    event_template ? *event_template
+                                   : EventTemplate{EventMessage{0, publication_id, {}, publish.arguments,
+                                                                publish.arguments_kw}}});
+                group->send(targets, message);
+                subscriber_count += targets.size();
+            }
+        }
 
         spdlog::debug("Topic '{}' has {} subscribers", publish.topic, subscriber_count);
         if (subscriber_count > 0) {

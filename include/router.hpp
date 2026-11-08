@@ -16,7 +16,9 @@
 #pragma once
 
 #include "cpu_limits.hpp"
+#include "pubsub_handler.hpp"
 #include "shard.hpp"
+#include "shard_group.hpp"
 #include "wamp_server.hpp"
 #include <asio.hpp>
 #include <asio/ssl.hpp>
@@ -35,11 +37,9 @@ namespace wamp {
 // then on the connection (TLS handshake included) lives entirely on that shard's thread, with that
 // shard's own io_context, event channels, realms and pending calls: no locks, no shared mutable state.
 //
-// LIMITATION: delivery between sessions on *different* shards is not implemented yet, so with more than
-// one thread a publish only reaches subscribers on the publisher's shard and a CALL only finds callees on
-// the caller's shard. That is correct for workloads whose sessions never talk to each other (and for
-// measuring how the router scales), not for general routing. threads = 1 behaves exactly like one
-// WampServer.
+// Pub/sub works across shards (see ShardGroup: replicated topic interest plus one inbox per shard, one
+// message per interested shard). LIMITATION: RPC does not yet: a CALL only finds callees registered on
+// the caller's shard. threads = 1 behaves exactly like one WampServer.
 class Router {
 public:
     enum class Transport { PLAIN, TLS };
@@ -59,6 +59,12 @@ public:
         const auto shard_config = ShardConfig::from(config_);
         for (unsigned i = 0; i < threads; ++i) {
             workers_.push_back(std::make_unique<Worker>(shard_config));
+        }
+        group_ = std::make_unique<ShardGroup>(threads, [](Shard& shard, std::vector<CrossPublishPtr> batch) {
+            return PubSubHandler::deliver_remote(shard, std::move(batch));
+        });
+        for (unsigned i = 0; i < threads; ++i) {
+            group_->attach(i, *workers_[i]->shard, workers_[i]->io);
         }
     }
 
@@ -139,7 +145,7 @@ public:
     [[nodiscard]] uint64_t dropped_events() const {
         uint64_t total = 0;
         for (const auto& worker : workers_) total += worker->shard->channels.dropped_count();
-        return total;
+        return total + group_->dropped();
     }
 
 private:
@@ -218,6 +224,7 @@ private:
     ssl::context tls_context_;
     tcp::acceptor acceptor_;
     unsigned short bound_port_;
+    std::unique_ptr<ShardGroup> group_;  // declared before the workers: their sessions may still use it while they shut down
     std::vector<std::unique_ptr<Worker>> workers_;
     std::thread acceptor_thread_;
     std::optional<asio::signal_set> signals_;

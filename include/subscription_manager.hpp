@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -79,8 +80,9 @@ public:
         return true;
     }
 
-    // Unsubscribe all subscriptions for a session (for cleanup on disconnect)
-    void unsubscribe_session(uint64_t session_id) {
+    // Unsubscribe all subscriptions for a session (for cleanup on disconnect).
+    // Returns the topics that no longer have any subscriber.
+    std::vector<std::string> unsubscribe_session(uint64_t session_id) {
         // Collect subscription IDs to remove (can't modify during iteration)
         std::vector<uint64_t> to_remove;
         for (const auto& [sub_id, info] : subscriptions_) {
@@ -89,9 +91,20 @@ public:
             }
         }
 
+        std::vector<std::string> emptied;
         for (uint64_t sub_id : to_remove) {
+            const std::string topic = subscriptions_.at(sub_id).topic;
             unsubscribe(sub_id);
+            if (subscriber_count(topic) == 0 && std::ranges::find(emptied, topic) == emptied.end()) {
+                emptied.push_back(topic);
+            }
         }
+        return emptied;
+    }
+
+    [[nodiscard]] size_t subscriber_count(const std::string& topic) const {
+        auto it = topic_subscriptions_.find(topic);
+        return it == topic_subscriptions_.end() ? 0 : it->second.size();
     }
 
     // Returns empty vector if no subscribers (copies the ids; use for_each_subscriber on hot paths)

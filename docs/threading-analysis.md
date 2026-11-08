@@ -279,6 +279,14 @@ CPU per operation stays flat (whole-run `/proc` tick deltas), so the shards do n
 
 ### Stage 3: pub/sub across shards
 
+**Status: done** (`include/shard_group.hpp`, `PubSubHandler`). Built as designed below with three simplifications, each chosen because it is simpler and still keeps the guarantees:
+
+* **Interest replicas are updated directly, not by acknowledged broadcast.** The shard whose first local subscriber to a topic appears (or whose last one goes) locks each other shard's replica in turn and edits it before its own SUBSCRIBED/UNSUBSCRIBED is sent. That gives the same "subscribed means later publishes are seen" guarantee with no round trip. A replica's mutex is taken by its owner on every publish and by other shards only on those rare changes, so in steady state it is an uncontended lock on a cache line only that shard writes; only one such lock is held at a time (no deadlock).
+* **Inbox = mutex-protected vector per shard instead of SPSC rings.** The sender wakes the destination only when its inbox was idle, so a burst costs one wake-up (the 33-60 ns batched hand-off measured above). Messages from one shard to another keep their order, so per-publisher, per-topic ordering holds. The inbox is capped at 65,536 messages; beyond that events are dropped and counted (`Router::dropped_events()`).
+* **Backpressure:** the destination's drain coroutine delivers with the normal overflow policy and then waits (bounded by `backpressure_timeout_ms`) for parked sends, so a slow subscriber stalls its shard's inbox rather than growing memory; the inbox cap then bounds the damage.
+
+Each PUBLISH is serialized once on the publishing shard and the immutable `EventTemplate` is shared (one refcount per interested shard, not per subscriber).
+
 Every shard keeps a **private** `Realm` per realm name with its local subscribers, plus an **interest table** (topic -> set of
 shards that have at least one subscriber). A PUBLISH on shard A:
 

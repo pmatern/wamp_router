@@ -89,8 +89,8 @@ int main(int argc, char* argv[]) {
 
         const unsigned threads = config.threads == 0 ? wamp::detect_cpu_limits().available : config.threads;
         if (threads > 1) {
-            spdlog::warn("threads = {}: sessions on different shards cannot reach each other yet "
-                         "(cross-shard delivery is not implemented); use threads = 1 for normal routing", threads);
+            spdlog::warn("threads = {}: pub/sub works across shards but an RPC CALL only reaches "
+                         "callees on the caller's shard (cross-shard RPC is not implemented); use threads = 1 if you use RPC", threads);
         }
 
         wamp::Router router{config, wamp::Router::Transport::TLS, threads};

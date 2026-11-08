@@ -24,6 +24,8 @@
 
 namespace wamp {
 
+class ShardGroup;
+
 // What a Shard needs from the server configuration
 struct ShardConfig {
     EventQueueConfig events{};
@@ -56,6 +58,10 @@ public:
 
     Shard(const Shard&) = delete;
     Shard& operator=(const Shard&) = delete;
+
+    // Set by ShardGroup::attach when this shard runs next to others (null for a standalone server)
+    ShardGroup* group{nullptr};
+    unsigned index{0};
 
     EventChannelRegistry channels;
     InvocationTracker invocations;

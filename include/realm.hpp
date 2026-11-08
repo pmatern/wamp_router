@@ -32,9 +32,10 @@ class Shard;
 // Topics and procedures are only visible inside their realm: the same URI in two realms refers to
 // two unrelated topics/procedures. Sessions are bound to one realm for their lifetime.
 struct Realm {
-    explicit Realm(Shard& owner) : shard(owner) {}
+    Realm(Shard& owner, std::string realm_name) : shard(owner), name(std::move(realm_name)) {}
 
     Shard& shard;  // the shard that owns this realm: channels, invocations and id generators live there
+    std::string name;
     SubscriptionManager subscriptions;
     RegistrationManager registrations;
 };
@@ -51,7 +52,7 @@ public:
         if (auto it = realms_.find(name); it != realms_.end()) {
             return *it->second;
         }
-        return *realms_.emplace(std::string{name}, std::make_unique<Realm>(owner_)).first->second;
+        return *realms_.emplace(std::string{name}, std::make_unique<Realm>(owner_, std::string{name})).first->second;
     }
 
     [[nodiscard]] size_t count() const {

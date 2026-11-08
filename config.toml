@@ -6,9 +6,8 @@ port = 8080
 
 # Router threads, one shard each (sessions are spread over them). 1 = the classic single-threaded router.
 # "auto" = one per available CPU (container-aware: cgroup quota, CPU affinity, ECS task limit).
-# WARNING: with more than one thread, sessions on different shards cannot reach each other yet (a publish only
-# reaches subscribers on the publisher's shard, a CALL only finds callees on the caller's shard); cross-shard
-# delivery is not implemented. Leave at 1 for normal routing.
+# WARNING: with more than one thread, pub/sub works across shards but an RPC CALL only finds callees on the
+# caller's shard (cross-shard RPC is not implemented). Leave at 1 if you use RPC.
 threads = 1
 
 [server.tls]

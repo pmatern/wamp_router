@@ -190,3 +190,94 @@ TEST_CASE("threads = 0 means one shard per available CPU", "[router][cpu_limits]
     Router router{plain_config(), Router::Transport::PLAIN, 0};
     REQUIRE(router.shard_count() == detect_cpu_limits().available);
 }
+
+TEST_CASE("Pub/sub reaches subscribers on every shard, in order", "[router][crossshard]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 4};
+    router.start();
+
+    asio::io_context io;
+    constexpr size_t kClients = 8;  // sequential connects spread two per shard; client 0 (the publisher) is on shard 0
+    std::vector<std::unique_ptr<WampClient>> clients;
+    for (size_t i = 0; i < kClients; ++i) clients.push_back(std::make_unique<WampClient>(io));
+    std::vector<std::vector<int64_t>> received(kClients);
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        for (auto& c : clients) co_await c->connect("127.0.0.1", router.port(), "test.realm");
+        for (size_t i = 1; i < kClients; ++i) {
+            co_await clients[i]->subscribe("cross.topic", [&received, i](const EventMessage& e) {
+                received[i].push_back(std::get<int64_t>(e.arguments.at(0)));
+            });
+        }
+        for (int64_t n = 0; n < 50; ++n) {
+            (void)co_await clients[0]->publish("cross.topic", WampList{n}, {}, /*acknowledge=*/true);
+        }
+        co_await pause(io, 300ms);
+        for (auto& c : clients) co_await c->disconnect();
+        done = true;
+    }, detached);
+    io.run_for(10s);
+
+    REQUIRE(done);
+    REQUIRE(router.accepted_per_shard() == std::vector<uint64_t>{2, 2, 2, 2});
+    std::vector<int64_t> expected(50);
+    std::iota(expected.begin(), expected.end(), 0);
+    for (size_t i = 1; i < kClients; ++i) {
+        REQUIRE(received[i] == expected);  // every event, none duplicated, publisher's order kept
+    }
+    REQUIRE(router.dropped_events() == 0);
+}
+
+TEST_CASE("Cross-shard interest follows subscribe, unsubscribe and disconnect", "[router][crossshard]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    asio::io_context io;
+    WampClient publisher{io};   // shard 0
+    WampClient subscriber{io};  // shard 1
+    WampClient other_realm{io}; // shard 0
+    int events = 0;
+    int other = 0;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await publisher.connect("127.0.0.1", router.port(), "test.realm");
+        co_await subscriber.connect("127.0.0.1", router.port(), "test.realm");
+        co_await other_realm.connect("127.0.0.1", router.port(), "another.realm");
+        REQUIRE(router.accepted_per_shard() == std::vector<uint64_t>{2, 1});
+
+        co_await other_realm.subscribe("cross.t", [&](const EventMessage&) { ++other; });  // same topic name, other realm
+
+        (void)co_await publisher.publish("cross.t", true);     // nobody listening on the other shard yet
+        co_await pause(io, 50ms);
+        REQUIRE(events == 0);
+
+        auto sub = co_await subscriber.subscribe("cross.t", [&](const EventMessage&) { ++events; });
+        (void)co_await publisher.publish("cross.t", true);     // SUBSCRIBED came back, so this one must arrive
+        co_await pause(io, 50ms);
+        REQUIRE(events == 1);
+
+        co_await subscriber.unsubscribe(sub);
+        (void)co_await publisher.publish("cross.t", true);
+        co_await pause(io, 50ms);
+        REQUIRE(events == 1);
+
+        (void)co_await subscriber.subscribe("cross.t", [&](const EventMessage&) { ++events; });
+        (void)co_await publisher.publish("cross.t", true);
+        co_await pause(io, 50ms);
+        REQUIRE(events == 2);
+
+        co_await subscriber.disconnect();                      // interest must be withdrawn on disconnect too
+        co_await pause(io, 50ms);
+        (void)co_await publisher.publish("cross.t", true);
+        co_await pause(io, 50ms);
+        REQUIRE(events == 2);
+
+        REQUIRE(other == 0);                                   // realms stay isolated across shards
+        co_await publisher.disconnect();
+        co_await other_realm.disconnect();
+        done = true;
+    }, detached);
+    io.run_for(10s);
+    REQUIRE(done);
+}

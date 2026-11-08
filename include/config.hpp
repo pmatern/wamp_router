@@ -137,7 +137,7 @@ struct AuthRole {
 struct ServerConfig {
     unsigned short port{};
     // Router threads, one shard each. 0 = one per available CPU (see cpu_limits.hpp). With more than one,
-    // sessions on different shards cannot reach each other yet (cross-shard delivery is not implemented).
+    // pub/sub works across shards but a CALL only finds callees on the caller's shard (cross-shard RPC is not implemented).
     unsigned threads{1};
     TlsConfig tls{};
     size_t max_pending_invocations{};
