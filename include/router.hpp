@@ -17,6 +17,7 @@
 
 #include "cpu_limits.hpp"
 #include "cross_shard.hpp"
+#include "logging.hpp"
 #include "shard.hpp"
 #include "shard_group.hpp"
 #include "wamp_server.hpp"
@@ -81,7 +82,10 @@ public:
         if (started_.exchange(true)) return;
         for (auto& worker : workers_) {
             asio::co_spawn(worker->io, call_timeout_sweeper(worker->shard), asio::detached);
-            worker->thread = std::thread([w = worker.get()] { w->io.run(); });
+            worker->thread = std::thread([w = worker.get(), index = static_cast<unsigned>(&worker - workers_.data())] {
+                logging::register_shard_thread(index);
+                w->io.run();
+            });
         }
         asio::co_spawn(accept_io_, accept_loop(), asio::detached);
         acceptor_thread_ = std::thread([this] { accept_io_.run(); });

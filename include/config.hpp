@@ -144,6 +144,9 @@ struct ServerConfig {
     std::chrono::milliseconds call_timeout{30000};  // 0 disables
     EventQueueConfig events{};
     spdlog::level::level_enum log_level{};
+    bool log_async{true};          // [logging] async: a background thread writes the log, shards never wait on a sink
+    size_t log_queue_size{8192};   // [logging] queue_size: lines buffered for that thread; the oldest is dropped when full
+    std::string log_file;          // [logging] file: log here instead of the console
 
     // Authentication: authid → Ed25519 public key (hex-encoded, 64 chars = 32 bytes)
     std::unordered_map<std::string, std::string> auth_keys;
@@ -272,6 +275,14 @@ public:
                 const auto& logging = toml::find(config_data, "logging");
                 std::string level_str = toml::find<std::string>(logging, "level");
                 config.log_level = parse_log_level(level_str);
+                config.log_async = toml::find_or<bool>(logging, "async", true);
+                const auto queue = toml::find_or<int64_t>(logging, "queue_size", 8192);
+                if (queue <= 0) {
+                    spdlog::error("[logging] queue_size must be greater than 0");
+                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                }
+                config.log_queue_size = static_cast<size_t>(queue);
+                config.log_file = toml::find_or<std::string>(logging, "file", "");
             } else {
                 config.log_level = spdlog::level::info; // Default
             }

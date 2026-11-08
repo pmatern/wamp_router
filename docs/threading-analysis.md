@@ -345,7 +345,7 @@ Original design notes:
 
 ### Stage 5: everything else that touches shared state
 
-**Status: partly done.** `Router::stats()` returns per-shard counters (sessions, accepted, publishes, calls, event drops, inbox depth/received/dropped; `main` logs them at shutdown), and `Router::stop()` stops the acceptor, then waits up to 2 s for the cross-shard inboxes to empty before stopping the shard threads. Still open: per-shard logging and cross-shard latency numbers. Original plan: per-shard counters aggregated on read (dropped events, active sessions), asynchronous or per-shard logging so a slow sink does not
+**Status: partly done.** `Router::stats()` returns per-shard counters (sessions, accepted, publishes, calls, event drops, inbox depth/received/dropped; `main` logs them at shutdown), and `Router::stop()` stops the acceptor, then waits up to 2 s for the cross-shard inboxes to empty before stopping the shard threads. Logging is asynchronous (`include/logging.hpp`): shards format a line and push it onto a bounded queue (`[logging] queue_size`, default 8192); one writer thread owns the sink, so a stalled sink or terminal cannot stall a shard. A full queue overwrites the oldest line and counts it (`logging::overruns()`, reported at shutdown), and every line is tagged with its shard. Per-message `info` logs on the CALL/PUBLISH paths are now `debug`. Still open: cross-shard latency numbers. Original plan: per-shard counters aggregated on read (dropped events, active sessions), asynchronous or per-shard logging so a slow sink does not
 stall a core, graceful shutdown that stops acceptors then drains lanes, and config reload (still "restart to change").
 
 ## Expected gains and risks

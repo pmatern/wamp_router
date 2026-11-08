@@ -220,7 +220,7 @@ public:
 
             spdlog::warn("CALL to unregistered procedure '{}' from session {}",
                         call.procedure, caller_session_id);
-            spdlog::info("Sent ERROR: request_id={}, error=wamp.error.no_such_procedure", call.request_id);
+            spdlog::debug("Sent ERROR: request_id={}, error=wamp.error.no_such_procedure", call.request_id);
             return rawsocket::create_wamp_message(serialize_error(
                 ErrorMessage::create_no_such_procedure(call.request_id, call.procedure)));
         }
@@ -298,7 +298,7 @@ public:
             return std::vector<uint8_t>{};
         }
 
-        spdlog::info("Sent RESULT to caller session {} (request_id={}, invocation_id={})",
+        spdlog::debug("Sent RESULT to caller session {} (request_id={}, invocation_id={})",
                     caller_session_id, call_request_id, yield_msg.invocation_id);
 
         spdlog::debug("Invocation completed and removed from tracker ({} pending)",
@@ -337,7 +337,7 @@ public:
             return std::vector<uint8_t>{};
         }
 
-        spdlog::info("Forwarded callee ERROR to caller session {} (request_id={}, error={})",
+        spdlog::debug("Forwarded callee ERROR to caller session {} (request_id={}, error={})",
                     pending_call->caller_session_id, pending_call->call_request_id, error_msg.error_uri);
 
         return std::vector<uint8_t>{};
@@ -372,11 +372,11 @@ private:
         if (!accepted(shard.channels.deliver(callee_session_id, EventToSend{callee_session_id, invocation_data}))) {
             spdlog::error("Failed to send INVOCATION to callee session {} (channel full or closed)",
                          callee_session_id);
-            spdlog::info("Sent ERROR: request_id={}, error=wamp.error.callee_failure", call_request_id);
+            spdlog::debug("Sent ERROR: request_id={}, error=wamp.error.callee_failure", call_request_id);
             return ErrorMessage::create_callee_failure(call_request_id, "Callee session unavailable or channel full");
         }
 
-        spdlog::info("Sent INVOCATION to callee session {} (invocation_id={}, procedure={})",
+        spdlog::debug("Sent INVOCATION to callee session {} (invocation_id={}, procedure={})",
                     callee_session_id, invocation_id, registration.procedure);
 
         // Track the invocation for routing YIELD back to the caller as RESULT

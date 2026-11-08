@@ -621,7 +621,7 @@ private:
 
         switch (auto msg_type = *type_result) {
             case MessageType::GOODBYE: {
-                spdlog::info("Received GOODBYE from client");
+                spdlog::debug("Received GOODBYE from client");
 
                 auto goodbye_result = deserialize_goodbye(cbor_payload);
                 if (!goodbye_result.has_value()) {
@@ -642,7 +642,7 @@ private:
             }
 
             case MessageType::SUBSCRIBE: {
-                spdlog::info("Received SUBSCRIBE from client");
+                spdlog::debug("Received SUBSCRIBE from client");
 
                 auto subscribe_result = deserialize_subscribe(cbor_payload);
                 if (!subscribe_result.has_value()) {
@@ -665,7 +665,7 @@ private:
             }
 
             case MessageType::PUBLISH: {
-                spdlog::info("Received PUBLISH from client");
+                spdlog::debug("Received PUBLISH from client");
 
                 auto publish_result = deserialize_publish(cbor_payload);
                 if (!publish_result.has_value()) {
@@ -694,7 +694,7 @@ private:
             }
 
             case MessageType::UNSUBSCRIBE: {
-                spdlog::info("Received UNSUBSCRIBE from client");
+                spdlog::debug("Received UNSUBSCRIBE from client");
 
                 auto unsubscribe_result = deserialize_unsubscribe(cbor_payload);
                 if (!unsubscribe_result.has_value()) {
@@ -712,7 +712,7 @@ private:
             }
 
             case MessageType::UNREGISTER: {
-                spdlog::info("Received UNREGISTER from client");
+                spdlog::debug("Received UNREGISTER from client");
 
                 auto unregister_result = deserialize_unregister(cbor_payload);
                 if (!unregister_result.has_value()) {
@@ -736,7 +736,7 @@ private:
             }
 
             case MessageType::ERROR: {
-                spdlog::info("Received ERROR from callee");
+                spdlog::debug("Received ERROR from callee");
 
                 auto error_result = deserialize_error(cbor_payload);
                 if (!error_result.has_value()) {
@@ -767,7 +767,7 @@ private:
             }
 
             case MessageType::REGISTER: {
-                spdlog::info("Received REGISTER from client");
+                spdlog::debug("Received REGISTER from client");
 
                 auto register_result = deserialize_register(cbor_payload);
                 if (!register_result.has_value()) {
@@ -796,7 +796,7 @@ private:
             }
 
             case MessageType::CALL: {
-                spdlog::info("Received CALL from client");
+                spdlog::debug("Received CALL from client");
 
                 auto call_result = deserialize_call(cbor_payload);
                 if (!call_result.has_value()) {
@@ -825,7 +825,7 @@ private:
             }
 
             case MessageType::YIELD: {
-                spdlog::info("Received YIELD from callee");
+                spdlog::debug("Received YIELD from callee");
 
                 auto yield_result = deserialize_yield(cbor_payload);
                 if (!yield_result.has_value()) {

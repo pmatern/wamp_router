@@ -219,7 +219,7 @@ TEST_CASE("InvocationTracker session cleanup", "[procedure_handler][invocation]"
         REQUIRE(tracker.pending_count() == 4);
 
         // Remove all from session 10
-        tracker.remove_caller_session(10);
+        (void)tracker.remove_caller_session(10);
 
         REQUIRE(tracker.pending_count() == 1);  // Only session 20's call remains
         REQUIRE(!tracker.retrieve(1).has_value());
@@ -230,7 +230,7 @@ TEST_CASE("InvocationTracker session cleanup", "[procedure_handler][invocation]"
 
     SECTION("Remove non-existent session") {
         tracker.track(PendingCall{1, 5, 100});
-        tracker.remove_caller_session(999);
+        (void)tracker.remove_caller_session(999);
         REQUIRE(tracker.pending_count() == 1);  // Unchanged
     }
 }

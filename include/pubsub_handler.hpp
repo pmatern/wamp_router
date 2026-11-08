@@ -198,7 +198,7 @@ public:
 
         spdlog::debug("Topic '{}' has {} subscribers", publish.topic, subscriber_count);
         if (subscriber_count > 0) {
-            spdlog::info("Sent {}/{} EVENT messages for publication_id={}, topic={}",
+            spdlog::debug("Sent {}/{} EVENT messages for publication_id={}, topic={}",
                         sent_count, subscriber_count, publication_id, publish.topic);
         }
 
@@ -214,7 +214,7 @@ public:
             auto published = PublishedMessage{publish.request_id, publication_id};
             auto published_cbor = serialize_published(published);
 
-            spdlog::info("Sent PUBLISHED: request_id={}, publication_id={}, topic={}",
+            spdlog::debug("Sent PUBLISHED: request_id={}, publication_id={}, topic={}",
                         publish.request_id, publication_id, publish.topic);
 
             return rawsocket::create_wamp_message(published_cbor);

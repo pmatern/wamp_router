@@ -52,6 +52,12 @@ slow_subscriber_limit = 3
 [logging]
 # Log level: trace, debug, info, warn, error, critical
 level = "info"
+# async = true: a background thread writes the log, so a slow sink (full pipe, network disk) never stalls a
+# shard. queue_size lines are buffered; when it is full the oldest line is dropped (counted at shutdown).
+# async = false writes on the calling thread. Each line is tagged with its shard ("shard 2").
+async = true
+queue_size = 8192
+# file = "/var/log/wamp_router.log"   # default: the console
 
 [auth.keys]
 # Authentication keys: authid → Ed25519 public key (hex-encoded, 64 characters)

@@ -19,6 +19,7 @@
 #include "include/cpu_limits.hpp"
 #include "include/router.hpp"
 #include <print>
+#include "include/logging.hpp"
 #include <spdlog/spdlog.h>
 #include <filesystem>
 
@@ -49,8 +50,7 @@ int main(int argc, char* argv[]) {
         }
         const auto& config = *config_result;
 
-        spdlog::set_level(config.log_level);
-        spdlog::set_pattern("[%Y-%m-%d %H:%M:%S] [%^%l%$] %v");
+        wamp::logging::init({config.log_level, config.log_async, config.log_queue_size, config.log_file});
 
         std::print("\n");
         std::print("╔════════════════════════════════════════╗\n");
@@ -98,6 +98,10 @@ int main(int argc, char* argv[]) {
             spdlog::info("shard {}: accepted={} publishes={} calls={} event_drops={} inbox_received={} inbox_dropped={}",
                          i, s.accepted, s.publishes, s.calls, s.event_drops, s.inbox_received, s.inbox_dropped);
         }
+        if (const auto lost = wamp::logging::overruns(); lost > 0) {
+            spdlog::warn("{} log line(s) were dropped because the log writer could not keep up", lost);
+        }
+        spdlog::shutdown();   // flushes the async writer
 
     } catch (const std::exception& e) {
         spdlog::error("Fatal error: {}", e.what());

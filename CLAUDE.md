@@ -133,6 +133,9 @@ max_pending_invocations = 10000
 
 [logging]
 level = "info"  # trace, debug, info, warn, error, critical
+async = true       # a background thread writes the log; a slow sink never stalls a shard
+queue_size = 8192  # buffered lines; the oldest is dropped when full
+# file = "router.log"
 ```
 
 **Command-line options:**
@@ -263,6 +266,7 @@ wamp_router/
 │   ├── authorizer.hpp        # Role permissions (Action, Permissions): exact/prefix URI rules
 │   ├── cpu_limits.hpp        # Container-aware CPU budget (cgroup quota, affinity, ECS task metadata)
 │   ├── router.hpp            # Router: N shards, one thread each, acceptor hands connections to the least-loaded shard
+│   ├── logging.hpp           # Async logger (bounded queue, one writer thread), shard tag per line
 │   ├── shard_group.hpp       # ShardGroup: cross-shard topic interest, procedure table, per-shard inboxes
 │   ├── cross_shard.hpp       # Dispatch of inbox messages (events, forwarded calls, results) on the destination shard
 │   ├── shard.hpp             # Shard: all routing state one thread owns (channels, pending calls, realms, ids)

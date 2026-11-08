@@ -39,6 +39,9 @@ awaitable<void> pause(asio::io_context& io, std::chrono::milliseconds d) {
     co_await timer.async_wait(use_awaitable);
 }
 
+// Create the default logger before any router thread can log (spdlog creates it lazily on first use)
+[[maybe_unused]] const bool kLoggerReady = (wamp::logging::init({spdlog::level::off, false, 8192, ""}), true);
+
 }  // namespace
 
 TEST_CASE("Router spreads connections over its shards", "[router]") {

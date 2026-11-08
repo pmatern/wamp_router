@@ -63,6 +63,9 @@ max_pending_invocations = 10000
 
 [logging]
 level = "info"  # trace, debug, info, warn, error, critical
+async = true       # a background thread writes the log; a slow sink never stalls a shard
+queue_size = 8192  # buffered lines; the oldest is dropped when full
+# file = "router.log"
 
 # Optional: WAMP-Cryptosign authentication keys (Ed25519 public keys)
 # If omitted, authentication is disabled and sessions are established without challenge
