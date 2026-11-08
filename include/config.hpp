@@ -134,6 +134,13 @@ struct AuthRole {
 // ============================================================================
 // ServerConfig - Complete server configuration
 // ============================================================================
+// [server.websocket]: WebSocket (wamp.2.cbor) on the same port as RawSocket
+struct WebSocketConfig {
+    bool enabled{true};
+    std::vector<std::string> allowed_origins;   // empty = any; else a request with an Origin header must match one exactly
+    size_t max_message_size{(size_t{1} << 24) - 1};   // bytes; the internal frame format holds at most 2^24 - 1
+};
+
 struct ServerConfig {
     unsigned short port{};
     // Router threads, one shard each. 0 = one per available CPU (see cpu_limits.hpp). Sessions on different
@@ -143,6 +150,7 @@ struct ServerConfig {
     size_t max_pending_invocations{};
     std::chrono::milliseconds call_timeout{30000};  // 0 disables
     EventQueueConfig events{};
+    WebSocketConfig websocket{};
     spdlog::level::level_enum log_level{};
     bool log_async{true};          // [logging] async: a background thread writes the log, shards never wait on a sink
     size_t log_queue_size{8192};   // [logging] queue_size: lines buffered for that thread; the oldest is dropped when full
@@ -229,6 +237,34 @@ public:
                 }
             } else {
                 config.max_pending_invocations = 10000; // Default
+            }
+
+            if (server.contains("websocket")) {
+                const auto& ws = toml::find(server, "websocket");
+                config.websocket.enabled = toml::find_or<bool>(ws, "enabled", true);
+                if (ws.contains("allowed_origins")) {
+                    const auto& origins = toml::find(ws, "allowed_origins");
+                    if (!origins.is_array()) {
+                        spdlog::error("[server.websocket] allowed_origins must be an array of strings");
+                        return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                    }
+                    for (const auto& origin : origins.as_array()) {
+                        if (!origin.is_string() || origin.as_string().empty()) {
+                            spdlog::error("[server.websocket] allowed_origins must be an array of non-empty strings");
+                            return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                        }
+                        config.websocket.allowed_origins.push_back(origin.as_string());
+                    }
+                }
+                if (ws.contains("max_message_size")) {
+                    const auto size = toml::find<int64_t>(ws, "max_message_size");
+                    if (size <= 0 || static_cast<uint64_t>(size) > config.websocket.max_message_size) {
+                        spdlog::error("[server.websocket] max_message_size must be from 1 to {}",
+                                      config.websocket.max_message_size);
+                        return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                    }
+                    config.websocket.max_message_size = static_cast<size_t>(size);
+                }
             }
 
             if (server.contains("events")) {

@@ -31,6 +31,16 @@ max_pending_invocations = 10000
 # option overrides it.
 call_timeout_ms = 30000
 
+[server.websocket]
+# WebSocket (subprotocol wamp.2.cbor) on the same port: the router tells RawSocket and an HTTP upgrade
+# apart by the first byte of the connection. TLS applies to both.
+enabled = true
+# Browsers send an Origin header. Empty = accept any origin; otherwise a request that carries an Origin
+# must match one entry exactly (scheme://host[:port]). Requests without an Origin (non-browser clients) pass.
+allowed_origins = []
+# Largest WebSocket message in bytes (at most 16777215, the router's internal frame limit)
+# max_message_size = 16777215
+
 [server.events]
 # Per-session queue of events/invocations/results waiting to be written to a client
 queue_size = 100

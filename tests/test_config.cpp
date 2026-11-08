@@ -731,3 +731,42 @@ key = ")" + key.path().string() + R"("
         CHECK_FALSE(load("threads = 1.5\n").has_value());
     }
 }
+
+TEST_CASE("Config::load() websocket", "[config][websocket]") {
+    TempCertFile cert("cert");
+    TempCertFile key("key");
+    auto load = [&](const std::string& websocket_section) {
+        std::string content = "[server]\nport = 8080\n" + websocket_section + R"(
+[server.tls]
+cert = ")" + cert.path().string() + R"("
+key = ")" + key.path().string() + R"("
+)";
+        TempConfigFile config(content);
+        return wamp::Config::load(config.path());
+    };
+
+    SECTION("defaults: enabled, any origin, 16 MiB - 1") {
+        auto result = load("");
+        REQUIRE(result.has_value());
+        CHECK(result->websocket.enabled);
+        CHECK(result->websocket.allowed_origins.empty());
+        CHECK(result->websocket.max_message_size == (size_t{1} << 24) - 1);
+    }
+    SECTION("explicit values") {
+        auto result = load("[server.websocket]\nenabled = false\n"
+                           "allowed_origins = [\"https://a.example.com\", \"http://localhost:3000\"]\n"
+                           "max_message_size = 65536\n");
+        REQUIRE(result.has_value());
+        CHECK_FALSE(result->websocket.enabled);
+        CHECK(result->websocket.allowed_origins ==
+              std::vector<std::string>{"https://a.example.com", "http://localhost:3000"});
+        CHECK(result->websocket.max_message_size == 65536);
+    }
+    SECTION("invalid values are rejected") {
+        CHECK_FALSE(load("[server.websocket]\nallowed_origins = \"https://a.example.com\"\n").has_value());
+        CHECK_FALSE(load("[server.websocket]\nallowed_origins = [1]\n").has_value());
+        CHECK_FALSE(load("[server.websocket]\nallowed_origins = [\"\"]\n").has_value());
+        CHECK_FALSE(load("[server.websocket]\nmax_message_size = 0\n").has_value());
+        CHECK_FALSE(load("[server.websocket]\nmax_message_size = 16777216\n").has_value());
+    }
+}
