@@ -54,7 +54,7 @@ int main(int argc, char* argv[]) {
 
         std::print("\n");
         std::print("╔════════════════════════════════════════╗\n");
-        std::print("║   WAMP Router (RawSocket + CBOR)      ║\n");
+        std::print("║              WAMP Router               ║\n");
         std::print("╚════════════════════════════════════════╝\n");
         std::print("\n");
         std::print("Configuration:\n");
