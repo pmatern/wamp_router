@@ -150,13 +150,20 @@ public:
     // Queue an event for a session, applying the overflow policy if its queue is full.
     // may_defer=false forces DROP behaviour (for callers that cannot wait, e.g. disconnect cleanup).
     DeliveryResult deliver(uint64_t session_id, EventToSend event, bool may_defer = true) {
-        auto channel = find(session_id);
+        // A plain pointer: this registry is single-threaded and nothing here removes a channel, so the
+        // atomic reference count a shared_ptr copy would cost per delivery is not needed.
+        auto it = channels_.find(session_id);
+        EventChannel* channel = it != channels_.end() ? it->second.get() : nullptr;
         if (!channel || !channel->is_open()) {
             note_drop(session_id, "no open channel");
             return DeliveryResult::DROPPED_NO_SESSION;
         }
 
-        if (channel->try_send(std::error_code{}, event)) {
+        // try_send only consumes the message when it returns true (asio's channel_service::try_send
+        // returns before touching its arguments when the channel is full or closed), so moving here
+        // saves a reference-count round trip per delivery and `event` is still intact for the
+        // backpressure path below.
+        if (channel->try_send(std::error_code{}, std::move(event))) {
             clear_strikes(session_id);
             return DeliveryResult::QUEUED;
         }
