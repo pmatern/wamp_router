@@ -387,7 +387,7 @@ The direct CBOR codec raised the load-test rates again (RPC with 10 callers 17.8
 
 ### Profiling and threading analysis
 
-`wamp_profile_router` (plain-TCP router, logging off), `wamp_load --mode idle --connections N` (open and hold N sessions), `wamp_handoff_bench` (cross-thread handoff costs) and `wamp_tls_probe` (TLS 1.3 handshake and record costs) support the profile in [docs/threading-analysis.md](docs/threading-analysis.md), which also holds the recommended thread-per-core design.
+`wamp_profile_router` (plain-TCP router, logging off), `wamp_load --mode idle --connections N` (open and hold N sessions), `wamp_handoff_bench` (cross-thread handoff costs) and `wamp_tls_probe` (TLS 1.3 handshake and record costs) support the profile in [docs/threading-analysis.md](docs/threading-analysis.md), which also holds the recommended thread-per-core design. The current threading architecture is described in [docs/architecture.md](docs/architecture.md).
 
 ### Event queue and backpressure
 

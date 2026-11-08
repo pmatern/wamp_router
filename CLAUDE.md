@@ -516,7 +516,7 @@ Tests use Catch2 framework with CTest integration:
 
 ### Benchmarks
 
-`bench/` holds `wamp_bench` (Catch2 micro-benchmarks) and `wamp_load` (end-to-end load test over `WampClient`). Both are `EXCLUDE_FROM_ALL` CMake targets; build and run them in a Release build (`cmake --build build-local-release --target wamp_bench wamp_load`). Baseline numbers are in the README. `wamp_profile_router`, `wamp_handoff_bench` and `wamp_tls_probe` are further `EXCLUDE_FROM_ALL` tools used by the threading analysis (`docs/threading-analysis.md`).
+`bench/` holds `wamp_bench` (Catch2 micro-benchmarks) and `wamp_load` (end-to-end load test over `WampClient`). Both are `EXCLUDE_FROM_ALL` CMake targets; build and run them in a Release build (`cmake --build build-local-release --target wamp_bench wamp_load`). Baseline numbers are in the README. `wamp_profile_router`, `wamp_handoff_bench` and `wamp_tls_probe` are further `EXCLUDE_FROM_ALL` tools used by the threading analysis (`docs/threading-analysis.md`). The run-time threading design (threads, coordination, scheduling criteria) is described in `docs/architecture.md`.
 
 Run specific test: `./scripts/run.sh ./build/wamp_tests "[test name]"`
 
