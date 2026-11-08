@@ -87,6 +87,9 @@ int main(int argc, char* argv[]) {
         std::print("\n");
         std::print("Press Ctrl+C to stop\n\n");
 
+        if (const auto fds = wamp::raise_fd_limit()) {
+            spdlog::info("Open-file limit: {}", *fds);
+        }
         const unsigned threads = config.threads == 0 ? wamp::detect_cpu_limits().available : config.threads;
         wamp::Router router{config, wamp::Router::Transport::TLS, threads};
         router.stop_on_signals();
@@ -97,6 +100,10 @@ int main(int argc, char* argv[]) {
             const auto& s = stats[i];
             spdlog::info("shard {}: accepted={} publishes={} calls={} handshake_timeouts={} event_drops={} inbox_received={} inbox_dropped={}",
                          i, s.accepted, s.publishes, s.calls, s.handshake_timeouts, s.event_drops, s.inbox_received, s.inbox_dropped);
+        }
+        if (const auto rejected = router.rejected_connections(); rejected.total_limit + rejected.address_limit > 0) {
+            spdlog::info("Rejected connections: {} over max_connections, {} over max_connections_per_ip",
+                         rejected.total_limit, rejected.address_limit);
         }
         if (const auto lost = wamp::logging::overruns(); lost > 0) {
             spdlog::warn("{} log line(s) were dropped because the log writer could not keep up", lost);

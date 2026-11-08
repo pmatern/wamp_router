@@ -26,6 +26,10 @@ RawSocket and WebSocket (`wamp.2.cbor`) share one port. `WampSession` looks at t
 
 Everything inside the router (handlers, `EventTemplate`, cross-shard frames) builds RawSocket-framed messages, `[4-byte header][CBOR]`, shared as `shared_ptr<const vector>` between sessions and shards. A WebSocket session converts at the edge only: direct responses are re-wrapped as binary WebSocket frames in `WampSession`, and `session_writer` gathers a small unmasked WebSocket header followed by the shared payload (skipping the 4-byte RawSocket header), so event fan-out stays zero-copy for both transports. Consequence: a WebSocket message is limited to the same 16 MiB - 1 as a RawSocket frame.
 
+### Connection limits
+
+The acceptor thread asks a `ConnectionLimiter` (a mutex-protected total plus per-address counts, `connection_limiter.hpp`) before it hands a socket to a shard, and the shard's session releases the slot when it ends. The mutex is taken twice per connection lifetime and never on the message path. Over a limit, the socket is closed at once and a counter is bumped. `[server] max_connections` defaults to "auto" (open-file limit minus 128; `main` raises the soft limit to the hard limit first). Accept errors such as EMFILE back off for 100 ms instead of spinning.
+
 ### Stalled connections
 
 `handle_wamp_session` arms a timer when a connection starts (`[server] handshake_timeout_ms`, default 10 s). If the session is not established when it fires (TLS handshake, RawSocket/WebSocket handshake, HELLO and authentication all count), it closes the socket, which fails whatever read or handshake the session coroutine is waiting in, and bumps `Shard::counters.handshake_timeouts`. The deadline is for the whole path, so trickling bytes does not extend it. Established sessions cancel the timer and may idle indefinitely.

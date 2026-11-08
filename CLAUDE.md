@@ -281,6 +281,7 @@ wamp_router/
 │   ├── cbor.hpp              # Minimal CBOR reader/writer used by the hot-path serializers
 │   ├── wamp_serializer.hpp   # CBOR serialization/deserialization
 │   ├── raw_socket.hpp        # RawSocket framing (4-byte header)
+│   ├── connection_limiter.hpp # ConnectionLimiter (total and per-address connection caps), open-file limit helpers
 │   ├── websocket.hpp         # WebSocket (RFC 6455): upgrade parsing, frame parser, frame encoding (wamp.2.cbor only)
 │   ├── wamp_id.hpp           # ID generators (global, router-scoped)
 │   ├── pubsub_handler.hpp    # SUBSCRIBE/PUBLISH/EVENT handling
@@ -501,6 +502,7 @@ gdb ./build/wamp_router
 The router uses TOML configuration files (config.toml or test_config.toml) for all settings:
 - Server port, TLS certificate paths, logging level
 - `threads` (`[server]`) - router threads / shards (default 1, `"auto"` = available CPUs); sessions on different shards still reach each other, see Router
+- `max_connections` / `max_connections_per_ip` (`[server]`) - open connection caps (default `"auto"` = open-file limit minus 128, and 0 = off); enforced by the acceptor through `ConnectionLimiter` (`connection_limiter.hpp`), which the session releases when it ends
 - `handshake_timeout_ms` (`[server]`) - deadline for a new connection to become an established session (default 10000, 0 disables); enforced in `handle_wamp_session` with a timer that closes the socket
 - `max_pending_invocations` - limits pending RPC calls (set via `ProcedureHandler::set_max_pending_invocations()`)
 - `call_timeout_ms` (`[server.rpc]`) - callee answer deadline, 0 disables; CALL `timeout` option overrides

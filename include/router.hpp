@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "connection_limiter.hpp"
 #include "cpu_limits.hpp"
 #include "cross_shard.hpp"
 #include "logging.hpp"
@@ -53,7 +54,11 @@ public:
         , tls_context_(ssl::context::tlsv13)
         , acceptor_(accept_io_, tcp::endpoint(tcp::v4(), config_.port))
         , bound_port_(acceptor_.local_endpoint().port())
+        , limiter_(config_.max_connections.value_or(auto_max_connections()), config_.max_connections_per_ip)
     {
+        spdlog::info("Connection limit: {} total, {} per address",
+                     limiter_.max_total() == 0 ? std::string{"unlimited"} : std::to_string(limiter_.max_total()),
+                     limiter_.max_per_address() == 0 ? std::string{"unlimited"} : std::to_string(limiter_.max_per_address()));
         if (transport_ == Transport::TLS) {
             configure_tls_context(tls_context_, config_.tls);
         }
@@ -190,6 +195,18 @@ public:
         return all;
     }
 
+    // Connections closed at accept because a limit was reached
+    struct RejectedConnections {
+        uint64_t total_limit{};     // [server] max_connections
+        uint64_t address_limit{};   // [server] max_connections_per_ip
+    };
+    [[nodiscard]] RejectedConnections rejected_connections() const {
+        return {rejected_total_.load(std::memory_order_relaxed), rejected_per_address_.load(std::memory_order_relaxed)};
+    }
+
+    // Connections open now (admitted and not yet ended)
+    [[nodiscard]] size_t open_connections() const { return limiter_.open(); }
+
     // Events dropped on all shards (the counters are atomic, so this is safe to call from any thread)
     [[nodiscard]] uint64_t dropped_events() const {
         uint64_t total = 0;
@@ -227,9 +244,11 @@ private:
     }
 
     template<typename Socket>
-    static asio::awaitable<void> run_session(Worker& worker, const ServerConfig& config, Socket socket) {
+    asio::awaitable<void> run_session(Worker& worker, const ServerConfig& config, Socket socket,
+                                      asio::ip::address peer) {
         (void)co_await handle_wamp_session<Socket>(std::move(socket), worker.io, config, worker.shard);
         worker.sessions.fetch_sub(1, std::memory_order_relaxed);
+        limiter_.release(peer);
     }
 
     asio::awaitable<void> accept_loop() {
@@ -239,7 +258,27 @@ private:
             auto [ec, socket] = co_await acceptor_.async_accept(asio::as_tuple(asio::use_awaitable));
             if (ec) {
                 if (ec == asio::error::operation_aborted) co_return;
-                spdlog::error("Accept error: {}", ec.message());
+                if (++accept_errors_ == 1 || accept_errors_ % 1000 == 0) {
+                    spdlog::error("Accept error: {} ({} so far)", ec.message(), accept_errors_);
+                }
+                // Out of descriptors (EMFILE/ENFILE) or similar: retrying at once would spin; wait a moment
+                asio::steady_timer backoff{accept_io_, std::chrono::milliseconds{100}};
+                co_await backoff.async_wait(asio::as_tuple(asio::use_awaitable));
+                continue;
+            }
+
+            std::error_code peer_ec;
+            const auto peer = socket.remote_endpoint(peer_ec).address();
+            if (const auto verdict = limiter_.admit(peer); verdict != ConnectionLimiter::Result::ADMITTED) {
+                auto& counter = verdict == ConnectionLimiter::Result::TOTAL_LIMIT ? rejected_total_ : rejected_per_address_;
+                const auto n = counter.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n == 1 || n % 1000 == 0) {
+                    spdlog::warn("Rejected connection from {}: {} limit reached ({} rejected so far)", peer.to_string(),
+                                 verdict == ConnectionLimiter::Result::TOTAL_LIMIT ? "total connection" : "per-address",
+                                 n);
+                }
+                std::error_code ignored;
+                socket.close(ignored);
                 continue;
             }
 
@@ -249,23 +288,24 @@ private:
 
             // Move the connection to the shard's thread by handing over the descriptor
             const auto native = socket.release();
-            asio::post(worker.io, [this, &worker, native] {
+            asio::post(worker.io, [this, &worker, native, peer] {
                 tcp::socket adopted{worker.io};
                 std::error_code assign_ec;
                 adopted.assign(tcp::v4(), native, assign_ec);
                 if (assign_ec) {
                     spdlog::error("Could not adopt connection on shard: {}", assign_ec.message());
                     worker.sessions.fetch_sub(1, std::memory_order_relaxed);
+                    limiter_.release(peer);
                     return;
                 }
                 if (transport_ == Transport::TLS) {
                     ssl::stream<tcp::socket> tls{std::move(adopted), tls_context_};
                     set_socket_options(tls);
-                    asio::co_spawn(worker.io, run_session<ssl::stream<tcp::socket>>(worker, config_, std::move(tls)),
+                    asio::co_spawn(worker.io, run_session<ssl::stream<tcp::socket>>(worker, config_, std::move(tls), peer),
                                    asio::detached);
                 } else {
                     set_socket_options(adopted);
-                    asio::co_spawn(worker.io, run_session<tcp::socket>(worker, config_, std::move(adopted)),
+                    asio::co_spawn(worker.io, run_session<tcp::socket>(worker, config_, std::move(adopted), peer),
                                    asio::detached);
                 }
             });
@@ -278,6 +318,10 @@ private:
     ssl::context tls_context_;
     tcp::acceptor acceptor_;
     unsigned short bound_port_;
+    ConnectionLimiter limiter_;
+    std::atomic<uint64_t> rejected_total_{0};
+    std::atomic<uint64_t> rejected_per_address_{0};
+    uint64_t accept_errors_{0};   // touched only by the acceptor thread
     std::unique_ptr<ShardGroup> group_;  // declared before the workers: their sessions may still use it while they shut down
     std::vector<std::unique_ptr<Worker>> workers_;
     std::thread acceptor_thread_;

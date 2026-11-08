@@ -151,6 +151,11 @@ struct ServerConfig {
     // WebSocket handshake, HELLO and authentication together). A connection that is still short of that is
     // closed, so clients that open sockets and stall cannot hold file descriptors and memory. 0 disables it.
     std::chrono::milliseconds handshake_timeout{10000};
+    // Open connections allowed in total: nullopt = "auto" (the open-file limit minus a reserve), 0 = unlimited.
+    // Connections beyond it are closed at accept. max_connections_per_ip caps one client address (0 = unlimited;
+    // behind a proxy or NAT every client shares an address, so leave it off there).
+    std::optional<size_t> max_connections;
+    size_t max_connections_per_ip{0};
     size_t max_pending_invocations{};
     std::chrono::milliseconds call_timeout{30000};  // 0 disables
     EventQueueConfig events{};
@@ -225,6 +230,26 @@ public:
                     return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
                 }
                 config.handshake_timeout = std::chrono::milliseconds{ms};
+            }
+
+            if (server.contains("max_connections")) {
+                const auto& value = toml::find(server, "max_connections");
+                if (value.is_string() && value.as_string() == "auto") {
+                    config.max_connections.reset();
+                } else if (value.is_integer() && value.as_integer() >= 0) {
+                    config.max_connections = static_cast<size_t>(value.as_integer());
+                } else {
+                    spdlog::error("[server] max_connections must be \"auto\" or an integer >= 0 (0 = unlimited)");
+                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                }
+            }
+            if (server.contains("max_connections_per_ip")) {
+                const auto value = toml::find<int64_t>(server, "max_connections_per_ip");
+                if (value < 0) {
+                    spdlog::error("[server] max_connections_per_ip must be 0 (unlimited) or greater");
+                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                }
+                config.max_connections_per_ip = static_cast<size_t>(value);
             }
 
             const auto& tls = toml::find(server, "tls");

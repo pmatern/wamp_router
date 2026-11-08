@@ -53,6 +53,8 @@ This creates a self-signed certificate and key: `test_certs/cert.pem` and `test_
 port = 8080
 threads = 1   # router threads, one shard each; "auto" = one per available CPU (container-aware)
 handshake_timeout_ms = 10000   # a new connection must become a session (TLS, handshake, HELLO, auth) in this time; 0 = no limit
+max_connections = "auto"       # open connections allowed; "auto" = open-file limit minus a reserve, 0 = no limit
+max_connections_per_ip = 0     # per client address, 0 = no limit (leave off behind a proxy or NAT)
 
 [server.tls]
 cert = "test_certs/cert.pem"
@@ -264,7 +266,11 @@ A client opens a normal WebSocket connection (`ws://` or, with TLS, `wss://`; an
 
 ### Connections that stall
 
-A client that connects and then sends nothing (or trickles bytes) would otherwise hold a file descriptor and some memory indefinitely. `[server] handshake_timeout_ms` (default 10,000; 0 disables) is a deadline for the whole path to an established session: TLS handshake, RawSocket or WebSocket handshake, HELLO and Cryptosign authentication together. Sending bytes slowly does not extend it. When it expires the router closes the connection and counts it (`handshake_timeouts` in `Router::stats()`, logged at shutdown). Established sessions are not affected; a WAMP session may be idle for as long as it likes. The router does not limit the number of connections yet.
+A client that connects and then sends nothing (or trickles bytes) would otherwise hold a file descriptor and some memory indefinitely. `[server] handshake_timeout_ms` (default 10,000; 0 disables) is a deadline for the whole path to an established session: TLS handshake, RawSocket or WebSocket handshake, HELLO and Cryptosign authentication together. Sending bytes slowly does not extend it. When it expires the router closes the connection and counts it (`handshake_timeouts` in `Router::stats()`, logged at shutdown). Established sessions are not affected; a WAMP session may be idle for as long as it likes.
+
+### Connection limits
+
+`[server] max_connections` caps open connections (default `"auto"`: the process's open-file limit minus a reserve of 128; the router raises that limit to the hard limit at startup, and an integer or `0` for unlimited overrides it). `max_connections_per_ip` caps connections from one client address (default 0 = off; behind a proxy, load balancer or NAT every client shares an address, so leave it off there). A connection over a limit is closed immediately at accept, without a reply, and counted (`Router::rejected_connections()`, logged at shutdown, and the first rejection plus every 1,000th are logged as a warning). Limits count a connection from accept until its session ends, so connections still in the handshake count too. If the process does run out of descriptors anyway, the acceptor logs once per 1,000 errors and retries every 100 ms instead of spinning.
 
 ### Authentication
 

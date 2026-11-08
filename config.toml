@@ -14,6 +14,13 @@ threads = 1
 # Protects against clients that connect and stall. 0 disables the limit.
 handshake_timeout_ms = 10000
 
+# Open connections allowed at once. Further connections are closed at accept. "auto" = the process's
+# open-file limit minus a reserve (the router raises that limit to the hard limit at startup); 0 = no limit.
+max_connections = "auto"
+# Open connections allowed from one client address, 0 = no limit. Leave it off behind a proxy, load
+# balancer or NAT, where many clients share one address.
+max_connections_per_ip = 0
+
 [server.tls]
 # Path to TLS certificate (PEM format)
 cert = "/path/to/cert.pem"

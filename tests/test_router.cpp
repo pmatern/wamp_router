@@ -926,3 +926,105 @@ TEST_CASE("A client that never completes the TLS handshake is closed", "[router]
     CHECK(hello_fragment.closed_within(2s));
     CHECK(router.stats()[0].handshake_timeouts == 2);
 }
+
+// ---------------------------------------------------------------------------------------------------
+// Connection limits
+// ---------------------------------------------------------------------------------------------------
+TEST_CASE("ConnectionLimiter counts total and per-address connections", "[limits]") {
+    const auto a = asio::ip::make_address("10.0.0.1");
+    const auto b = asio::ip::make_address("10.0.0.2");
+
+    SECTION("total cap") {
+        ConnectionLimiter limiter{2, 0};
+        CHECK(limiter.admit(a) == ConnectionLimiter::Result::ADMITTED);
+        CHECK(limiter.admit(b) == ConnectionLimiter::Result::ADMITTED);
+        CHECK(limiter.admit(a) == ConnectionLimiter::Result::TOTAL_LIMIT);
+        limiter.release(a);
+        CHECK(limiter.open() == 1);
+        CHECK(limiter.admit(b) == ConnectionLimiter::Result::ADMITTED);
+    }
+    SECTION("per-address cap leaves other addresses alone") {
+        ConnectionLimiter limiter{0, 2};
+        CHECK(limiter.admit(a) == ConnectionLimiter::Result::ADMITTED);
+        CHECK(limiter.admit(a) == ConnectionLimiter::Result::ADMITTED);
+        CHECK(limiter.admit(a) == ConnectionLimiter::Result::ADDRESS_LIMIT);
+        CHECK(limiter.admit(b) == ConnectionLimiter::Result::ADMITTED);
+        limiter.release(a);
+        CHECK(limiter.admit(a) == ConnectionLimiter::Result::ADMITTED);
+        CHECK(limiter.open() == 3);
+    }
+    SECTION("0 means unlimited") {
+        ConnectionLimiter limiter{0, 0};
+        for (int i = 0; i < 1000; ++i) REQUIRE(limiter.admit(a) == ConnectionLimiter::Result::ADMITTED);
+    }
+    SECTION("a rejected connection does not use up the per-address count") {
+        ConnectionLimiter limiter{1, 1};
+        CHECK(limiter.admit(a) == ConnectionLimiter::Result::ADMITTED);
+        CHECK(limiter.admit(b) == ConnectionLimiter::Result::TOTAL_LIMIT);
+        limiter.release(a);
+        CHECK(limiter.admit(b) == ConnectionLimiter::Result::ADMITTED);
+        CHECK(limiter.admit(a) == ConnectionLimiter::Result::TOTAL_LIMIT);
+    }
+}
+
+TEST_CASE("The router closes connections beyond max_connections and admits again after one ends", "[router][limits]") {
+    auto config = plain_config();
+    config.max_connections = 3;
+    Router router{config, Router::Transport::PLAIN, 2};
+    router.start();
+
+    std::vector<std::unique_ptr<BareConnection>> open;
+    for (int i = 0; i < 3; ++i) open.push_back(std::make_unique<BareConnection>(router.port()));
+    for (auto& c : open) CHECK_FALSE(c->closed_within(100ms));     // admitted: idle but open
+    CHECK(router.open_connections() == 3);
+
+    BareConnection rejected{router.port()};
+    CHECK(rejected.closed_within(2s));
+    CHECK(router.rejected_connections().total_limit == 1);
+    CHECK(router.open_connections() == 3);
+
+    open.pop_back();                                                // one client leaves
+    for (int i = 0; i < 100 && router.open_connections() > 2; ++i) std::this_thread::sleep_for(20ms);
+    CHECK(router.open_connections() == 2);
+
+    BareConnection admitted{router.port()};
+    CHECK_FALSE(admitted.closed_within(300ms));
+    CHECK(router.open_connections() == 3);
+    CHECK(router.rejected_connections().total_limit == 1);
+}
+
+TEST_CASE("The router caps connections per client address", "[router][limits]") {
+    auto config = plain_config();
+    config.max_connections_per_ip = 2;
+    config.max_connections = 0;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    BareConnection first{router.port()};
+    BareConnection second{router.port()};
+    CHECK_FALSE(first.closed_within(100ms));
+    CHECK_FALSE(second.closed_within(100ms));
+    BareConnection third{router.port()};                             // same address (loopback)
+    CHECK(third.closed_within(2s));
+    CHECK(router.rejected_connections().address_limit == 1);
+    CHECK(router.rejected_connections().total_limit == 0);
+}
+
+TEST_CASE("Established sessions count against the limit and free it when they end", "[router][limits]") {
+    auto config = plain_config();
+    config.max_connections = 2;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    {
+        WsTestClient one, two;
+        REQUIRE(ws_join(one, router.port()));
+        REQUIRE(ws_join(two, router.port()));
+        BareConnection third{router.port()};
+        CHECK(third.closed_within(2s));
+    }
+    for (int i = 0; i < 100 && router.open_connections() > 0; ++i) std::this_thread::sleep_for(20ms);
+    CHECK(router.open_connections() == 0);
+    WsTestClient again;
+    CHECK(ws_join(again, router.port()));
+}

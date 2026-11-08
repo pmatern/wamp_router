@@ -790,3 +790,38 @@ key = ")" + key.path().string() + R"("
     CHECK_FALSE(load("handshake_timeout_ms = -1\n").has_value());
     CHECK_FALSE(load("handshake_timeout_ms = \"soon\"\n").has_value());
 }
+
+TEST_CASE("Config::load() connection limits", "[config][limits]") {
+    TempCertFile cert("cert");
+    TempCertFile key("key");
+    auto load = [&](const std::string& server_line) {
+        std::string content = "[server]\nport = 8080\n" + server_line + R"(
+[server.tls]
+cert = ")" + cert.path().string() + R"("
+key = ")" + key.path().string() + R"("
+)";
+        TempConfigFile config(content);
+        return wamp::Config::load(config.path());
+    };
+
+    SECTION("defaults: auto total, no per-address cap") {
+        auto result = load("");
+        REQUIRE(result.has_value());
+        CHECK_FALSE(result->max_connections.has_value());
+        CHECK(result->max_connections_per_ip == 0);
+    }
+    SECTION("explicit values") {
+        auto result = load("max_connections = 500\nmax_connections_per_ip = 20\n");
+        REQUIRE(result.has_value());
+        CHECK(result->max_connections == 500);
+        CHECK(result->max_connections_per_ip == 20);
+        CHECK(load("max_connections = 0\n")->max_connections == 0);
+        CHECK_FALSE(load("max_connections = \"auto\"\n")->max_connections.has_value());
+    }
+    SECTION("invalid values are rejected") {
+        CHECK_FALSE(load("max_connections = -1\n").has_value());
+        CHECK_FALSE(load("max_connections = \"lots\"\n").has_value());
+        CHECK_FALSE(load("max_connections = 1.5\n").has_value());
+        CHECK_FALSE(load("max_connections_per_ip = -3\n").has_value());
+    }
+}
