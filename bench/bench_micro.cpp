@@ -216,7 +216,7 @@ TEST_CASE("bench: registration manager and invocation tracker", "[bench][routing
         uint64_t id = 0;
         meter.measure([&] {
             ++id;
-            tracker.track(id, PendingCall{1, id, 2});
+            tracker.track(PendingCall{id, 1, id, 2});
             return tracker.retrieve(id);
         });
     };

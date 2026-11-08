@@ -235,8 +235,8 @@ public:
         }
         auto deadline = timeout.count() > 0 ? std::chrono::steady_clock::now() + timeout
                                             : std::chrono::steady_clock::time_point::max();
-        invocation_tracker.track(invocation_id,
-            PendingCall{caller_session_id, call.request_id, callee_session_id, deadline, invocation_id});
+        invocation_tracker.track(
+            PendingCall{invocation_id, caller_session_id, call.request_id, callee_session_id, deadline});
 
         spdlog::debug("Tracking invocation_id={} -> caller_session={}, call_request_id={} ({} pending)",
                      invocation_id, caller_session_id, call.request_id,

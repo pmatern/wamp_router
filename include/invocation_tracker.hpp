@@ -27,21 +27,20 @@ namespace wamp {
 
 // Information about a pending RPC call awaiting YIELD from callee
 struct PendingCall {
+    uint64_t invocation_id;       // The INVOCATION request id sent to the callee; the tracker's key
     uint64_t caller_session_id;  // Who made the CALL
     uint64_t call_request_id;     // Original request_id from CALL message
     uint64_t callee_session_id;   // Who was sent the INVOCATION (0 if unknown)
     std::chrono::steady_clock::time_point deadline;  // time_point::max() = no timeout
-    uint64_t invocation_id;       // The INVOCATION request id sent to the callee (0 if unknown)
 
-    PendingCall(uint64_t caller_id, uint64_t request_id, uint64_t callee_id = 0,
+    PendingCall(uint64_t inv_id, uint64_t caller_id, uint64_t request_id, uint64_t callee_id = 0,
                 std::chrono::steady_clock::time_point call_deadline =
-                    std::chrono::steady_clock::time_point::max(),
-                uint64_t inv_id = 0)
-        : caller_session_id(caller_id)
+                    std::chrono::steady_clock::time_point::max())
+        : invocation_id(inv_id)
+        , caller_session_id(caller_id)
         , call_request_id(request_id)
         , callee_session_id(callee_id)
         , deadline(call_deadline)
-        , invocation_id(inv_id)
     {}
 };
 
@@ -56,7 +55,8 @@ public:
         : max_pending_calls_(max_pending)
     {}
 
-    void track(uint64_t invocation_id, const PendingCall& call_info) {
+    void track(const PendingCall& call_info) {
+        const uint64_t invocation_id = call_info.invocation_id;
         auto map_it = invocation_map_.find(invocation_id);
         if (map_it != invocation_map_.end()) {
             // Already exists - move to front (most recent)

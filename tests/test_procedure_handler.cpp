@@ -145,8 +145,8 @@ TEST_CASE("InvocationTracker basic operations", "[procedure_handler][invocation]
     InvocationTracker tracker(100);  // Small capacity for testing
 
     SECTION("Track and retrieve invocation") {
-        PendingCall call{1, 999};
-        tracker.track(12345, call);
+        PendingCall call{12345, 1, 999};
+        tracker.track(call);
 
         auto retrieved = tracker.retrieve(12345);
         REQUIRE(retrieved.has_value());
@@ -161,9 +161,9 @@ TEST_CASE("InvocationTracker basic operations", "[procedure_handler][invocation]
     }
 
     SECTION("Track multiple invocations") {
-        tracker.track(1, PendingCall{1, 100});
-        tracker.track(2, PendingCall{2, 200});
-        tracker.track(3, PendingCall{3, 300});
+        tracker.track(PendingCall{1, 1, 100});
+        tracker.track(PendingCall{2, 2, 200});
+        tracker.track(PendingCall{3, 3, 300});
 
         REQUIRE(tracker.pending_count() == 3);
 
@@ -178,15 +178,15 @@ TEST_CASE("InvocationTracker LRU eviction", "[procedure_handler][invocation]") {
     InvocationTracker tracker(3);  // Capacity of 3
 
     SECTION("LRU eviction when at capacity") {
-        tracker.track(1, PendingCall{1, 100});
-        tracker.track(2, PendingCall{2, 200});
-        tracker.track(3, PendingCall{3, 300});
+        tracker.track(PendingCall{1, 1, 100});
+        tracker.track(PendingCall{2, 2, 200});
+        tracker.track(PendingCall{3, 3, 300});
 
         REQUIRE(tracker.pending_count() == 3);
         REQUIRE(tracker.pending_count() >= tracker.max_capacity());
 
         // Adding 4th entry should evict oldest (1)
-        tracker.track(4, PendingCall{4, 400});
+        tracker.track(PendingCall{4, 4, 400});
 
         REQUIRE(tracker.pending_count() == 3);
         REQUIRE(!tracker.retrieve(1).has_value());  // Evicted
@@ -194,11 +194,11 @@ TEST_CASE("InvocationTracker LRU eviction", "[procedure_handler][invocation]") {
     }
 
     SECTION("Re-tracking updates entry") {
-        tracker.track(1, PendingCall{1, 100});
-        tracker.track(2, PendingCall{2, 200});
+        tracker.track(PendingCall{1, 1, 100});
+        tracker.track(PendingCall{2, 2, 200});
 
         // Update entry 1 with new data
-        tracker.track(1, PendingCall{1, 999});
+        tracker.track(PendingCall{1, 1, 999});
 
         auto call = tracker.retrieve(1);
         REQUIRE(call.has_value());
@@ -211,10 +211,10 @@ TEST_CASE("InvocationTracker session cleanup", "[procedure_handler][invocation]"
 
     SECTION("Remove all invocations for a caller session") {
         // Multiple callers
-        tracker.track(1, PendingCall{10, 100});
-        tracker.track(2, PendingCall{10, 200});
-        tracker.track(3, PendingCall{20, 300});
-        tracker.track(4, PendingCall{10, 400});
+        tracker.track(PendingCall{1, 10, 100});
+        tracker.track(PendingCall{2, 10, 200});
+        tracker.track(PendingCall{3, 20, 300});
+        tracker.track(PendingCall{4, 10, 400});
 
         REQUIRE(tracker.pending_count() == 4);
 
@@ -229,7 +229,7 @@ TEST_CASE("InvocationTracker session cleanup", "[procedure_handler][invocation]"
     }
 
     SECTION("Remove non-existent session") {
-        tracker.track(1, PendingCall{5, 100});
+        tracker.track(PendingCall{1, 5, 100});
         tracker.remove_caller_session(999);
         REQUIRE(tracker.pending_count() == 1);  // Unchanged
     }
@@ -254,7 +254,7 @@ TEST_CASE("Shard configuration", "[procedure_handler][shard]") {
 
     SECTION("shards do not share state") {
         Shard a, b;
-        a.invocations.track(1, PendingCall{5, 100});
+        a.invocations.track(PendingCall{1, 5, 100});
         REQUIRE(a.invocations.pending_count() == 1);
         REQUIRE(b.invocations.pending_count() == 0);
         REQUIRE(a.ids.invocation.generate() == b.ids.invocation.generate());  // independent sequences
