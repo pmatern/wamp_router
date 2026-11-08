@@ -67,6 +67,7 @@ add_executable(wamp_tests
     tests/test_cpu_limits.cpp
     tests/test_router.cpp
     tests/test_logging.cpp
+    tests/test_websocket.cpp
 )
 
 # Add include directory for tests
