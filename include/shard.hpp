@@ -22,6 +22,7 @@
 #include "wamp_id.hpp"
 #include <chrono>
 #include <cstdint>
+#include <unordered_set>
 #include <vector>
 
 namespace wamp {
@@ -66,6 +67,8 @@ public:
     unsigned index{0};
     // Other shards whose inboxes a PUBLISH just filled; the publishing session waits on them before reading more
     std::vector<uint32_t> congested;
+    // Sessions here that forwarded a CALL to another shard; their disconnect must cancel those calls there
+    std::unordered_set<uint64_t> remote_callers;
 
     EventChannelRegistry channels;
     InvocationTracker invocations;

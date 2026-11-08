@@ -63,16 +63,26 @@ public:
             // Runs from a timer, so it cannot wait for queue space
             (void)deliver_to_caller(shard, pending, std::move(frame), /*may_defer=*/false);
 
-            // Tell the callee to stop working on it
-            if (pending.callee_session_id != 0) {
-                auto interrupt = InterruptMessage{pending.invocation_id, {{"mode", std::string{"killnowait"}}}};
-                auto idata = std::make_shared<std::vector<uint8_t>>(
-                    rawsocket::create_wamp_message(serialize_interrupt(interrupt)));
-                (void)shard.channels.deliver(pending.callee_session_id,
-                    EventToSend{pending.callee_session_id, idata}, /*may_defer=*/false);
-            }
+            interrupt_callee(shard, pending);
         }
         return expired.size();
+    }
+
+    // Tell the callee to stop working on a call nobody waits for any more
+    static void interrupt_callee(Shard& shard, const PendingCall& pending) {
+        if (pending.callee_session_id == 0) return;
+        auto interrupt = InterruptMessage{pending.invocation_id, {{"mode", std::string{"killnowait"}}}};
+        auto idata = std::make_shared<std::vector<uint8_t>>(
+            rawsocket::create_wamp_message(serialize_interrupt(interrupt)));
+        (void)shard.channels.deliver(pending.callee_session_id,
+            EventToSend{pending.callee_session_id, idata}, /*may_defer=*/false);
+    }
+
+    // A caller disconnected: forget its pending calls and interrupt their callees
+    static void cancel_caller(Shard& shard, uint64_t caller_session_id) {
+        for (const auto& pending : shard.invocations.remove_caller_session(caller_session_id)) {
+            interrupt_callee(shard, pending);
+        }
     }
 
     // Clean up all registrations and pending invocations for a session (called on disconnect)
@@ -84,7 +94,14 @@ public:
         for (const auto& procedure : reg_manager.unregister_session(session_id)) {
             if (shard.group && shard.group->size() > 1) shard.group->drop_registration(shard.index, realm.name, procedure);
         }
-        invocation_tracker.remove_caller_session(session_id);
+        cancel_caller(shard, session_id);
+        // Calls this session forwarded to other shards are pending there
+        if (shard.remote_callers.erase(session_id) > 0 && shard.group) {
+            std::vector<uint32_t> ignored;
+            for (uint32_t to = 0; to < shard.group->size(); ++to) {
+                if (to != shard.index) (void)shard.group->send_to(to, CrossCancel{session_id}, ignored);
+            }
+        }
 
         // Callers waiting on this session as callee would otherwise hang forever
         for (const auto& pending : invocation_tracker.remove_callee_session(session_id)) {
@@ -392,6 +409,7 @@ private:
             return rawsocket::create_wamp_message(serialize_error(
                 ErrorMessage::create_callee_failure(call.request_id, "Callee shard unavailable")));
         }
+        shard.remote_callers.insert(caller_session_id);
         return std::vector<uint8_t>{};
     }
 };

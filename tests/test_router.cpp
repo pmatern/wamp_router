@@ -410,3 +410,46 @@ TEST_CASE("Cross-shard calls fail cleanly when the callee disconnects or is too 
     REQUIRE(timeout_uri == "wamp.error.timeout");
     REQUIRE(disconnect_uri == "wamp.error.callee_failure");
 }
+
+TEST_CASE("A caller that disconnects cancels its call on the callee's shard", "[router][crossshard][rpc]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    asio::io_context io;
+    WampClient callee{io};   // shard 0
+    WampClient caller{io};   // shard 1
+    bool started = false;
+    bool interrupted = false;
+    bool cancelled = false;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await callee.connect("127.0.0.1", router.port(), "test.realm");
+        co_await caller.connect("127.0.0.1", router.port(), "test.realm");
+        REQUIRE(router.accepted_per_shard() == std::vector<uint64_t>{1, 1});
+
+        (void)co_await callee.register_procedure("cross.hang",
+            [&](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                struct Guard { bool& flag; ~Guard() { flag = true; } } guard{interrupted};
+                started = true;
+                co_await pause(io, 60s);   // only an INTERRUPT ends this early
+                co_return YieldMessage{inv.request_id, {}};
+            });
+
+        co_spawn(io, [&]() -> awaitable<void> {
+            try { (void)co_await caller.call("cross.hang"); } catch (const std::exception&) {}
+        }, detached);
+        for (int i = 0; i < 100 && !started; ++i) co_await pause(io, 20ms);
+        co_await caller.disconnect();
+        for (int i = 0; i < 100 && !interrupted; ++i) co_await pause(io, 20ms);
+        cancelled = interrupted;   // before the callee's own disconnect can end the handler
+
+        co_await callee.disconnect();
+        done = true;
+    }, detached);
+    io.run_for(15s);
+
+    REQUIRE(done);
+    REQUIRE(started);
+    REQUIRE(cancelled);
+}

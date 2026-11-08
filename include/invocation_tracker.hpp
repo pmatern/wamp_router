@@ -96,17 +96,20 @@ public:
         return info;
     }
 
-    // Remove all pending invocations for a session (called on disconnect)
-    void remove_caller_session(uint64_t caller_session_id) {
+    // Remove and return all pending invocations of a caller (called when the caller disconnects)
+    [[nodiscard]] std::vector<PendingCall> remove_caller_session(uint64_t caller_session_id) {
+        std::vector<PendingCall> removed;
         auto it = lru_list_.begin();
         while (it != lru_list_.end()) {
             if (it->second.caller_session_id == caller_session_id) {
+                removed.push_back(it->second);
                 invocation_map_.erase(it->first);
                 it = lru_list_.erase(it);
             } else {
                 ++it;
             }
         }
+        return removed;
     }
 
     // Remove and return all pending invocations routed to a callee (called when the callee disconnects)

@@ -69,7 +69,12 @@ struct CrossFrame {
     std::shared_ptr<const std::vector<uint8_t>> frame;
 };
 
-using CrossMessage = std::variant<CrossPublishPtr, CrossCall, CrossFrame>;
+// A caller on the sending shard disconnected: drop its pending calls on the receiving shard and interrupt the callees
+struct CrossCancel {
+    uint64_t caller_session{};
+};
+
+using CrossMessage = std::variant<CrossPublishPtr, CrossCall, CrossFrame, CrossCancel>;
 
 // ============================================================================
 // ShardGroup - how shards of one Router reach each other
