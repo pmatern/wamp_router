@@ -38,16 +38,25 @@ namespace wamp {
 using asio::ip::tcp;
 namespace ssl = asio::ssl;
 
-// True for ssl::stream<...>; false for a plain tcp::socket (which also has lowest_layer())
+// A TLS stream (ssl::stream<...>): the one kind of socket that has a server-side handshake
 template<typename SocketType>
-inline constexpr bool is_tls_socket =
+concept TlsSocket =
     requires(SocketType& s) { s.async_handshake(ssl::stream_base::server, asio::use_awaitable); };
+
+// What the session code needs from a connection: a plain tcp::socket or an ssl::stream<tcp::socket>
+template<typename SocketType>
+concept WampSocket = requires(SocketType& s, asio::mutable_buffer in, asio::const_buffer out) {
+    s.lowest_layer();
+    s.get_executor();
+    s.async_read_some(in, asio::use_awaitable);
+    s.async_write_some(out, asio::use_awaitable);
+};
 
 // ============================================================================
 // Socket Helper Functions - Work with both plain TCP and TLS sockets
 // ============================================================================
 
-template<typename SocketType>
+template<WampSocket SocketType>
 inline auto get_remote_endpoint(SocketType& socket) {
     if constexpr (requires { socket.lowest_layer(); }) {
         // SSL socket - use lowest_layer()
@@ -59,9 +68,9 @@ inline auto get_remote_endpoint(SocketType& socket) {
 }
 
 // Set socket options (works for both plain and SSL sockets)
-template<typename SocketType>
+template<WampSocket SocketType>
 inline void set_socket_options(SocketType& socket) {
-    if constexpr (is_tls_socket<SocketType>) {
+    if constexpr (TlsSocket<SocketType>) {
         socket.lowest_layer().set_option(tcp::no_delay(true));
     } else {
         // Non-blocking so a read after wait_read never waits (see read_some)
@@ -133,7 +142,7 @@ inline std::span<uint8_t> shared_read_scratch() {
 }
 
 // Per-session read state: unused for plain sockets, a small buffer for TLS
-template<typename SocketType>
+template<WampSocket SocketType>
 struct ReadState {
     std::vector<uint8_t> tls_buffer;
 };
@@ -143,9 +152,9 @@ struct ReadResult {
     std::span<const uint8_t> data;  // valid until the next suspension point
 };
 
-template<typename SocketType>
+template<WampSocket SocketType>
 inline asio::awaitable<ReadResult> read_some(SocketType& socket, ReadState<SocketType>& state) {
-    if constexpr (is_tls_socket<SocketType>) {
+    if constexpr (TlsSocket<SocketType>) {
         if (state.tls_buffer.empty()) state.tls_buffer.resize(kTlsReadBuffer);
         auto [ec, n] = co_await socket.async_read_some(
             asio::buffer(state.tls_buffer), asio::as_tuple(asio::use_awaitable));
@@ -166,7 +175,7 @@ inline asio::awaitable<ReadResult> read_some(SocketType& socket, ReadState<Socke
 }
 
 // Handles one socket read result. `write_lock` is null before the session's writer exists.
-template<typename SocketType>
+template<WampSocket SocketType>
 inline asio::awaitable<std::expected<bool, std::error_code>>
 handle_socket_read_completion(
     SocketType& socket,
@@ -252,7 +261,7 @@ handle_socket_read_completion(
 }
 
 // Reads client messages until the connection ends
-template<typename SocketType>
+template<WampSocket SocketType>
 inline asio::awaitable<std::expected<void, std::error_code>>
 session_reader(SocketType& socket, ReadState<SocketType>& state, WampSession& protocol,
                const std::string& remote_address, WriteLock& write_lock) {
@@ -270,7 +279,7 @@ session_reader(SocketType& socket, ReadState<SocketType>& state, WampSession& pr
 
 // Sends queued events/invocations/results to the client, coalescing whatever is already waiting
 // into one gathered write
-template<typename SocketType>
+template<WampSocket SocketType>
 inline asio::awaitable<std::expected<void, std::error_code>>
 session_writer(SocketType& socket, EventChannel& channel, const std::string& remote_address,
                WriteLock& write_lock, bool websocket) {
@@ -331,7 +340,7 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
     }
 }
 
-template<typename SocketType>
+template<WampSocket SocketType>
 inline asio::awaitable<std::expected<void, std::error_code>>
 handle_wamp_session(SocketType socket, asio::io_context& io, const ServerConfig& config,
                     std::shared_ptr<Shard> shard) {

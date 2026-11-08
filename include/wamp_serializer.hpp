@@ -19,6 +19,7 @@
 #include "raw_socket.hpp"
 #include "cbor.hpp"
 #include <algorithm>
+#include <concepts>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -273,7 +274,7 @@ public:
 
     // A required map element: calls fn(key, reader) for each entry, fn must consume the value.
     // A non-map element is skipped.
-    template<typename Fn>
+    template<std::invocable<std::string&, cbor::Reader&> Fn>
     void map(Fn&& fn) {
         require();
         if (r_.peek_major() != cbor::Major::MAP) {
@@ -298,8 +299,14 @@ private:
     cbor::Container& c_;
 };
 
+// Reads the fields of one message type in wire order and builds the message
+template<typename E, typename T>
+concept FieldExtractor = requires(E&& extract, Fields& fields) {
+    { std::forward<E>(extract)(fields) } -> std::convertible_to<T>;
+};
+
 // Decodes [type, ...fields] into T. `extract` reads the fields in wire order from a Fields.
-template<typename T, typename Extractor>
+template<typename T, FieldExtractor<T> Extractor>
 std::expected<T, std::error_code>
 decode(const std::vector<uint8_t>& data, MessageType expected_type, size_t min_size,
        std::string_view msg_name, Extractor&& extract) {

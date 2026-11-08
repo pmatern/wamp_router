@@ -16,6 +16,7 @@
 #pragma once
 
 #include <algorithm>
+#include <concepts>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -124,7 +125,7 @@ public:
 
     // Calls fn(subscription_id, session_id) for each subscription to `topic`, in place:
     // no copy of the subscriber set and no per-subscriber lookup. fn must not modify this manager.
-    template<typename Fn>
+    template<std::invocable<uint64_t, uint64_t> Fn>
     void for_each_subscriber(const std::string& topic, Fn&& fn) const {
         auto it = topic_subscriptions_.find(topic);
         if (it == topic_subscriptions_.end()) {

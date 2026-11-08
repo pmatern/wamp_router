@@ -25,6 +25,7 @@
 #include <asio.hpp>
 #include <asio/ssl.hpp>
 #include <atomic>
+#include <concepts>
 #include <csignal>
 #include <memory>
 #include <chrono>
@@ -146,7 +147,7 @@ public:
     }
 
     // Runs `fn` on shard `index`'s thread (tests use it to stall a shard)
-    template<typename F>
+    template<std::invocable F>
     void post_to_shard(size_t index, F&& fn) {
         asio::post(workers_.at(index)->io, std::forward<F>(fn));
     }
@@ -243,7 +244,7 @@ private:
         return *best;
     }
 
-    template<typename Socket>
+    template<WampSocket Socket>
     asio::awaitable<void> run_session(Worker& worker, const ServerConfig& config, Socket socket,
                                       asio::ip::address peer) {
         (void)co_await handle_wamp_session<Socket>(std::move(socket), worker.io, config, worker.shard);

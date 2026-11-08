@@ -68,6 +68,8 @@ add_executable(wamp_tests
     tests/test_router.cpp
     tests/test_logging.cpp
     tests/test_websocket.cpp
+    tests/test_concepts.cpp
+    tests/test_type_traits.cpp
 )
 
 # Add include directory for tests

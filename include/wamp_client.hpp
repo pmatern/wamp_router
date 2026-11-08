@@ -23,6 +23,7 @@
 #include <asio/experimental/channel.hpp>
 #include <asio/experimental/awaitable_operators.hpp>
 #include <spdlog/spdlog.h>
+#include <concepts>
 #include <deque>
 #include <functional>
 #include <unordered_map>
@@ -69,6 +70,18 @@ private:
         return uri;
     }
 };
+
+// The channel a coroutine waits on for the reply to one request (optional for default-constructibility)
+template<typename Reply>
+using ReplyChannel = asio::experimental::channel<void(std::error_code, std::optional<Reply>)>;
+
+// The message types send_wamp_message can serialize (the client's requests and answers)
+template<typename M>
+concept ClientMessage = std::same_as<M, SubscribeMessage> || std::same_as<M, UnsubscribeMessage> ||
+                        std::same_as<M, UnregisterMessage> || std::same_as<M, PublishMessage> ||
+                        std::same_as<M, RegisterMessage> || std::same_as<M, CallMessage> ||
+                        std::same_as<M, YieldMessage> || std::same_as<M, ErrorMessage> ||
+                        std::same_as<M, GoodbyeMessage>;
 
 // Callback types for client
 using EventCallback = std::function<void(const EventMessage&)>;
@@ -413,8 +426,8 @@ public:
 private:
     // Wait for the reply to a pending request. If the router answered with an ERROR instead,
     // throw it as a WampException.
-    template<typename Reply, typename Channel>
-    awaitable<Reply> await_reply(std::shared_ptr<Channel> channel, uint64_t request_id, const char* what) {
+    template<typename Reply>
+    awaitable<Reply> await_reply(std::shared_ptr<ReplyChannel<Reply>> channel, uint64_t request_id, const char* what) {
         auto [ec, reply] = co_await channel->async_receive(asio::as_tuple(use_awaitable));
         if (!ec && reply.has_value()) {
             co_return std::move(*reply);
@@ -1060,30 +1073,30 @@ private:
         spdlog::info("Sent AUTHENTICATE message");
     }
 
-    template<typename MessageType>
-    awaitable<void> send_wamp_message(const MessageType& msg) {
+    template<ClientMessage Msg>
+    awaitable<void> send_wamp_message(const Msg& msg) {
         std::vector<uint8_t> cbor_payload;
 
-        if constexpr (std::is_same_v<MessageType, SubscribeMessage>) {
+        if constexpr (std::is_same_v<Msg, SubscribeMessage>) {
             cbor_payload = serialize_subscribe(msg);
-        } else if constexpr (std::is_same_v<MessageType, UnsubscribeMessage>) {
+        } else if constexpr (std::is_same_v<Msg, UnsubscribeMessage>) {
             cbor_payload = serialize_unsubscribe(msg);
-        } else if constexpr (std::is_same_v<MessageType, UnregisterMessage>) {
+        } else if constexpr (std::is_same_v<Msg, UnregisterMessage>) {
             cbor_payload = serialize_unregister(msg);
-        } else if constexpr (std::is_same_v<MessageType, PublishMessage>) {
+        } else if constexpr (std::is_same_v<Msg, PublishMessage>) {
             cbor_payload = serialize_publish(msg);
-        } else if constexpr (std::is_same_v<MessageType, RegisterMessage>) {
+        } else if constexpr (std::is_same_v<Msg, RegisterMessage>) {
             cbor_payload = serialize_register(msg);
-        } else if constexpr (std::is_same_v<MessageType, CallMessage>) {
+        } else if constexpr (std::is_same_v<Msg, CallMessage>) {
             cbor_payload = serialize_call(msg);
-        } else if constexpr (std::is_same_v<MessageType, YieldMessage>) {
+        } else if constexpr (std::is_same_v<Msg, YieldMessage>) {
             cbor_payload = serialize_yield(msg);
-        } else if constexpr (std::is_same_v<MessageType, ErrorMessage>) {
+        } else if constexpr (std::is_same_v<Msg, ErrorMessage>) {
             cbor_payload = serialize_error(msg);
-        } else if constexpr (std::is_same_v<MessageType, GoodbyeMessage>) {
+        } else if constexpr (std::is_same_v<Msg, GoodbyeMessage>) {
             cbor_payload = serialize_goodbye(msg);
         } else {
-            static_assert(sizeof(MessageType) == 0, "Unsupported message type");
+            static_assert(sizeof(Msg) == 0, "Unsupported message type");
         }
 
         auto frame = rawsocket::create_wamp_message(cbor_payload);
@@ -1171,30 +1184,30 @@ private:
     std::atomic<uint64_t> next_request_id_{1};
 
     // Connection establishment
-    using WelcomeChannel = asio::experimental::channel<void(std::error_code, std::optional<WelcomeMessage>)>;
+    using WelcomeChannel = ReplyChannel<WelcomeMessage>;
     WelcomeChannel welcome_channel_;
 
     // Disconnection
-    using GoodbyeChannel = asio::experimental::channel<void(std::error_code, std::optional<GoodbyeMessage>)>;
+    using GoodbyeChannel = ReplyChannel<GoodbyeMessage>;
     GoodbyeChannel goodbye_channel_;
 
     // Authentication
-    using ChallengeChannel = asio::experimental::channel<void(std::error_code, std::optional<ChallengeMessage>)>;
+    using ChallengeChannel = ReplyChannel<ChallengeMessage>;
     ChallengeChannel challenge_channel_;
     std::optional<std::string> authid_;
     std::unique_ptr<EVP_PKEY, PKEYDeleter> private_key_;
 
     // Pending requests (using channels for async awaiting with optional for default-constructibility)
-    using SubscribedChannel = asio::experimental::channel<void(std::error_code, std::optional<SubscribedMessage>)>;
-    using PublishedChannel = asio::experimental::channel<void(std::error_code, std::optional<PublishedMessage>)>;
-    using RegisteredChannel = asio::experimental::channel<void(std::error_code, std::optional<RegisteredMessage>)>;
-    using ResultChannel = asio::experimental::channel<void(std::error_code, std::optional<ResultMessage>)>;
+    using SubscribedChannel = ReplyChannel<SubscribedMessage>;
+    using PublishedChannel = ReplyChannel<PublishedMessage>;
+    using RegisteredChannel = ReplyChannel<RegisteredMessage>;
+    using ResultChannel = ReplyChannel<ResultMessage>;
     std::unordered_map<uint64_t, std::shared_ptr<SubscribedChannel>> pending_subscribes_;
     std::unordered_map<uint64_t, std::shared_ptr<PublishedChannel>> pending_publishes_;
     std::unordered_map<uint64_t, std::shared_ptr<RegisteredChannel>> pending_registers_;
     std::unordered_map<uint64_t, std::shared_ptr<ResultChannel>> pending_calls_;
-    using UnsubscribedChannel = asio::experimental::channel<void(std::error_code, std::optional<UnsubscribedMessage>)>;
-    using UnregisteredChannel = asio::experimental::channel<void(std::error_code, std::optional<UnregisteredMessage>)>;
+    using UnsubscribedChannel = ReplyChannel<UnsubscribedMessage>;
+    using UnregisteredChannel = ReplyChannel<UnregisteredMessage>;
     std::unordered_map<uint64_t, std::shared_ptr<UnsubscribedChannel>> pending_unsubscribes_;
     std::unordered_map<uint64_t, std::shared_ptr<UnregisteredChannel>> pending_unregisters_;
 
