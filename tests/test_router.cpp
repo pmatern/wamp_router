@@ -531,3 +531,258 @@ TEST_CASE("stop() delivers cross-shard messages that are still queued", "[router
     CHECK(after[1].inbox_depth == 0);
     CHECK(after[1].inbox_dropped == 0);
 }
+
+// ---------------------------------------------------------------------------------------------------
+// WebSocket (wamp.2.cbor) on the same port
+// ---------------------------------------------------------------------------------------------------
+#include "tests/ws_test_client.hpp"
+
+namespace {
+
+using wamp::test::WsTestClient;
+using wamp::test::WsFrame;
+
+// Upgrade, HELLO, WELCOME; returns false on any deviation
+bool ws_join(WsTestClient& ws, unsigned short port, const std::string& realm = "test.realm") {
+    if (ws.connect(port).find("101 Switching Protocols") == std::string::npos) return false;
+    ws.send_binary(serialize_hello(HelloMessage{realm}));
+    auto reply = ws.read_frame();
+    if (!reply || reply->opcode != 0x2) return false;
+    auto type = get_message_type_from_cbor(reply->payload);
+    return type.has_value() && *type == MessageType::WELCOME;
+}
+
+// Next binary WAMP message of a given type, skipping nothing: the frame must be exactly that
+std::optional<std::vector<uint8_t>> ws_expect(WsTestClient& ws, MessageType expected) {
+    auto frame = ws.read_frame();
+    if (!frame || frame->opcode != 0x2) return std::nullopt;
+    auto type = get_message_type_from_cbor(frame->payload);
+    if (!type || *type != expected) return std::nullopt;
+    return std::move(frame->payload);
+}
+
+}  // namespace
+
+TEST_CASE("WebSocket upgrade negotiates wamp.2.cbor and the session works", "[router][websocket]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 1};
+    router.start();
+
+    WsTestClient ws;
+    const auto head = ws.connect(router.port());
+    CHECK(head.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+    CHECK(head.find("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n") != std::string::npos);
+    CHECK(head.find("Sec-WebSocket-Protocol: wamp.2.cbor\r\n") != std::string::npos);
+
+    ws.send_binary(serialize_hello(HelloMessage{"test.realm"}));
+    REQUIRE(ws_expect(ws, MessageType::WELCOME));
+
+    ws.send_binary(serialize_subscribe(SubscribeMessage{7, {}, "ws.topic"}));
+    auto subscribed = ws_expect(ws, MessageType::SUBSCRIBED);
+    REQUIRE(subscribed);
+    CHECK(deserialize_subscribed(*subscribed)->request_id == 7);
+
+    // acknowledged publish from the same session, excluded from its own events by default
+    ws.send_binary(serialize_publish(PublishMessage{8, {{"acknowledge", true}}, "ws.topic", {std::string{"x"}}}));
+    REQUIRE(ws_expect(ws, MessageType::PUBLISHED));
+}
+
+TEST_CASE("WebSocket and RawSocket sessions exchange pub/sub and RPC, across shards", "[router][websocket][crossshard]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    WsTestClient ws;                 // first connection: shard 0
+    REQUIRE(ws_join(ws, router.port()));
+    ws.send_binary(serialize_subscribe(SubscribeMessage{1, {}, "mixed.topic"}));
+    REQUIRE(ws_expect(ws, MessageType::SUBSCRIBED));
+
+    asio::io_context io;
+    WampClient raw{io};              // second connection: shard 1
+    std::vector<std::string> raw_events;
+    std::string rpc_result;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await raw.connect("127.0.0.1", router.port(), "test.realm");
+        REQUIRE(router.accepted_per_shard() == std::vector<uint64_t>{1, 1});
+
+        co_await raw.subscribe("mixed.raw", [&](const EventMessage& e) { raw_events.push_back(std::get<std::string>(e.arguments.at(0))); });
+        (void)co_await raw.register_procedure("mixed.echo",
+            [](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                co_return YieldMessage{inv.request_id, {}, inv.arguments};
+            });
+
+        // RawSocket -> WebSocket event
+        (void)co_await raw.publish("mixed.topic", WampList{std::string{"from raw"}});
+
+        // WebSocket -> RawSocket event, and a WebSocket CALL answered by the RawSocket callee
+        ws.send_binary(serialize_publish(PublishMessage{2, {}, "mixed.raw", {std::string{"from ws"}}}));
+        ws.send_binary(serialize_call(CallMessage{3, {}, "mixed.echo", {std::string{"ping"}}}));
+        co_await pause(io, 300ms);
+        done = true;
+    }, detached);
+    io.run_for(10s);
+    REQUIRE(done);
+
+    auto event = ws_expect(ws, MessageType::EVENT);
+    REQUIRE(event);
+    CHECK(std::get<std::string>(deserialize_event(*event)->arguments.at(0)) == "from raw");
+    auto result = ws_expect(ws, MessageType::RESULT);
+    REQUIRE(result);
+    CHECK(std::get<std::string>(deserialize_result(*result)->arguments.at(0)) == "ping");
+    REQUIRE(raw_events.size() == 1);
+    CHECK(raw_events[0] == "from ws");
+}
+
+TEST_CASE("WebSocket control frames, fragmentation and the close handshake", "[router][websocket]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 1};
+    router.start();
+
+    SECTION("ping is answered with a pong carrying the same payload") {
+        WsTestClient ws;
+        REQUIRE(ws_join(ws, router.port()));
+        const std::vector<uint8_t> payload{1, 2, 3};
+        ws.send(0x9, payload);
+        auto pong = ws.read_frame();
+        REQUIRE(pong);
+        CHECK(pong->opcode == 0xA);
+        CHECK(pong->payload == payload);
+    }
+    SECTION("a message split into fragments, with a ping in between") {
+        WsTestClient ws;
+        REQUIRE(ws.connect(router.port()).find("101") != std::string::npos);
+        const auto hello = serialize_hello(HelloMessage{"test.realm"});
+        const auto half = hello.size() / 2;
+        ws.send(0x2, std::span{hello}.first(half), /*fin=*/false);
+        ws.send(0x9, {});
+        ws.send(0x0, std::span{hello}.subspan(half), /*fin=*/true);
+        auto pong = ws.read_frame();
+        REQUIRE(pong);
+        CHECK(pong->opcode == 0xA);
+        REQUIRE(ws_expect(ws, MessageType::WELCOME));
+    }
+    SECTION("frames split across TCP writes") {
+        WsTestClient ws;
+        REQUIRE(ws.connect(router.port()).find("101") != std::string::npos);
+        const auto bytes = WsTestClient::frame(0x2, serialize_hello(HelloMessage{"test.realm"}));
+        for (uint8_t b : bytes) {
+            ws.send_raw({&b, 1});
+            std::this_thread::sleep_for(1ms);
+        }
+        REQUIRE(ws_expect(ws, MessageType::WELCOME));
+    }
+    SECTION("the client's close frame is echoed and the connection closed") {
+        WsTestClient ws;
+        REQUIRE(ws_join(ws, router.port()));
+        ws.send(0x8, std::vector<uint8_t>{0x03, 0xE8});
+        auto close = ws.read_frame();
+        REQUIRE(close);
+        CHECK(close->opcode == 0x8);
+        CHECK(close->payload == std::vector<uint8_t>{0x03, 0xE8});
+        CHECK(ws.closed_by_peer());
+    }
+    SECTION("WAMP GOODBYE is answered, then the router closes the WebSocket") {
+        WsTestClient ws;
+        REQUIRE(ws_join(ws, router.port()));
+        ws.send_binary(serialize_goodbye(GoodbyeMessage::create_normal()));
+        REQUIRE(ws_expect(ws, MessageType::GOODBYE));
+        auto close = ws.read_frame();
+        REQUIRE(close);
+        CHECK(close->opcode == 0x8);
+        CHECK(ws.closed_by_peer());
+    }
+    SECTION("a large message in both directions (1 MiB)") {
+        asio::io_context io;
+        WampClient raw{io};
+        WsTestClient ws;
+        REQUIRE(ws_join(ws, router.port()));
+        ws.send_binary(serialize_subscribe(SubscribeMessage{1, {}, "big.topic"}));
+        REQUIRE(ws_expect(ws, MessageType::SUBSCRIBED));
+
+        const std::string big(1 << 20, 'z');
+        std::string received;
+        bool done = false;
+        co_spawn(io, [&]() -> awaitable<void> {
+            co_await raw.connect("127.0.0.1", router.port(), "test.realm");
+            co_await raw.subscribe("big.back", [&](const EventMessage& e) { received = std::get<std::string>(e.arguments.at(0)); });
+            (void)co_await raw.publish("big.topic", WampList{big});
+            ws.send_binary(serialize_publish(PublishMessage{2, {}, "big.back", {big}}));
+            for (int i = 0; i < 100 && received.empty(); ++i) co_await pause(io, 20ms);
+            done = true;
+        }, detached);
+        io.run_for(15s);
+        REQUIRE(done);
+        CHECK(received == big);
+        auto event = ws_expect(ws, MessageType::EVENT);
+        REQUIRE(event);
+        CHECK(std::get<std::string>(deserialize_event(*event)->arguments.at(0)) == big);
+    }
+}
+
+TEST_CASE("WebSocket protocol violations and rejected upgrades", "[router][websocket]") {
+    auto config = plain_config();
+    config.websocket.allowed_origins = {"https://app.example.com"};
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    SECTION("origin not on the allow-list: 403, then closed") {
+        WsTestClient ws;
+        CHECK(ws.connect(router.port(), "Origin: https://evil.example.com\r\n").starts_with("HTTP/1.1 403"));
+        CHECK(ws.closed_by_peer());
+    }
+    SECTION("allowed origin and no origin both work") {
+        WsTestClient allowed;
+        CHECK(allowed.connect(router.port(), "Origin: https://app.example.com\r\n").starts_with("HTTP/1.1 101"));
+        WsTestClient none;
+        CHECK(none.connect(router.port()).starts_with("HTTP/1.1 101"));
+    }
+    SECTION("no wamp.2.cbor offered: 400") {
+        WsTestClient ws;
+        CHECK(ws.connect(router.port(), "", "wamp.2.json").starts_with("HTTP/1.1 400"));
+        CHECK(ws.closed_by_peer());
+    }
+    SECTION("wrong version: 426 advertising 13") {
+        WsTestClient ws;
+        const auto head = ws.connect(router.port(), "", "wamp.2.cbor", "8");
+        CHECK(head.starts_with("HTTP/1.1 426"));
+        CHECK(head.find("Sec-WebSocket-Version: 13") != std::string::npos);
+    }
+    SECTION("an unmasked client frame closes with 1002") {
+        WsTestClient ws;
+        REQUIRE(ws_join(ws, router.port()));
+        const std::vector<uint8_t> unmasked{0x82, 0x01, 0x00};
+        ws.send_raw(unmasked);
+        auto close = ws.read_frame();
+        REQUIRE(close);
+        CHECK(close->opcode == 0x8);
+        CHECK(close->payload == std::vector<uint8_t>{0x03, 0xEA});
+        CHECK(ws.closed_by_peer());
+    }
+    SECTION("a text frame closes with 1003") {
+        WsTestClient ws;
+        REQUIRE(ws_join(ws, router.port()));
+        ws.send(0x1, std::vector<uint8_t>{'{', '}'});
+        auto close = ws.read_frame();
+        REQUIRE(close);
+        CHECK(close->payload == std::vector<uint8_t>{0x03, 0xEB});
+    }
+    SECTION("garbage instead of WAMP is dropped without taking the router down") {
+        WsTestClient ws;
+        REQUIRE(ws.connect(router.port()).starts_with("HTTP/1.1 101"));
+        ws.send_binary(std::vector<uint8_t>{0xFF, 0xFF, 0xFF});
+        (void)ws.read_frame(500ms);
+        WsTestClient healthy;
+        CHECK(ws_join(healthy, router.port()));
+    }
+}
+
+TEST_CASE("WebSocket can be switched off", "[router][websocket]") {
+    auto config = plain_config();
+    config.websocket.enabled = false;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    WsTestClient ws;
+    ws.head_timeout = 500ms;
+    const auto head = ws.connect(router.port());
+    CHECK(head.find("101") == std::string::npos);   // treated as a (bad) RawSocket handshake
+}
