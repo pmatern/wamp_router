@@ -318,6 +318,8 @@ Throughput is computed from the slowest generator's duration, so the 4-thread ra
 
 ### Stage 4: RPC across shards
 
+**Status: done** (`ShardGroup::try_register` / `find_registration`, `CrossCall`, `CrossFrame`, `ProcedureHandler::accept_remote_call`). As designed below, with the same simplifications as Stage 3: registrations go through one global table (a mutex touched only when registering) that also pushes a "procedure -> shard" entry into every other shard's replica before REGISTERED is sent, so uniqueness holds across shards and a CALL after REGISTERED always finds the callee. A CALL for a remote procedure is a `CrossCall` in the callee shard's inbox; that shard generates the invocation id, owns the `PendingCall` (marked with the caller's shard) and, on YIELD, ERROR, timeout or callee disconnect, returns the frame as a `CrossFrame`. Calls and results are never shed at the inbox cap (only events are); callers are slowed by `wait_for_room` like publishers. Known gap: a caller that disconnects leaves its pending call on the callee's shard until YIELD or timeout (the reply is dropped); no INTERRUPT is sent for it. Original design notes:
+
 * **Registrations:** replicated like interest, because they change rarely. The "one registration per procedure" rule needs one
   arbiter: send REGISTER to the shard that owns `hash(realm, procedure)`, which grants or rejects and then broadcasts the new
   registration; REGISTERED is sent after all shards acknowledged.

@@ -32,15 +32,18 @@ struct PendingCall {
     uint64_t call_request_id;     // Original request_id from CALL message
     uint64_t callee_session_id;   // Who was sent the INVOCATION (0 if unknown)
     std::chrono::steady_clock::time_point deadline;  // time_point::max() = no timeout
+    int32_t caller_shard;         // shard the caller's session lives on, -1 = this shard (see ShardGroup)
 
     PendingCall(uint64_t inv_id, uint64_t caller_id, uint64_t request_id, uint64_t callee_id = 0,
                 std::chrono::steady_clock::time_point call_deadline =
-                    std::chrono::steady_clock::time_point::max())
+                    std::chrono::steady_clock::time_point::max(),
+                int32_t caller_shard_index = -1)
         : invocation_id(inv_id)
         , caller_session_id(caller_id)
         , call_request_id(request_id)
         , callee_session_id(callee_id)
         , deadline(call_deadline)
+        , caller_shard(caller_shard_index)
     {}
 };
 

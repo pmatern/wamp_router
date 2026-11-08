@@ -263,7 +263,8 @@ wamp_router/
 │   ├── authorizer.hpp        # Role permissions (Action, Permissions): exact/prefix URI rules
 │   ├── cpu_limits.hpp        # Container-aware CPU budget (cgroup quota, affinity, ECS task metadata)
 │   ├── router.hpp            # Router: N shards, one thread each, acceptor hands connections to the least-loaded shard
-│   ├── shard_group.hpp       # ShardGroup: cross-shard topic interest + inboxes for cross-shard PUBLISH
+│   ├── shard_group.hpp       # ShardGroup: cross-shard topic interest, procedure table, per-shard inboxes
+│   ├── cross_shard.hpp       # Dispatch of inbox messages (events, forwarded calls, results) on the destination shard
 │   ├── shard.hpp             # Shard: all routing state one thread owns (channels, pending calls, realms, ids)
 │   ├── realm.hpp             # Realm (per-realm subscriptions + registrations), RealmRegistry
 │   ├── crypto_utils.hpp      # Ed25519 signature verification, challenge generation
@@ -347,7 +348,7 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 
 #### Router (router.hpp)
 - `Router(config, Transport::PLAIN|TLS, threads)` starts one acceptor thread and N worker threads, each with its own `io_context(1)` and `Shard`. The acceptor passes each accepted socket (as a native handle) to the shard with the fewest sessions; the TLS handshake and the whole session then run on that shard's thread. `main.cpp` uses it (`[server] threads`, default 1).
-- **Cross-shard:** pub/sub works across shards (`ShardGroup` in `shard_group.hpp`: replicated topic interest plus one inbox per shard). **Limitation:** RPC does not yet: a CALL only finds callees on the caller's shard, so with more than one thread RPC is only valid for self-contained workloads (`wamp_load --mode selfrpc`) until Stage 4.
+- **Cross-shard:** `ShardGroup` (`shard_group.hpp`) connects the shards. Pub/sub: replicated topic interest plus one inbox per shard. RPC: a replicated procedure table (one registration per procedure across all shards); a CALL for a remote callee is forwarded to that shard, which owns the pending call and sends the RESULT/ERROR back. Publishers and callers are slowed (`wait_for_room`) when a destination inbox backs up. `include/cross_shard.hpp` dispatches inbox messages.
 
 #### Shard (shard.hpp)
 - Owns everything a router thread mutates: `EventChannelRegistry channels`, `InvocationTracker invocations`, `RealmRegistry realms`, the id generators and the default call timeout. There are no process-wide mutable statics.
@@ -476,7 +477,7 @@ gdb ./build/wamp_router
 ### Configuration
 The router uses TOML configuration files (config.toml or test_config.toml) for all settings:
 - Server port, TLS certificate paths, logging level
-- `threads` (`[server]`) - router threads / shards (default 1, `"auto"` = available CPUs); see the RPC limitation under Router
+- `threads` (`[server]`) - router threads / shards (default 1, `"auto"` = available CPUs); sessions on different shards still reach each other, see Router
 - `max_pending_invocations` - limits pending RPC calls (set via `ProcedureHandler::set_max_pending_invocations()`)
 - `call_timeout_ms` (`[server.rpc]`) - callee answer deadline, 0 disables; CALL `timeout` option overrides
 - `[server.events]` - `queue_size`, `overflow` (`backpressure` | `drop`), `backpressure_timeout_ms`, `slow_subscriber_limit`

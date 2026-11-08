@@ -60,19 +60,16 @@ public:
         spdlog::debug("Cleaned up subscriptions for session {}", session_id);
     }
 
-    // Runs on the destination shard's thread: deliver cross-shard PUBLISHes to this shard's subscribers
-    static asio::awaitable<void> deliver_remote(Shard& shard, std::vector<CrossPublishPtr> batch) {
-        for (const auto& message : batch) {
-            Realm& realm = shard.realms.get(message->realm);
-            realm.subscriptions.for_each_subscriber(message->topic,
-                [&](uint64_t subscription_id, uint64_t subscriber_session) {
-                    shard.channels.deliver(subscriber_session,
-                        EventToSend{subscriber_session, std::make_shared<std::vector<uint8_t>>(
-                                                            message->event.frame_for(subscription_id))});
-                });
-        }
-        // Queue-full sends were parked above; wait for room (bounded) before taking the next batch
-        co_await shard.channels.deliver_blocked(shard.channels.take_blocked());
+    // Runs on the destination shard's thread: deliver one cross-shard PUBLISH to this shard's subscribers
+    // (events whose queue is full are parked; the caller waits for room afterwards)
+    static void deliver_remote(Shard& shard, const CrossPublish& message) {
+        Realm& realm = shard.realms.get(message.realm);
+        realm.subscriptions.for_each_subscriber(message.topic,
+            [&](uint64_t subscription_id, uint64_t subscriber_session) {
+                (void)shard.channels.deliver(subscriber_session,
+                    EventToSend{subscriber_session, std::make_shared<std::vector<uint8_t>>(
+                                                        message.event.frame_for(subscription_id))});
+            });
     }
 
     // Handle SUBSCRIBE message

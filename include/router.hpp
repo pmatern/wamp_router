@@ -16,7 +16,7 @@
 #pragma once
 
 #include "cpu_limits.hpp"
-#include "pubsub_handler.hpp"
+#include "cross_shard.hpp"
 #include "shard.hpp"
 #include "shard_group.hpp"
 #include "wamp_server.hpp"
@@ -37,9 +37,9 @@ namespace wamp {
 // then on the connection (TLS handshake included) lives entirely on that shard's thread, with that
 // shard's own io_context, event channels, realms and pending calls: no locks, no shared mutable state.
 //
-// Pub/sub works across shards (see ShardGroup: replicated topic interest plus one inbox per shard, one
-// message per interested shard). LIMITATION: RPC does not yet: a CALL only finds callees registered on
-// the caller's shard. threads = 1 behaves exactly like one WampServer.
+// Sessions on different shards reach each other through ShardGroup: pub/sub via replicated topic interest
+// and one inbox per shard (one message per interested shard); RPC via a replicated procedure table, with
+// the callee's shard owning the pending call. threads = 1 behaves exactly like one WampServer.
 class Router {
 public:
     enum class Transport { PLAIN, TLS };
@@ -60,8 +60,8 @@ public:
         for (unsigned i = 0; i < threads; ++i) {
             workers_.push_back(std::make_unique<Worker>(shard_config));
         }
-        group_ = std::make_unique<ShardGroup>(threads, [](Shard& shard, std::vector<CrossPublishPtr> batch) {
-            return PubSubHandler::deliver_remote(shard, std::move(batch));
+        group_ = std::make_unique<ShardGroup>(threads, [](Shard& shard, std::vector<CrossMessage> batch) {
+            return dispatch_cross_messages(shard, std::move(batch));
         });
         for (unsigned i = 0; i < threads; ++i) {
             group_->attach(i, *workers_[i]->shard, workers_[i]->io);

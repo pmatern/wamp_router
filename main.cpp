@@ -88,11 +88,6 @@ int main(int argc, char* argv[]) {
         std::print("Press Ctrl+C to stop\n\n");
 
         const unsigned threads = config.threads == 0 ? wamp::detect_cpu_limits().available : config.threads;
-        if (threads > 1) {
-            spdlog::warn("threads = {}: pub/sub works across shards but an RPC CALL only reaches "
-                         "callees on the caller's shard (cross-shard RPC is not implemented); use threads = 1 if you use RPC", threads);
-        }
-
         wamp::Router router{config, wamp::Router::Transport::TLS, threads};
         router.stop_on_signals();
         router.start();

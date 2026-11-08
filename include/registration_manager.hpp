@@ -87,18 +87,21 @@ public:
         return true;
     }
 
-    // Unregister all procedures for a session (for cleanup on disconnect)
-    void unregister_session(uint64_t session_id) {
+    // Unregister all procedures for a session (for cleanup on disconnect); returns the procedure URIs removed
+    std::vector<std::string> unregister_session(uint64_t session_id) {
+        std::vector<std::string> procedures;
         auto it = session_registrations_.find(session_id);
         if (it == session_registrations_.end()) {
-            return;  // No registrations for this session
+            return procedures;  // No registrations for this session
         }
 
         // Collect registration IDs to remove (can't modify during iteration)
         std::vector<uint64_t> to_remove{it->second.begin(), it->second.end()};
         for (uint64_t reg_id : to_remove) {
+            if (auto info = get_registration(reg_id)) procedures.push_back(info->procedure);
             unregister(reg_id);
         }
+        return procedures;
     }
 
     // Returns registration info if procedure is registered, nullopt otherwise

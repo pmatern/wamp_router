@@ -311,3 +311,102 @@ TEST_CASE("A fast publisher is slowed by a subscriber on another shard instead o
     REQUIRE(router.dropped_events() == 0);
     REQUIRE(received == kEvents);
 }
+
+TEST_CASE("RPC works between sessions on different shards", "[router][crossshard][rpc]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 4};
+    router.start();
+
+    asio::io_context io;
+    constexpr size_t kClients = 8;  // two per shard; client 0 is the callee (shard 0)
+    std::vector<std::unique_ptr<WampClient>> clients;
+    for (size_t i = 0; i < kClients; ++i) clients.push_back(std::make_unique<WampClient>(io));
+    std::vector<int> ok(kClients, 0);
+    std::string error_uri;
+    std::string duplicate_uri;
+    std::string missing_uri;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        for (auto& c : clients) co_await c->connect("127.0.0.1", router.port(), "test.realm");
+        auto reg = co_await clients[0]->register_procedure("cross.double",
+            [](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                co_return YieldMessage{inv.request_id, {}, WampList{std::get<int64_t>(inv.arguments.at(0)) * 2}};
+            });
+        (void)co_await clients[0]->register_procedure("cross.fail",
+            [](const InvocationMessage&) -> awaitable<YieldMessage> {
+                throw WampException{"com.example.error.bad"};
+                co_return YieldMessage{0, {}};
+            });
+
+        // every other client calls it, from all shards
+        for (size_t i = 1; i < kClients; ++i) {
+            for (int64_t n = 0; n < 20; ++n) {
+                auto result = co_await clients[i]->call("cross.double", WampList{n});
+                if (std::get<int64_t>(result.at(0)) == n * 2) ++ok[i];
+            }
+        }
+
+        try { (void)co_await clients[3]->call("cross.fail"); } catch (const WampException& e) { error_uri = e.error_uri; }
+        try {   // one procedure, one callee, across all shards
+            (void)co_await clients[5]->register_procedure("cross.double",
+                [](const InvocationMessage& inv) -> awaitable<YieldMessage> { co_return YieldMessage{inv.request_id, {}}; });
+        } catch (const WampException& e) { duplicate_uri = e.error_uri; }
+
+        co_await clients[0]->unregister(reg);
+        try { (void)co_await clients[2]->call("cross.double", WampList{int64_t{1}}); }
+        catch (const WampException& e) { missing_uri = e.error_uri; }
+
+        for (auto& c : clients) co_await c->disconnect();
+        done = true;
+    }, detached);
+    io.run_for(15s);
+
+    REQUIRE(done);
+    for (size_t i = 1; i < kClients; ++i) REQUIRE(ok[i] == 20);
+    REQUIRE(error_uri == "com.example.error.bad");
+    REQUIRE(duplicate_uri == "wamp.error.procedure_already_exists");
+    REQUIRE(missing_uri == "wamp.error.no_such_procedure");
+}
+
+TEST_CASE("Cross-shard calls fail cleanly when the callee disconnects or is too slow", "[router][crossshard][rpc]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    asio::io_context io;
+    WampClient callee{io};   // shard 0
+    WampClient caller{io};   // shard 1
+    std::string disconnect_uri;
+    std::string timeout_uri;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await callee.connect("127.0.0.1", router.port(), "test.realm");
+        co_await caller.connect("127.0.0.1", router.port(), "test.realm");
+        REQUIRE(router.accepted_per_shard() == std::vector<uint64_t>{1, 1});
+
+        (void)co_await callee.register_procedure("cross.slow",
+            [&io](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                co_await pause(io, 60s);   // never answers within the test
+                co_return YieldMessage{inv.request_id, {}};
+            });
+
+        try { (void)co_await caller.call("cross.slow", {}, {}, 300ms); }
+        catch (const WampException& e) { timeout_uri = e.error_uri; }
+
+        // a call in flight when the callee goes away
+        co_spawn(io, [&]() -> awaitable<void> {
+            co_await pause(io, 200ms);
+            co_await callee.disconnect();
+        }, detached);
+        try { (void)co_await caller.call("cross.slow"); }
+        catch (const WampException& e) { disconnect_uri = e.error_uri; }
+
+        co_await caller.disconnect();
+        done = true;
+    }, detached);
+    io.run_for(15s);
+
+    REQUIRE(done);
+    REQUIRE(timeout_uri == "wamp.error.timeout");
+    REQUIRE(disconnect_uri == "wamp.error.callee_failure");
+}
