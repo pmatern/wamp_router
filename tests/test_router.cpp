@@ -1229,3 +1229,52 @@ TEST_CASE("shutdown_grace = 0 does not wait", "[router][shutdown]") {
     router.stop();
     CHECK(std::chrono::steady_clock::now() - start < 300ms);
 }
+
+// ---------------------------------------------------------------------------------------------------
+// WampClient over WebSocket
+// ---------------------------------------------------------------------------------------------------
+TEST_CASE("WampClient speaks WebSocket: pub/sub and RPC with a RawSocket client", "[router][websocket][client]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    asio::io_context io;
+    WampClient ws_client{io};
+    ws_client.set_transport(WampClient::Transport::WEBSOCKET);
+    WampClient raw_client{io};
+    std::vector<std::string> ws_events, raw_events;
+    std::string rpc_result;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await ws_client.connect("127.0.0.1", router.port(), "test.realm");
+        co_await raw_client.connect("127.0.0.1", router.port(), "test.realm");
+
+        co_await ws_client.subscribe("ws.topic", [&](const EventMessage& e) { ws_events.push_back(std::get<std::string>(e.arguments.at(0))); });
+        co_await raw_client.subscribe("raw.topic", [&](const EventMessage& e) { raw_events.push_back(std::get<std::string>(e.arguments.at(0))); });
+        (void)co_await ws_client.register_procedure("ws.echo",
+            [](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                co_return YieldMessage{inv.request_id, {}, inv.arguments};
+            });
+
+        (void)co_await raw_client.publish("ws.topic", WampList{std::string{"to ws"}});
+        (void)co_await ws_client.publish("raw.topic", WampList{std::string{"to raw"}});
+        auto result = co_await raw_client.call("ws.echo", WampList{std::string{"via ws callee"}});
+        rpc_result = std::get<std::string>(result.at(0));
+
+        // a payload that needs a 16-bit and then a 64-bit WebSocket length
+        for (size_t size : {size_t{300}, size_t{70000}}) {
+            auto echoed = co_await raw_client.call("ws.echo", WampList{std::string(size, 'q')});
+            REQUIRE(std::get<std::string>(echoed.at(0)).size() == size);
+        }
+        co_await pause(io, 100ms);
+        co_await ws_client.disconnect();
+        co_await raw_client.disconnect();
+        done = true;
+    }, detached);
+    io.run_for(15s);
+
+    REQUIRE(done);
+    CHECK(ws_events == std::vector<std::string>{"to ws"});
+    CHECK(raw_events == std::vector<std::string>{"to raw"});
+    CHECK(rpc_result == "via ws callee");
+}

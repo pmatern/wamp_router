@@ -64,8 +64,18 @@ struct Options {
     size_t queue_size = 100;     // embedded router: per-session event queue size
     std::string overflow = "backpressure";  // embedded router: backpressure | drop
     size_t rate = 2000;          // events/s, 0 = unpaced (stress: the router drops events when subscriber queues fill)
+    bool websocket = false;      // clients speak WebSocket (wamp.2.cbor) instead of RawSocket
     bool verbose = false;
 };
+
+// Set once from the command line; every client the scenarios create speaks this transport
+bool g_websocket = false;
+
+std::shared_ptr<WampClient> make_client(asio::io_context& io) {
+    auto client = std::make_shared<WampClient>(io);
+    if (g_websocket) client->set_transport(WampClient::Transport::WEBSOCKET);
+    return client;
+}
 
 void usage() {
     std::puts(
@@ -85,6 +95,7 @@ void usage() {
         "  --queue-size N           embedded router: per-session event queue size (default 100)\n"
         "  --overflow P             embedded router: backpressure | drop (default backpressure)\n"
         "  --host H --port P        target an external plain-TCP router (default: embedded)\n"
+        "  --transport rawsocket|ws  client transport (default rawsocket; ws = WebSocket wamp.2.cbor, plain TCP)\n"
         "  --verbose                keep router/client logging on\n");
 }
 
@@ -100,6 +111,7 @@ bool parse(int argc, char** argv, Options& o) {
         };
         if (a == "--help" || a == "-h") { usage(); return false; }
         else if (a == "--verbose") o.verbose = true;
+        else if (a == "--transport") { const char* v = next(); if (!v) return false; o.websocket = std::string{v} == "ws"; }
         else if (a == "--mode") { const char* v = next(); if (!v) return false; o.mode = v; }
         else if (a == "--host") { const char* v = next(); if (!v) return false; o.host = v; }
         else if (a == "--port") { size_t p = 0; if (!number(p)) return false; o.port = static_cast<uint16_t>(p); }
@@ -239,12 +251,12 @@ awaitable<void> run_pubsub(asio::io_context& io, ClientPool& pool, const Options
     // Event callbacks can fire after this coroutine returns, so they share ownership of the stats
     auto state = std::make_shared<PubSubState>();
 
-    auto publisher_ptr = std::make_shared<WampClient>(io);
+    auto publisher_ptr = make_client(io);
     pool.push_back(publisher_ptr);
     WampClient& publisher = *publisher_ptr;
     std::vector<std::shared_ptr<WampClient>> subs;
     for (size_t i = 0; i < o.subscribers; ++i) {
-        subs.push_back(std::make_shared<WampClient>(io));
+        subs.push_back(make_client(io));
         pool.push_back(subs.back());
     }
 
@@ -310,12 +322,12 @@ awaitable<void> run_pubsub(asio::io_context& io, ClientPool& pool, const Options
 awaitable<void> run_rpc(asio::io_context& io, ClientPool& pool, const Options& o, std::string host, uint16_t port) {
     const std::string kProcedure = "load.echo." + std::to_string(o.instance);
 
-    auto callee_ptr = std::make_shared<WampClient>(io);
+    auto callee_ptr = make_client(io);
     pool.push_back(callee_ptr);
     WampClient& callee = *callee_ptr;
     std::vector<std::shared_ptr<WampClient>> callers;
     for (size_t i = 0; i < o.callers; ++i) {
-        callers.push_back(std::make_shared<WampClient>(io));
+        callers.push_back(make_client(io));
         pool.push_back(callers.back());
     }
 
@@ -377,7 +389,7 @@ awaitable<void> run_self(asio::io_context& io, ClientPool& pool, const Options& 
                          bool pubsub) {
     std::vector<std::shared_ptr<WampClient>> clients;
     for (size_t i = 0; i < o.callers; ++i) {
-        clients.push_back(std::make_shared<WampClient>(io));
+        clients.push_back(make_client(io));
         pool.push_back(clients.back());
     }
     const std::string base = "self." + std::to_string(o.instance) + ".";
@@ -459,7 +471,7 @@ awaitable<void> run_idle(asio::io_context& io, ClientPool& pool, const Options& 
     auto worker = [&]() -> awaitable<void> {
         while (next < o.connections) {
             ++next;
-            auto client = std::make_shared<WampClient>(io);
+            auto client = make_client(io);
             pool.push_back(client);
             try {
                 co_await client->connect(host, port, "load.realm");
@@ -492,6 +504,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    g_websocket = opts.websocket;
     spdlog::set_level(opts.verbose ? spdlog::level::info : spdlog::level::off);
 
     std::unique_ptr<EmbeddedRouter> router;

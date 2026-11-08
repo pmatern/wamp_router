@@ -18,12 +18,14 @@
 #include "wamp_messages.hpp"
 #include "wamp_serializer.hpp"
 #include "raw_socket.hpp"
+#include "websocket.hpp"
 #include "crypto_utils.hpp"
 #include <asio.hpp>
 #include <asio/experimental/channel.hpp>
 #include <asio/experimental/awaitable_operators.hpp>
 #include <spdlog/spdlog.h>
 #include <concepts>
+#include <random>
 #include <deque>
 #include <functional>
 #include <unordered_map>
@@ -121,6 +123,10 @@ public:
     // Connection Management
     // ========================================================================
 
+    // Which transport to speak to the router; call before connect(). WebSocket uses the wamp.2.cbor subprotocol.
+    enum class Transport { RAWSOCKET, WEBSOCKET };
+    void set_transport(Transport transport) { transport_ = transport; }
+
     // Connect to WAMP router (unauthenticated)
     awaitable<void> connect(std::string host, uint16_t port, std::string realm) {
         co_await connect_with_auth(std::move(host), port, std::move(realm), std::nullopt, std::nullopt);
@@ -158,7 +164,11 @@ public:
         auto endpoints = co_await resolver.async_resolve(host, std::to_string(port), use_awaitable);
         co_await asio::async_connect(socket_, endpoints, use_awaitable);
 
-        co_await send_rawsocket_handshake();
+        if (transport_ == Transport::WEBSOCKET) {
+            co_await send_websocket_upgrade(host);
+        } else {
+            co_await send_rawsocket_handshake();
+        }
 
         // Start read loop AFTER handshake completes
         read_loop_running_ = true;
@@ -460,7 +470,12 @@ private:
                     break;
                 }
 
-                read_buffer_.insert(read_buffer_.end(), buffer.begin(), buffer.begin() + n);
+                if (transport_ == Transport::WEBSOCKET) {
+                    ws_in_.insert(ws_in_.end(), buffer.begin(), buffer.begin() + n);
+                    if (!unwrap_websocket()) break;
+                } else {
+                    read_buffer_.insert(read_buffer_.end(), buffer.begin(), buffer.begin() + n);
+                }
                 process_buffer();
             }
 
@@ -965,6 +980,82 @@ private:
     // Sending Messages
     // ========================================================================
 
+    // HTTP upgrade to WebSocket with the wamp.2.cbor subprotocol; the 101 response is checked, including the accept key
+    awaitable<void> send_websocket_upgrade(const std::string& host) {
+        state_ = State::AWAITING_RAWSOCKET_RESPONSE;
+
+        std::array<uint8_t, 16> nonce{};
+        for (auto& b : nonce) b = static_cast<uint8_t>(next_mask_());
+        const auto key = ws::base64_encode(nonce);
+        const std::string request =
+            "GET /ws HTTP/1.1\r\nHost: " + host + "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Key: " + key + "\r\nSec-WebSocket-Version: 13\r\n"
+            "Sec-WebSocket-Protocol: wamp.2.cbor\r\n\r\n";
+        co_await asio::async_write(socket_, asio::buffer(request), use_awaitable);
+
+        std::string head;
+        std::array<uint8_t, 1> byte{};
+        while (head.find("\r\n\r\n") == std::string::npos) {   // byte at a time: nothing may be consumed past the head
+            co_await asio::async_read(socket_, asio::buffer(byte), use_awaitable);
+            head += static_cast<char>(byte[0]);
+            if (head.size() > ws::kMaxUpgradeRequest) throw std::runtime_error("WebSocket upgrade response too large");
+        }
+        if (!head.starts_with("HTTP/1.1 101") ||
+            head.find("Sec-WebSocket-Accept: " + ws::accept_key(key) + "\r\n") == std::string::npos) {
+            throw std::runtime_error("WebSocket upgrade refused: " + head.substr(0, head.find("\r\n")));
+        }
+        spdlog::debug("WebSocket upgrade complete");
+    }
+
+    // Wraps a RawSocket-framed message in a masked WebSocket binary frame (clients must mask)
+    std::vector<uint8_t> to_websocket_frame(const std::vector<uint8_t>& rawsocket_frame) {
+        const auto payload = std::span<const uint8_t>{rawsocket_frame}.subspan(rawsocket::FRAME_HEADER_SIZE);
+        std::vector<uint8_t> out;
+        const auto header = ws::encode_header(ws::Opcode::BINARY, payload.size());
+        out.reserve(header.size + 4 + payload.size());
+        out.insert(out.end(), header.bytes.begin(), header.bytes.begin() + static_cast<std::ptrdiff_t>(header.size));
+        out[1] |= 0x80;   // mask bit
+        const uint32_t mask = next_mask_();
+        const uint8_t key[4] = {static_cast<uint8_t>(mask), static_cast<uint8_t>(mask >> 8),
+                                static_cast<uint8_t>(mask >> 16), static_cast<uint8_t>(mask >> 24)};
+        out.insert(out.end(), key, key + 4);
+        for (size_t i = 0; i < payload.size(); ++i) out.push_back(payload[i] ^ key[i % 4]);
+        return out;
+    }
+
+    // Reads server WebSocket frames from ws_in_ and turns each complete data message into a RawSocket frame in
+    // read_buffer_, so everything after this point is transport independent. Returns false if the peer closed.
+    bool unwrap_websocket() {
+        size_t pos = 0;
+        while (ws_in_.size() - pos >= 2) {
+            const uint8_t* p = ws_in_.data() + pos;
+            const auto opcode = static_cast<uint8_t>(p[0] & 0x0F);
+            uint64_t length = p[1] & 0x7F;
+            size_t header = 2;
+            if (length == 126) {
+                if (ws_in_.size() - pos < 4) break;
+                length = (uint64_t{p[2]} << 8) | p[3];
+                header = 4;
+            } else if (length == 127) {
+                if (ws_in_.size() - pos < 10) break;
+                length = 0;
+                for (int i = 0; i < 8; ++i) length = (length << 8) | p[2 + i];
+                header = 10;
+            }
+            if (ws_in_.size() - pos < header + length) break;
+            if (opcode == 0x8) return false;                                   // close
+            if (opcode == 0x2) {                                               // binary: one WAMP message
+                const auto frame_header = rawsocket::encode_frame_header(
+                    rawsocket::FrameHeader{rawsocket::FrameType::REGULAR, static_cast<uint32_t>(length)});
+                read_buffer_.insert(read_buffer_.end(), frame_header.begin(), frame_header.end());
+                read_buffer_.insert(read_buffer_.end(), p + header, p + header + length);
+            }
+            pos += header + length;                                            // pings, pongs, text: ignored
+        }
+        ws_in_.erase(ws_in_.begin(), ws_in_.begin() + static_cast<std::ptrdiff_t>(pos));
+        return true;
+    }
+
     awaitable<void> send_rawsocket_handshake() {
         state_ = State::AWAITING_RAWSOCKET_RESPONSE;
 
@@ -1024,11 +1115,7 @@ private:
 
         spdlog::info("Sending HELLO frame ({} bytes)", hello_frame.size());
 
-        co_await asio::async_write(
-            socket_,
-            asio::buffer(hello_frame),
-            use_awaitable
-        );
+        co_await write_frame(hello_frame);
 
         spdlog::info("Sent HELLO for realm '{}'", realm_);
     }
@@ -1064,11 +1151,7 @@ private:
         auto auth_cbor = serialize_authenticate(auth);
         auto auth_frame = rawsocket::create_wamp_message(auth_cbor);
 
-        co_await asio::async_write(
-            socket_,
-            asio::buffer(auth_frame),
-            use_awaitable
-        );
+        co_await write_frame(auth_frame);
 
         spdlog::info("Sent AUTHENTICATE message");
     }
@@ -1114,9 +1197,12 @@ private:
         }
         write_in_progress_ = true;
 
+        // (the converted frame must outlive the write)
+        std::vector<uint8_t> ws_frame;
+        if (transport_ == Transport::WEBSOCKET) ws_frame = to_websocket_frame(frame);
         auto [ec, written] = co_await asio::async_write(
             socket_,
-            asio::buffer(frame),
+            asio::buffer(transport_ == Transport::WEBSOCKET ? ws_frame : frame),
             asio::as_tuple(use_awaitable)
         );
         (void)written;
@@ -1166,6 +1252,9 @@ private:
 
     // Buffering
     std::vector<uint8_t> read_buffer_;
+    Transport transport_{Transport::RAWSOCKET};
+    std::vector<uint8_t> ws_in_;                    // WebSocket bytes not yet a complete frame
+    std::minstd_rand next_mask_{std::random_device{}()};   // client frame masks (not security relevant here)
     rawsocket::FrameHeader current_frame_header_{};
     uint32_t expected_payload_length_;
 
