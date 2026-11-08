@@ -318,7 +318,18 @@ Throughput is computed from the slowest generator's duration, so the 4-thread ra
 
 ### Stage 4: RPC across shards
 
-**Status: done** (`ShardGroup::try_register` / `find_registration`, `CrossCall`, `CrossFrame`, `ProcedureHandler::accept_remote_call`). As designed below, with the same simplifications as Stage 3: registrations go through one global table (a mutex touched only when registering) that also pushes a "procedure -> shard" entry into every other shard's replica before REGISTERED is sent, so uniqueness holds across shards and a CALL after REGISTERED always finds the callee. A CALL for a remote procedure is a `CrossCall` in the callee shard's inbox; that shard generates the invocation id, owns the `PendingCall` (marked with the caller's shard) and, on YIELD, ERROR, timeout or callee disconnect, returns the frame as a `CrossFrame`. Calls and results are never shed at the inbox cap (only events are); callers are slowed by `wait_for_room` like publishers. Known gap: a caller that disconnects leaves its pending call on the callee's shard until YIELD or timeout (the reply is dropped); no INTERRUPT is sent for it. Original design notes:
+**Status: done** (`ShardGroup::try_register` / `find_registration`, `CrossCall`, `CrossFrame`, `ProcedureHandler::accept_remote_call`). As designed below, with the same simplifications as Stage 3: registrations go through one global table (a mutex touched only when registering) that also pushes a "procedure -> shard" entry into every other shard's replica before REGISTERED is sent, so uniqueness holds across shards and a CALL after REGISTERED always finds the callee. A CALL for a remote procedure is a `CrossCall` in the callee shard's inbox; that shard generates the invocation id, owns the `PendingCall` (marked with the caller's shard) and, on YIELD, ERROR, timeout or callee disconnect, returns the frame as a `CrossFrame`. Calls and results are never shed at the inbox cap (only events are); callers are slowed by `wait_for_room` like publishers. Known gap: a caller that disconnects leaves its pending call on the callee's shard until YIELD or timeout (the reply is dropped); no INTERRUPT is sent for it. 
+**Measured on EC2** (c7i.4xlarge router pinned to 1/2/4 cores; 4 c7i.2xlarge generators x 7 pinned `wamp_load --mode rpc --callers 20 --calls 10000`, each process with its own procedure, so its callee sits on one shard and the callers spread over all of them; 5.6M calls per run, 0 failures):
+
+| Router threads | Calls/s | Router CPU | CPU per call |
+|---|---|---|---|
+| 1 | 130k | 1.0 cores | 7.7 us |
+| 2 | 192k | 2.0 cores | 10.4 us |
+| 4 | 327k | 4.1 cores | 12.6 us |
+
+Scaling is 1.5x at 2 threads and 2.5x at 4. CPU per call rises 35-60% over one thread: a cross-shard call crosses the inbox twice (CALL out, RESULT back) and each crossing costs a wakeup. Every procedure has one callee on one shard, so that shard carries all of its INVOCATION/YIELD traffic; spreading callees over shards (many procedures, as here) is what lets the router scale. A single hot procedure is bounded by one core.
+
+Original design notes:
 
 * **Registrations:** replicated like interest, because they change rarely. The "one registration per procedure" rule needs one
   arbiter: send REGISTER to the shard that owns `hash(realm, procedure)`, which grants or rejects and then broadcasts the new
