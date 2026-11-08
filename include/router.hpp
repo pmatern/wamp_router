@@ -114,7 +114,8 @@ public:
         }
         // No new connections now. Let cross-shard events, calls and results already queued reach their
         // sessions before the shard threads stop (bounded: a stuck inbox must not block shutdown).
-        const auto give_up = std::chrono::steady_clock::now() + kShutdownGrace;
+        const auto shutdown_begin = std::chrono::steady_clock::now();
+        const auto give_up = shutdown_begin + kShutdownGrace;
         while (group_->pending() > 0 && std::chrono::steady_clock::now() < give_up) {
             std::this_thread::sleep_for(std::chrono::milliseconds{1});
         }
@@ -141,6 +142,10 @@ public:
         if (const auto left = open_sessions(); left > 0) {
             spdlog::warn("Shutdown: cutting {} session(s) that did not leave within {} ms", left,
                          config_.shutdown_grace.count());
+        } else {
+            spdlog::info("Shutdown: all sessions left after {} ms",
+                         std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - shutdown_begin).count());
         }
         for (auto& worker : workers_) {
             worker->io.stop();

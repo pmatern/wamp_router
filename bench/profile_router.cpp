@@ -76,7 +76,8 @@ int main(int argc, char** argv) {
     std::thread stats([&] {
         uint64_t last = 0;
         while (!stats_stop.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+            for (int i = 0; i < 40 && !stats_stop.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            if (stats_stop.load()) break;
             const auto total = router.dropped_events();
             if (total != last) {
                 std::printf("drops total %llu (cross-shard inbox %llu)\n", static_cast<unsigned long long>(total),
@@ -89,6 +90,15 @@ int main(int argc, char** argv) {
     router.wait();
     stats_stop = true;
     stats.join();
+    const auto shard_stats = router.stats();
+    for (size_t i = 0; i < shard_stats.size(); ++i) {
+        const auto& st = shard_stats[i];
+        std::printf("shard %zu: accepted=%llu publishes=%llu calls=%llu event_drops=%llu inbox_received=%llu inbox_dropped=%llu\n",
+                    i, static_cast<unsigned long long>(st.accepted), static_cast<unsigned long long>(st.publishes),
+                    static_cast<unsigned long long>(st.calls), static_cast<unsigned long long>(st.event_drops),
+                    static_cast<unsigned long long>(st.inbox_received), static_cast<unsigned long long>(st.inbox_dropped));
+    }
+    std::printf("drops total %llu\n", static_cast<unsigned long long>(router.dropped_events()));
     const auto rejected = router.rejected_connections();
     std::printf("rejected connections: %llu over max_connections, %llu over the per-address cap\n",
                 static_cast<unsigned long long>(rejected.total_limit), static_cast<unsigned long long>(rejected.address_limit));

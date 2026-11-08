@@ -343,6 +343,26 @@ Original design notes:
   as today.
 * **IDs:** per-shard ranges (shard number in the high bits) replace the shared atomic generators; no coordination.
 
+### WebSocket, connection handling and shutdown (EC2)
+
+Same hardware as the scaling runs (c7i.4xlarge router pinned to 1/2/4 cores, 4 c7i.2xlarge generators with 7 pinned `wamp_load` processes each, plain TCP, 10 positional arguments). All runs: 0 failed calls. The old/new comparison alternates the pre-WebSocket binary (`b09a498`) and the current one on the same instances, because instances differ from run to run by up to about 15%.
+
+| Workload (threads) | Old, RawSocket | New, RawSocket | New, WebSocket |
+|---|---|---|---|
+| RPC, 1 | 124.8k calls/s, 8.0 us | 123.5k, 8.2 us | 119.1k, 8.4 us |
+| RPC, 2 | 193.0k, 10.3 us | 188.6k, 10.5 us | 187.6k, 10.7 us |
+| RPC, 4 | 274.4k, 13.4 us | 302.9k, 12.8 us | 288.1k, 13.3 us |
+| Fan-out, 1 | 254.7k deliveries/s, 3.9 us | 248.0k, 4.0 us | 246.2k, 4.1 us |
+| Fan-out, 2 | 453.8k, 5.1 us | 449.4k, 5.3 us | 461.3k, 5.1 us |
+| Fan-out, 4 | 962.7k, 4.5 us | 1,056.8k, 4.3 us | 1,017.2k, 4.7 us |
+
+* **WebSocket costs the same as RawSocket** within run-to-run noise (RPC within 1-4%, fan-out within 5%): the writer gathers a 2-byte header and the shared payload, so fan-out stays zero-copy. The later work (timeouts, limits, malformed-message counting, concepts) did not change RawSocket throughput either (new vs old within +-3% at 1-2 threads, +10% at 4 threads, which is noise).
+* **Idle sessions** (20,000 established sessions held on a 2-thread router): resident memory 119.4 MB old, 156.6 MB new (RawSocket), 162.8 MB new (WebSocket) over a baseline of about 8.5 MB, i.e. 5.5 KB per session before, 7.4 KB after (+1.8 KB, +33%) and 7.7 KB over WebSocket. On macOS the same change measured +0.6-0.8 KB. The handshake-timeout timer is not the cause (disabling it changed nothing locally); the WebSocket/WampSession members account for part of it, the rest is not explained. A heap profile is the next step (`TODO.md`).
+* **Connect rate** for those sessions: 21-25k/s (RawSocket, limited by the generators). Router CPU for 20,000 handshakes: 0.65 s old, 0.68 s new. WebSocket sessions cost about 30% more CPU to establish (SHA-1, base64 and HTTP parsing: 0.89 s per 20,000) and the generator's connect rate was 7-8k/s because the client reads the HTTP response one byte at a time.
+* **Connection limit** (`max_connections` 5,000, 20,000 simultaneous attempts): exactly 5,000 admitted and 15,000 rejected, 0.31 s of router CPU for all 20,000 attempts, 46 MB resident.
+* **Graceful shutdown** (SIGTERM with 20,000 established sessions): the router exits 0.455 s later (RawSocket) and 0.467 s (WebSocket), with every session sent GOODBYE and closed; 5,000 sessions took 0.2 s. (The pre-change router cut them in about 0.4 s.)
+* **Unpaced fan-out at 2 threads shows a client-side shortfall** of 0-8% of expected deliveries in both old and new binaries (e.g. 10.3M of 11.2M); at 1 and 4 threads it is 0-0.01%. The instrumented run counted only 3,568 router-side drops (0 inbox drops) against 94,200 events the generator did not see, so most of the shortfall is either late delivery past the generator's 1-second idle cutoff or loss the counters do not see. Not investigated further; see `TODO.md`.
+
 ### Cross-shard latency (EC2)
 
 c7i.4xlarge router (1/2/4 threads), one c7i.2xlarge probe, same AZ, plain TCP, probe pinned to one core. RPC: one caller, closed loop, 20,000 calls; callee connects first (shard 0), caller second (shard 1) when the router has 2+ threads, so with 1 thread both are on one shard and otherwise the call crosses shards twice (CALL out, RESULT back). Pub/sub: one publisher (shard 0) and one subscriber (shard 1 with 2+ threads) at 2,000 events/s, 20,000 events. Times include the network round trip (about 0.1-0.2 ms on the unloaded path) and the client.
