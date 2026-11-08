@@ -770,3 +770,23 @@ key = ")" + key.path().string() + R"("
         CHECK_FALSE(load("[server.websocket]\nmax_message_size = 16777216\n").has_value());
     }
 }
+
+TEST_CASE("Config::load() handshake_timeout_ms", "[config][timeout]") {
+    TempCertFile cert("cert");
+    TempCertFile key("key");
+    auto load = [&](const std::string& server_line) {
+        std::string content = "[server]\nport = 8080\n" + server_line + R"(
+[server.tls]
+cert = ")" + cert.path().string() + R"("
+key = ")" + key.path().string() + R"("
+)";
+        TempConfigFile config(content);
+        return wamp::Config::load(config.path());
+    };
+
+    CHECK(load("")->handshake_timeout == std::chrono::milliseconds{10000});
+    CHECK(load("handshake_timeout_ms = 2500\n")->handshake_timeout == std::chrono::milliseconds{2500});
+    CHECK(load("handshake_timeout_ms = 0\n")->handshake_timeout == std::chrono::milliseconds{0});
+    CHECK_FALSE(load("handshake_timeout_ms = -1\n").has_value());
+    CHECK_FALSE(load("handshake_timeout_ms = \"soon\"\n").has_value());
+}

@@ -9,6 +9,11 @@ port = 8080
 # Sessions on different shards still reach each other: pub/sub and RPC are routed across shards.
 threads = 1
 
+# A new connection must become an established WAMP session (TLS handshake, RawSocket/WebSocket
+# handshake, HELLO and authentication all included) within this many milliseconds, or it is closed.
+# Protects against clients that connect and stall. 0 disables the limit.
+handshake_timeout_ms = 10000
+
 [server.tls]
 # Path to TLS certificate (PEM format)
 cert = "/path/to/cert.pem"

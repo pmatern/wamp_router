@@ -75,6 +75,7 @@ public:
     struct alignas(64) Counters {
         std::atomic<uint64_t> publishes{0};   // PUBLISH messages handled here
         std::atomic<uint64_t> calls{0};       // CALL messages handled here
+        std::atomic<uint64_t> handshake_timeouts{0};   // connections closed for not becoming a session in time
     } counters;
 
     EventChannelRegistry channels;

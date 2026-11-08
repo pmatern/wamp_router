@@ -52,6 +52,7 @@ This creates a self-signed certificate and key: `test_certs/cert.pem` and `test_
 [server]
 port = 8080
 threads = 1   # router threads, one shard each; "auto" = one per available CPU (container-aware)
+handshake_timeout_ms = 10000   # a new connection must become a session (TLS, handshake, HELLO, auth) in this time; 0 = no limit
 
 [server.tls]
 cert = "test_certs/cert.pem"
@@ -260,6 +261,10 @@ A client opens a normal WebSocket connection (`ws://` or, with TLS, `wss://`; an
 - **Frames:** fragmented messages are reassembled, pings are answered with pongs, and a client close frame is echoed before the connection is closed. After a WAMP GOODBYE the router sends a close frame. Client frames must be masked and use no extensions (no `permessage-deflate`); text frames are refused with close code 1003 because they belong to `wamp.2.json`.
 - **Limits:** a message may be at most `max_message_size` bytes (default and maximum 16,777,215, the same limit as RawSocket). The router does not send pings of its own.
 - **Everything else is shared:** authentication, realms, authorization and routing are identical to RawSocket, and WebSocket and RawSocket sessions see each other's events and calls, also across shards.
+
+### Connections that stall
+
+A client that connects and then sends nothing (or trickles bytes) would otherwise hold a file descriptor and some memory indefinitely. `[server] handshake_timeout_ms` (default 10,000; 0 disables) is a deadline for the whole path to an established session: TLS handshake, RawSocket or WebSocket handshake, HELLO and Cryptosign authentication together. Sending bytes slowly does not extend it. When it expires the router closes the connection and counts it (`handshake_timeouts` in `Router::stats()`, logged at shutdown). Established sessions are not affected; a WAMP session may be idle for as long as it likes. The router does not limit the number of connections yet.
 
 ### Authentication
 

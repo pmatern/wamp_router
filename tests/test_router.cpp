@@ -536,6 +536,7 @@ TEST_CASE("stop() delivers cross-shard messages that are still queued", "[router
 // WebSocket (wamp.2.cbor) on the same port
 // ---------------------------------------------------------------------------------------------------
 #include "tests/ws_test_client.hpp"
+#include <filesystem>
 
 namespace {
 
@@ -785,4 +786,143 @@ TEST_CASE("WebSocket can be switched off", "[router][websocket]") {
     ws.head_timeout = 500ms;
     const auto head = ws.connect(router.port());
     CHECK(head.find("101") == std::string::npos);   // treated as a (bad) RawSocket handshake
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Connections that open and stall
+// ---------------------------------------------------------------------------------------------------
+namespace {
+
+// A bare blocking TCP connection; reports whether the router closes it within a time
+struct BareConnection {
+    asio::io_context io;
+    asio::ip::tcp::socket socket{io};
+
+    explicit BareConnection(unsigned short port) { socket.connect({asio::ip::address_v4::loopback(), port}); }
+
+    void send(std::span<const uint8_t> data) { asio::write(socket, asio::buffer(data.data(), data.size())); }
+
+    bool closed_within(std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            pollfd p{socket.native_handle(), POLLIN, 0};
+            if (::poll(&p, 1, 50) <= 0) continue;
+            uint8_t buf[256];
+            std::error_code ec;
+            const auto n = socket.read_some(asio::buffer(buf), ec);
+            if (ec == asio::error::eof || ec == asio::error::connection_reset) return true;
+            if (!ec && n == 0) return true;
+        }
+        return false;
+    }
+};
+
+ServerConfig impatient_config(std::chrono::milliseconds limit) {
+    auto config = plain_config();
+    config.handshake_timeout = limit;
+    return config;
+}
+
+}  // namespace
+
+TEST_CASE("Connections that stall before a session is established are closed", "[router][timeout]") {
+    Router router{impatient_config(300ms), Router::Transport::PLAIN, 1};
+    router.start();
+
+    SECTION("a silent connection") {
+        BareConnection c{router.port()};
+        CHECK_FALSE(c.closed_within(100ms));    // not closed early
+        CHECK(c.closed_within(2s));
+    }
+    SECTION("a connection that sent only the first byte of a RawSocket handshake") {
+        BareConnection c{router.port()};
+        c.send(std::vector<uint8_t>{0x7F});
+        CHECK(c.closed_within(2s));
+    }
+    SECTION("a half-finished HTTP upgrade request") {
+        BareConnection c{router.port()};
+        const std::string partial = "GET /ws HTTP/1.1\r\nHost: localhost\r\n";
+        c.send({reinterpret_cast<const uint8_t*>(partial.data()), partial.size()});
+        CHECK(c.closed_within(2s));
+    }
+    SECTION("trickling bytes does not extend the deadline") {
+        BareConnection c{router.port()};
+        const std::string request = "GET /ws HTTP/1.1\r\nHost: localhost\r\nX-Slow: ";
+        const auto start = std::chrono::steady_clock::now();
+        bool closed = false;
+        for (char ch : request + std::string(200, 'a')) {
+            std::error_code ec;
+            asio::write(c.socket, asio::buffer(&ch, 1), ec);
+            if (ec || c.closed_within(20ms)) { closed = true; break; }
+        }
+        CHECK(closed);
+        CHECK(std::chrono::steady_clock::now() - start < 2s);
+    }
+    SECTION("a RawSocket client that handshakes but never sends HELLO") {
+        BareConnection c{router.port()};
+        const auto handshake = rawsocket::encode_handshake_request({.max_length = rawsocket::MaxLengthCode::BYTES_16M,
+                                                                    .serializer = rawsocket::Serializer::CBOR});
+        c.send(handshake);
+        CHECK(c.closed_within(2s));
+    }
+
+    // the timeouts were counted (one per section that ran)
+    CHECK(router.stats()[0].handshake_timeouts == 1);
+}
+
+TEST_CASE("Established sessions are not subject to the handshake timeout", "[router][timeout]") {
+    Router router{impatient_config(300ms), Router::Transport::PLAIN, 1};
+    router.start();
+
+    SECTION("WebSocket") {
+        WsTestClient ws;
+        REQUIRE(ws_join(ws, router.port()));
+        std::this_thread::sleep_for(900ms);                   // three times the limit
+        ws.send(0x9, std::vector<uint8_t>{1});
+        auto pong = ws.read_frame();
+        REQUIRE(pong);
+        CHECK(pong->opcode == 0xA);
+    }
+    SECTION("RawSocket") {
+        asio::io_context io;
+        WampClient client{io};
+        bool ok = false;
+        co_spawn(io, [&]() -> awaitable<void> {
+            co_await client.connect("127.0.0.1", router.port(), "test.realm");
+            co_await pause(io, 900ms);
+            (void)co_await client.publish("still.alive", WampList{std::string{"yes"}});
+            auto sub_ok = co_await client.subscribe("still.alive", [](const EventMessage&) {});
+            ok = sub_ok != 0;
+            co_await client.disconnect();
+        }, detached);
+        io.run_for(10s);
+        CHECK(ok);
+    }
+    CHECK(router.stats()[0].handshake_timeouts == 0);
+}
+
+TEST_CASE("handshake_timeout_ms = 0 disables the limit", "[router][timeout]") {
+    Router router{impatient_config(0ms), Router::Transport::PLAIN, 1};
+    router.start();
+    BareConnection c{router.port()};
+    CHECK_FALSE(c.closed_within(800ms));
+}
+
+TEST_CASE("A client that never completes the TLS handshake is closed", "[router][timeout][tls]") {
+    if (!std::filesystem::exists("test_certs/cert.pem") || !std::filesystem::exists("test_certs/key.pem")) {
+        SKIP("test_certs/ missing (run scripts/gen-test-certs.sh)");
+    }
+    auto config = impatient_config(300ms);
+    config.tls.cert_path = "test_certs/cert.pem";
+    config.tls.key_path = "test_certs/key.pem";
+    Router router{config, Router::Transport::TLS, 1};
+    router.start();
+
+    BareConnection silent{router.port()};
+    CHECK(silent.closed_within(2s));
+
+    BareConnection hello_fragment{router.port()};
+    hello_fragment.send(std::vector<uint8_t>{0x16, 0x03, 0x01, 0x02, 0x00, 0x01});   // the start of a TLS record, then nothing
+    CHECK(hello_fragment.closed_within(2s));
+    CHECK(router.stats()[0].handshake_timeouts == 2);
 }

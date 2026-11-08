@@ -169,6 +169,7 @@ public:
         uint64_t accepted{};          // connections handed to this shard since startup
         uint64_t publishes{};         // PUBLISH messages handled
         uint64_t calls{};             // CALL messages handled
+        uint64_t handshake_timeouts{};   // connections closed for not becoming a session in time
         uint64_t event_drops{};       // events dropped on full session queues
         size_t inbox_depth{};         // cross-shard messages waiting or being delivered
         uint64_t inbox_received{};    // cross-shard messages taken from the inbox
@@ -182,6 +183,7 @@ public:
             all.push_back({w.sessions.load(std::memory_order_relaxed), w.accepted.load(std::memory_order_relaxed),
                            w.shard->counters.publishes.load(std::memory_order_relaxed),
                            w.shard->counters.calls.load(std::memory_order_relaxed),
+                           w.shard->counters.handshake_timeouts.load(std::memory_order_relaxed),
                            w.shard->channels.dropped_count(), group_->depth(static_cast<unsigned>(i)),
                            group_->received(static_cast<unsigned>(i)), group_->dropped(static_cast<unsigned>(i))});
         }

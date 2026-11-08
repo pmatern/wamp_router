@@ -147,6 +147,10 @@ struct ServerConfig {
     // shards still reach each other (pub/sub and RPC are routed across shards).
     unsigned threads{1};
     TlsConfig tls{};
+    // How long a new connection has to become an established WAMP session (TLS handshake, RawSocket or
+    // WebSocket handshake, HELLO and authentication together). A connection that is still short of that is
+    // closed, so clients that open sockets and stall cannot hold file descriptors and memory. 0 disables it.
+    std::chrono::milliseconds handshake_timeout{10000};
     size_t max_pending_invocations{};
     std::chrono::milliseconds call_timeout{30000};  // 0 disables
     EventQueueConfig events{};
@@ -212,6 +216,15 @@ public:
                     spdlog::error("[server] threads must be an integer from 1 to 1024 or \"auto\"");
                     return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
                 }
+            }
+
+            if (server.contains("handshake_timeout_ms")) {
+                const auto ms = toml::find<int64_t>(server, "handshake_timeout_ms");
+                if (ms < 0) {
+                    spdlog::error("[server] handshake_timeout_ms must be 0 (disabled) or greater");
+                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                }
+                config.handshake_timeout = std::chrono::milliseconds{ms};
             }
 
             const auto& tls = toml::find(server, "tls");

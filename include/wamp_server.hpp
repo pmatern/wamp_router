@@ -342,6 +342,26 @@ handle_wamp_session(SocketType socket, asio::io_context& io, const ServerConfig&
     auto remote_endpoint = get_remote_endpoint(socket);
     std::string remote_address = remote_endpoint.address().to_string();
 
+    // A connection that does not become an established session in time is closed: closing the socket makes
+    // whatever read or handshake the session is waiting in fail. The deadline covers everything before
+    // WELCOME, so trickling bytes does not extend it. The timer lives in this frame; cancelling it on
+    // exit (or when it is destroyed) calls the handler with operation_aborted, which touches nothing.
+    asio::steady_timer handshake_timer{io};
+    bool handshake_done = false;
+    if (config.handshake_timeout.count() > 0) {
+        handshake_timer.expires_after(config.handshake_timeout);
+        handshake_timer.async_wait([&socket, &handshake_done, &shard, remote_address, limit = config.handshake_timeout](
+                                       std::error_code ec) {
+            // A timer that had already expired when the session got established still runs its handler
+            // with success; handshake_done tells it to leave the live session alone.
+            if (ec || handshake_done) return;
+            shard->counters.handshake_timeouts.fetch_add(1, std::memory_order_relaxed);
+            spdlog::warn("Closing {}: no established session within {} ms", remote_address, limit.count());
+            std::error_code ignored;
+            socket.lowest_layer().close(ignored);
+        });
+    }
+
     // Perform TLS handshake if this is an SSL socket
     if constexpr (requires { socket.async_handshake(ssl::stream_base::server, asio::use_awaitable); }) {
         spdlog::debug("Starting TLS handshake with {}", remote_address);
@@ -376,6 +396,9 @@ handle_wamp_session(SocketType socket, asio::io_context& io, const ServerConfig&
             co_return std::unexpected{result.error()};
         }
     }
+
+    handshake_done = true;
+    handshake_timer.cancel();
 
     // Established: one coroutine reads, another writes queued events; whichever ends first
     // (disconnect, error) cancels the other

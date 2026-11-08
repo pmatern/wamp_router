@@ -95,8 +95,8 @@ int main(int argc, char* argv[]) {
         const auto stats = router.stats();
         for (size_t i = 0; i < stats.size(); ++i) {
             const auto& s = stats[i];
-            spdlog::info("shard {}: accepted={} publishes={} calls={} event_drops={} inbox_received={} inbox_dropped={}",
-                         i, s.accepted, s.publishes, s.calls, s.event_drops, s.inbox_received, s.inbox_dropped);
+            spdlog::info("shard {}: accepted={} publishes={} calls={} handshake_timeouts={} event_drops={} inbox_received={} inbox_dropped={}",
+                         i, s.accepted, s.publishes, s.calls, s.handshake_timeouts, s.event_drops, s.inbox_received, s.inbox_dropped);
         }
         if (const auto lost = wamp::logging::overruns(); lost > 0) {
             spdlog::warn("{} log line(s) were dropped because the log writer could not keep up", lost);
