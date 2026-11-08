@@ -267,6 +267,16 @@ unit tests independent of process-wide state). It is the prerequisite for everyt
   pair does not pay one wake-up per message. Per-publisher ordering follows from FIFO per lane: all of one session's traffic to a
   given shard uses the same lane.
 
+**Scaling measurement (AWS c7i.4xlarge router pinned to 1/2/4 physical cores, 4 x c7i.2xlarge generators running 28 `wamp_load` processes, 1,120 caller clients, plain TCP, self-contained sessions):**
+
+| router threads | RPC calls/s | RPC router CPU per call | self-pubsub publishes/s (each delivered once) | pubsub CPU per publish |
+|---|---|---|---|---|
+| 1 | 60.2k | 16.7 us | 87.4k | 11.5 us |
+| 2 | 132.2k (2.2x) | 15.1 us | 166.9k (1.9x) | 12.0 us |
+| 4 | 220.7k (3.7x) | 15.9 us | 258.6k (3.0x) | 13.2 us |
+
+CPU per operation stays flat (whole-run `/proc` tick deltas), so the shards do not contend: there is no shared mutable state to fight over. The 1-thread RPC figure is below the 100-118k calls/s of the earlier single-callee runs because here 1,120 connections share one core. The 4-thread pubsub row is likely limited by the generators (7 processes on 4 cores each) rather than the router, so 3.0x is a floor. No events were lost (160,000 / 160,000 received per generator).
+
 ### Stage 3: pub/sub across shards
 
 Every shard keeps a **private** `Realm` per realm name with its local subscribers, plus an **interest table** (topic -> set of
