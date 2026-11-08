@@ -204,6 +204,7 @@ public:
         const CallMessage& call,
         uint64_t caller_session_id
     ) {
+        realm.shard.counters.calls.fetch_add(1, std::memory_order_relaxed);
         const auto& reg_manager = realm.registrations;
         spdlog::debug("CALL request_id={}, procedure={}, caller_session={}",
                      call.request_id, call.procedure, caller_session_id);

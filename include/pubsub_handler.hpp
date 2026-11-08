@@ -135,6 +135,7 @@ public:
         const PublishMessage& publish,
         uint64_t session_id
     ) {
+        realm.shard.counters.publishes.fetch_add(1, std::memory_order_relaxed);
         const auto& sub_manager = realm.subscriptions;
         spdlog::debug("PUBLISH request_id={}, topic={}, session={}",
                      publish.request_id, publish.topic, session_id);

@@ -453,3 +453,41 @@ TEST_CASE("A caller that disconnects cancels its call on the callee's shard", "[
     REQUIRE(started);
     REQUIRE(cancelled);
 }
+
+TEST_CASE("Router::stats() counts work per shard and stop() leaves the inboxes empty", "[router][crossshard]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    asio::io_context io;
+    WampClient publisher{io};   // shard 0
+    WampClient subscriber{io};  // shard 1
+    constexpr int kEvents = 500;
+    int received = 0;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await publisher.connect("127.0.0.1", router.port(), "test.realm");
+        co_await subscriber.connect("127.0.0.1", router.port(), "test.realm");
+        co_await subscriber.subscribe("stats.t", [&](const EventMessage&) { ++received; });
+        for (int n = 0; n < kEvents; ++n) {
+            (void)co_await publisher.publish("stats.t", WampList{int64_t{n}}, {}, /*acknowledge=*/false);
+        }
+        try { (void)co_await publisher.call("no.such.procedure"); } catch (const WampException&) {}
+        for (int i = 0; i < 100 && received < kEvents; ++i) co_await pause(io, 20ms);
+        done = true;
+    }, detached);
+    io.run_for(10s);
+    REQUIRE(done);
+
+    const auto stats = router.stats();
+    REQUIRE(stats.size() == 2);
+    REQUIRE(stats[0].accepted == 1);
+    REQUIRE(stats[1].accepted == 1);
+    REQUIRE(stats[0].publishes == kEvents);
+    REQUIRE(stats[1].publishes == 0);
+    REQUIRE(stats[0].calls == 1);
+    REQUIRE(stats[1].inbox_received == kEvents);
+    REQUIRE(stats[1].inbox_dropped == 0);
+    router.stop();
+    REQUIRE(router.stats()[1].inbox_depth == 0);
+}

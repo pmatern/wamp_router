@@ -25,6 +25,7 @@
 #include <atomic>
 #include <csignal>
 #include <memory>
+#include <chrono>
 #include <thread>
 #include <vector>
 
@@ -87,7 +88,9 @@ public:
         spdlog::info("Router started with {} shard thread(s) on port {}", workers_.size(), bound_port_);
     }
 
-    // Stops accepting and closes the sessions; safe to call from any thread, more than once
+    static constexpr std::chrono::milliseconds kShutdownGrace{2000};
+
+    // Stops accepting, drains the cross-shard inboxes (up to kShutdownGrace) and closes the sessions; safe to call from any thread, more than once
     void stop() {
         if (!started_.load() || stopped_.exchange(true)) return;
         asio::post(accept_io_, [this] {
@@ -97,6 +100,15 @@ public:
         });
         if (acceptor_thread_.joinable() && acceptor_thread_.get_id() != std::this_thread::get_id()) {
             acceptor_thread_.join();
+        }
+        // No new connections now. Let cross-shard events, calls and results already queued reach their
+        // sessions before the shard threads stop (bounded: a stuck inbox must not block shutdown).
+        const auto give_up = std::chrono::steady_clock::now() + kShutdownGrace;
+        while (group_->pending() > 0 && std::chrono::steady_clock::now() < give_up) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
+        }
+        if (const auto left = group_->pending(); left > 0) {
+            spdlog::warn("Shutdown: {} cross-shard message(s) were not delivered", left);
         }
         for (auto& worker : workers_) {
             worker->io.stop();
@@ -139,6 +151,31 @@ public:
         std::vector<uint64_t> counts;
         for (const auto& worker : workers_) counts.push_back(worker->accepted.load(std::memory_order_relaxed));
         return counts;
+    }
+
+    // One shard's counters at a point in time (each read is atomic; the set is not a consistent snapshot)
+    struct ShardStats {
+        size_t sessions{};            // open sessions
+        uint64_t accepted{};          // connections handed to this shard since startup
+        uint64_t publishes{};         // PUBLISH messages handled
+        uint64_t calls{};             // CALL messages handled
+        uint64_t event_drops{};       // events dropped on full session queues
+        size_t inbox_depth{};         // cross-shard messages waiting or being delivered
+        uint64_t inbox_received{};    // cross-shard messages taken from the inbox
+        uint64_t inbox_dropped{};     // cross-shard events dropped because the inbox was full
+    };
+
+    [[nodiscard]] std::vector<ShardStats> stats() const {
+        std::vector<ShardStats> all;
+        for (size_t i = 0; i < workers_.size(); ++i) {
+            const auto& w = *workers_[i];
+            all.push_back({w.sessions.load(std::memory_order_relaxed), w.accepted.load(std::memory_order_relaxed),
+                           w.shard->counters.publishes.load(std::memory_order_relaxed),
+                           w.shard->counters.calls.load(std::memory_order_relaxed),
+                           w.shard->channels.dropped_count(), group_->depth(static_cast<unsigned>(i)),
+                           group_->received(static_cast<unsigned>(i)), group_->dropped(static_cast<unsigned>(i))});
+        }
+        return all;
     }
 
     // Events dropped on all shards (the counters are atomic, so this is safe to call from any thread)

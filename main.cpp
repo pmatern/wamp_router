@@ -92,6 +92,12 @@ int main(int argc, char* argv[]) {
         router.stop_on_signals();
         router.start();
         router.wait();
+        const auto stats = router.stats();
+        for (size_t i = 0; i < stats.size(); ++i) {
+            const auto& s = stats[i];
+            spdlog::info("shard {}: accepted={} publishes={} calls={} event_drops={} inbox_received={} inbox_dropped={}",
+                         i, s.accepted, s.publishes, s.calls, s.event_drops, s.inbox_received, s.inbox_dropped);
+        }
 
     } catch (const std::exception& e) {
         spdlog::error("Fatal error: {}", e.what());

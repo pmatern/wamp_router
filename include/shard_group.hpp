@@ -254,7 +254,27 @@ public:
     }
 
     // Cross-shard events discarded because the destination's inbox was full
-    [[nodiscard]] uint64_t dropped() const { return dropped_.load(std::memory_order_relaxed); }
+    [[nodiscard]] uint64_t dropped() const {
+        uint64_t total = 0;
+        for (const auto& m : members_) total += m->dropped.load(std::memory_order_relaxed);
+        return total;
+    }
+
+    // Messages queued for, or being delivered on, one shard
+    [[nodiscard]] size_t depth(unsigned index) const { return members_[index]->depth.load(std::memory_order_relaxed); }
+    // Messages shard `index` has taken from its inbox since startup
+    [[nodiscard]] uint64_t received(unsigned index) const {
+        return members_[index]->received.load(std::memory_order_relaxed);
+    }
+    [[nodiscard]] uint64_t dropped(unsigned index) const {
+        return members_[index]->dropped.load(std::memory_order_relaxed);
+    }
+    // Messages in flight across all shards (shutdown waits for this to reach zero)
+    [[nodiscard]] size_t pending() const {
+        size_t total = 0;
+        for (const auto& m : members_) total += m->depth.load(std::memory_order_relaxed);
+        return total;
+    }
 
 private:
     struct StringHash {
@@ -273,6 +293,8 @@ private:
 
         std::mutex mailbox_mutex;
         std::vector<CrossMessage> mailbox;
+        std::atomic<uint64_t> received{0};  // messages taken from the mailbox
+        std::atomic<uint64_t> dropped{0};   // events discarded because the mailbox was full
         std::atomic<size_t> depth{0};  // queued plus being delivered; read by publishers waiting for room
         bool draining{false};  // a drain coroutine is scheduled or running
 
@@ -289,7 +311,7 @@ private:
             // Only events are shed at the cap. Calls and their results must not vanish (the caller would wait
             // forever); they are bounded by the sessions that issue them, which wait_for_room() slows down.
             if (m.mailbox.size() >= kMailboxCap && std::holds_alternative<CrossPublishPtr>(message)) {
-                dropped_.fetch_add(1, std::memory_order_relaxed);
+                m.dropped.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
             m.mailbox.push_back(std::move(message));
@@ -319,6 +341,7 @@ private:
                 batch.swap(m.mailbox);
             }
             const auto count = batch.size();
+            m.received.fetch_add(count, std::memory_order_relaxed);
             co_await handler_(*m.shard, std::move(batch));
             m.depth.fetch_sub(count, std::memory_order_relaxed);
         }
@@ -328,7 +351,6 @@ private:
     std::vector<std::unique_ptr<Member>> members_;
     std::mutex registration_mutex_;
     std::unordered_map<std::string, std::unordered_map<std::string, uint32_t>> registrations_;  // realm -> procedure -> shard
-    std::atomic<uint64_t> dropped_{0};
 };
 
 } // namespace wamp

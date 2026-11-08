@@ -21,6 +21,7 @@
 #include "realm.hpp"
 #include "wamp_id.hpp"
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <unordered_set>
 #include <vector>
@@ -69,6 +70,12 @@ public:
     std::vector<uint32_t> congested;
     // Sessions here that forwarded a CALL to another shard; their disconnect must cancel those calls there
     std::unordered_set<uint64_t> remote_callers;
+
+    // Counters the owning thread bumps and any thread may read (Router::stats())
+    struct alignas(64) Counters {
+        std::atomic<uint64_t> publishes{0};   // PUBLISH messages handled here
+        std::atomic<uint64_t> calls{0};       // CALL messages handled here
+    } counters;
 
     EventChannelRegistry channels;
     InvocationTracker invocations;
