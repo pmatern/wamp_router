@@ -50,6 +50,7 @@ int main(int argc, char** argv) {
         auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : nullptr; };
         if (a == "--port") { if (auto v = next()) port = static_cast<unsigned short>(std::atoi(v)); }
         else if (a == "--threads") { if (auto v = next()) threads = static_cast<unsigned>(std::atoi(v)); }
+        else if (a == "--max-connections") { if (auto v = next()) config.max_connections = std::strtoul(v, nullptr, 10); }
         else if (a == "--queue-size") { if (auto v = next()) config.events.size = std::strtoul(v, nullptr, 10); }
         else if (a == "--overflow") {
             if (auto v = next()) {
@@ -57,7 +58,7 @@ int main(int argc, char** argv) {
             }
         }
         else if (a == "--log") log = true;
-        else { std::puts("wamp_profile_router [--port P] [--threads N] [--queue-size N] [--overflow backpressure|drop] [--log]"); return 1; }
+        else { std::puts("wamp_profile_router [--port P] [--threads N] [--max-connections N] [--queue-size N] [--overflow backpressure|drop] [--log]"); return 1; }
     }
 
     spdlog::set_level(log ? spdlog::level::info : spdlog::level::off);
@@ -88,4 +89,7 @@ int main(int argc, char** argv) {
     router.wait();
     stats_stop = true;
     stats.join();
+    const auto rejected = router.rejected_connections();
+    std::printf("rejected connections: %llu over max_connections, %llu over the per-address cap\n",
+                static_cast<unsigned long long>(rejected.total_limit), static_cast<unsigned long long>(rejected.address_limit));
 }
