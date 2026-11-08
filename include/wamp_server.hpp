@@ -17,6 +17,7 @@
 
 #include "wamp_session.hpp"
 #include "shard.hpp"
+#include "shard_group.hpp"
 #include "event_channel.hpp"
 #include "config.hpp"
 #include "procedure_handler.hpp"
@@ -208,6 +209,11 @@ handle_socket_read_completion(
     // stop reading from this client until the subscribers catch up (bounded by the timeout)
     if (auto blocked = protocol.shard().channels.take_blocked(); !blocked.empty()) {
         co_await protocol.shard().channels.deliver_blocked(std::move(blocked));
+    }
+    // Same for subscribers on other shards whose inbox is filling up
+    if (auto& shard = protocol.shard(); !shard.congested.empty()) {
+        co_await shard.group->wait_for_room(std::exchange(shard.congested, {}),
+                                            shard.channels.config().backpressure_timeout);
     }
 
     if (!result->empty()) {

@@ -148,6 +148,11 @@ public:
         return total + group_->dropped();
     }
 
+    // Cross-shard events dropped because the destination shard's inbox was full (part of dropped_events())
+    [[nodiscard]] uint64_t inbox_dropped_events() const {
+        return group_->dropped();
+    }
+
 private:
     struct Worker {
         explicit Worker(const ShardConfig& shard_config)

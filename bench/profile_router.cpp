@@ -27,6 +27,9 @@
 #include <asio.hpp>
 #include <spdlog/spdlog.h>
 #include <cstdio>
+#include <thread>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <string>
 #include <unistd.h>
@@ -68,5 +71,21 @@ int main(int argc, char** argv) {
                 router.port(), static_cast<int>(getpid()), router.shard_count(), cpus.available, cpus.hardware,
                 cpus.source.c_str());
     std::fflush(stdout);
+    std::atomic<bool> stats_stop{false};
+    std::thread stats([&] {
+        uint64_t last = 0;
+        while (!stats_stop.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            const auto total = router.dropped_events();
+            if (total != last) {
+                std::printf("drops total %llu (cross-shard inbox %llu)\n", static_cast<unsigned long long>(total),
+                            static_cast<unsigned long long>(router.inbox_dropped_events()));
+                std::fflush(stdout);
+                last = total;
+            }
+        }
+    });
     router.wait();
+    stats_stop = true;
+    stats.join();
 }

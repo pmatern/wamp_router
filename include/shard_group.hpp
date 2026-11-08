@@ -21,6 +21,10 @@
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+#include <chrono>
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -66,7 +70,9 @@ public:
     // Called on the destination shard's thread with a batch of messages; may suspend (backpressure)
     using Handler = std::function<asio::awaitable<void>(Shard&, std::vector<CrossPublishPtr>)>;
 
-    static constexpr size_t kMailboxCap = 1 << 16;
+    static constexpr size_t kMailboxCap = 1 << 16;   // hard limit: beyond this events are dropped
+    static constexpr size_t kHighWater = 1 << 12;    // publishers are told to wait above this ...
+    static constexpr size_t kLowWater = 1 << 11;     // ... until the inbox is back under this
 
     explicit ShardGroup(unsigned shards, Handler handler)
         : handler_(std::move(handler))
@@ -135,8 +141,10 @@ public:
         return topic_it->second;
     }
 
-    // Queue `message` for each shard in `targets`
-    void send(const std::vector<uint32_t>& targets, const CrossPublishPtr& message) {
+    // Queue `message` for each shard in `targets`. Shards whose inbox is now above the high-water mark are
+    // appended to `congested`: the publishing session should wait_for_room() on them before reading more.
+    void send(const std::vector<uint32_t>& targets, const CrossPublishPtr& message,
+              std::vector<uint32_t>& congested) {
         for (uint32_t to : targets) {
             Member& m = *members_[to];
             bool schedule = false;
@@ -147,12 +155,34 @@ public:
                     continue;
                 }
                 m.mailbox.push_back(message);
+                const auto depth = m.depth.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (depth >= kHighWater && std::ranges::find(congested, to) == congested.end()) {
+                    congested.push_back(to);
+                }
                 if (!m.draining) {
                     m.draining = true;
                     schedule = true;
                 }
             }
             if (schedule) asio::co_spawn(*m.io, drain(to), asio::detached);
+        }
+    }
+
+    // Suspends the calling session until each of `shards` has worked its inbox back under the low-water
+    // mark (or `timeout` passes). This is how a publisher on one shard is slowed down by a subscriber on
+    // another, as it already is by one on its own shard.
+    asio::awaitable<void> wait_for_room(std::vector<uint32_t> shards, std::chrono::milliseconds timeout) {
+        auto executor = co_await asio::this_coro::executor;
+        asio::steady_timer timer{executor};
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            bool congested = false;
+            for (uint32_t s : shards) {
+                if (members_[s]->depth.load(std::memory_order_relaxed) >= kLowWater) congested = true;
+            }
+            if (!congested) co_return;
+            timer.expires_after(std::chrono::microseconds(100));
+            co_await timer.async_wait(asio::use_awaitable);
         }
     }
 
@@ -176,6 +206,7 @@ private:
 
         std::mutex mailbox_mutex;
         std::vector<CrossPublishPtr> mailbox;
+        std::atomic<size_t> depth{0};  // queued plus being delivered; read by publishers waiting for room
         bool draining{false};  // a drain coroutine is scheduled or running
     };
 
@@ -191,7 +222,9 @@ private:
                 }
                 batch.swap(m.mailbox);
             }
+            const auto count = batch.size();
             co_await handler_(*m.shard, std::move(batch));
+            m.depth.fetch_sub(count, std::memory_order_relaxed);
         }
     }
 

@@ -193,7 +193,7 @@ public:
                     event_template ? *event_template
                                    : EventTemplate{EventMessage{0, publication_id, {}, publish.arguments,
                                                                 publish.arguments_kw}}});
-                group->send(targets, message);
+                group->send(targets, message, realm.shard.congested);
                 subscriber_count += targets.size();
             }
         }

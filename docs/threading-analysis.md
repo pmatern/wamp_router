@@ -304,6 +304,18 @@ Slow-subscriber strikes, queue sizes and the drop policy stay per session on the
 bounded: when a lane to shard B is full the publishing session pauses reading (the existing backpressure mechanism, with the lane
 as the thing it waits on), so cross-core traffic cannot grow without bound.
 
+**Fan-out measurement (AWS c7i.4xlarge router pinned to 1/2/4 cores, 4 x c7i.2xlarge generators, 28 `wamp_load --mode pubsub` processes: 28 topics, each with 1 unpaced publisher and 10 subscribers, so connections and publishers are spread over every shard and each publish crosses shards; 11.2M deliveries per run):**
+
+| router threads | deliveries/s | router CPU per delivery | lost |
+|---|---|---|---|
+| 1 | 278k | 3.6 us | 0 |
+| 2 | 570-590k (2.1x) | 4.0 us | 0 (one of four runs lost 6% on one generator, not reproduced and not explained) |
+| 4 | 0.92-1.18M (3.3-4.2x) | 3.7-4.0 us | 0 |
+
+Throughput is computed from the slowest generator's duration, so the 4-thread range reflects uneven generator finish times, not router noise. CPU per delivery rises about 10% over one thread (the inbox hand-off and the extra serialization-free template sharing), which is the whole cross-shard cost at this fan-out; there was no sign of inbox mutex contention (the mutex-vs-SPSC-ring question stays open but is not worth pursuing from this data).
+
+**Finding: the first version lost events.** With no flow control between shards the same run at 4 threads lost about 55% of events (2.4M messages dropped at the inbox cap), because a publisher on one shard was never slowed by subscribers on another, unlike on a single shard where a full subscriber queue pauses the publisher. Fix: an inbox above a high-water mark (4,096 messages) is reported back to the publishing session, which stops reading its socket until the inbox falls under a low-water mark (2,048) or `backpressure_timeout_ms` passes (`ShardGroup::wait_for_room`). The inbox cap (65,536) stays as the hard limit and `wamp_profile_router` now prints drop counts (`Router::inbox_dropped_events()`).
+
 ### Stage 4: RPC across shards
 
 * **Registrations:** replicated like interest, because they change rarely. The "one registration per procedure" rule needs one

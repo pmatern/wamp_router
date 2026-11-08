@@ -142,6 +142,7 @@ private:
         output_buffer_.clear();
         // Sends parked by earlier callers that never flushed them must not leak into this session's turn
         shard_.channels.clear_blocked();
+        shard_.congested.clear();
 
         spdlog::debug("Received {} bytes, buffer now {} bytes in state {}",
                      data.size(), unread(), state_name());

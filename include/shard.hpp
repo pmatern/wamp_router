@@ -21,6 +21,8 @@
 #include "realm.hpp"
 #include "wamp_id.hpp"
 #include <chrono>
+#include <cstdint>
+#include <vector>
 
 namespace wamp {
 
@@ -62,6 +64,8 @@ public:
     // Set by ShardGroup::attach when this shard runs next to others (null for a standalone server)
     ShardGroup* group{nullptr};
     unsigned index{0};
+    // Other shards whose inboxes a PUBLISH just filled; the publishing session waits on them before reading more
+    std::vector<uint32_t> congested;
 
     EventChannelRegistry channels;
     InvocationTracker invocations;

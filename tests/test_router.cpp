@@ -281,3 +281,33 @@ TEST_CASE("Cross-shard interest follows subscribe, unsubscribe and disconnect", 
     io.run_for(10s);
     REQUIRE(done);
 }
+
+TEST_CASE("A fast publisher is slowed by a subscriber on another shard instead of losing events", "[router][crossshard]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    asio::io_context io;
+    WampClient publisher{io};   // shard 0
+    WampClient subscriber{io};  // shard 1
+    constexpr int kEvents = 30000;
+    int received = 0;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await publisher.connect("127.0.0.1", router.port(), "test.realm");
+        co_await subscriber.connect("127.0.0.1", router.port(), "test.realm");
+        co_await subscriber.subscribe("flood", [&](const EventMessage&) { ++received; });
+        for (int n = 0; n < kEvents; ++n) {
+            (void)co_await publisher.publish("flood", WampList{int64_t{n}}, {}, /*acknowledge=*/false);
+        }
+        for (int i = 0; i < 100 && received < kEvents; ++i) co_await pause(io, 50ms);
+        co_await publisher.disconnect();
+        co_await subscriber.disconnect();
+        done = true;
+    }, detached);
+    io.run_for(30s);
+
+    REQUIRE(done);
+    REQUIRE(router.dropped_events() == 0);
+    REQUIRE(received == kEvents);
+}
