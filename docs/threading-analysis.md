@@ -343,6 +343,20 @@ Original design notes:
   as today.
 * **IDs:** per-shard ranges (shard number in the high bits) replace the shared atomic generators; no coordination.
 
+### Cross-shard latency (EC2)
+
+c7i.4xlarge router (1/2/4 threads), one c7i.2xlarge probe, same AZ, plain TCP, probe pinned to one core. RPC: one caller, closed loop, 20,000 calls; callee connects first (shard 0), caller second (shard 1) when the router has 2+ threads, so with 1 thread both are on one shard and otherwise the call crosses shards twice (CALL out, RESULT back). Pub/sub: one publisher (shard 0) and one subscriber (shard 1 with 2+ threads) at 2,000 events/s, 20,000 events. Times include the network round trip (about 0.1-0.2 ms on the unloaded path) and the client.
+
+| Router threads | RPC p50 / p99 (idle) | Pub/sub p50 / p99 (idle) |
+|---|---|---|
+| 1 (same shard) | 1.28-1.31 / 1.66-1.69 ms (3 runs) | 0.41-0.98 / 0.60-1.53 ms |
+| 2 (cross shard) | 1.67-1.98 / 2.02-2.36 ms (3 runs) | 1.00-1.07 / 1.59-1.68 ms |
+
+* **RPC:** crossing shards adds about 0.4-0.6 ms p50 and 0.35-0.7 ms p99 on an idle router, roughly 0.2-0.3 ms per crossing. That is the cost of waking an idle shard thread (the drain coroutine is scheduled onto a sleeping `io_context`), not of the inbox itself.
+* **Under background RPC load** (4 pinned `wamp_load` processes against the same router; the exact rate was not captured) the penalty mostly disappears, because the destination thread is already awake: RPC p50 1.01 ms (1 thread), 1.13 ms (2), 0.86 ms (4).
+* **Pub/sub:** the single-shard runs are bimodal (0.4 or 1.0 ms p50 between runs, with the same binary and router), larger than any cross-shard effect, so this measurement cannot resolve a difference below roughly 0.5 ms. The unexplained spread is on the probe/network side, not the router.
+* Not measured: latency with the router saturated (queueing dominates), and a probe that controls placement beyond connection order.
+
 ### Stage 5: everything else that touches shared state
 
 **Status: partly done.** `Router::stats()` returns per-shard counters (sessions, accepted, publishes, calls, event drops, inbox depth/received/dropped; `main` logs them at shutdown), and `Router::stop()` stops the acceptor, then waits up to 2 s for the cross-shard inboxes to empty before stopping the shard threads. Logging is asynchronous (`include/logging.hpp`): shards format a line and push it onto a bounded queue (`[logging] queue_size`, default 8192); one writer thread owns the sink, so a stalled sink or terminal cannot stall a shard. A full queue overwrites the oldest line and counts it (`logging::overruns()`, reported at shutdown), and every line is tagged with its shard. Per-message `info` logs on the CALL/PUBLISH paths are now `debug`. Still open: cross-shard latency numbers. Original plan: per-shard counters aggregated on read (dropped events, active sessions), asynchronous or per-shard logging so a slow sink does not
