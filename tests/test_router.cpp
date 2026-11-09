@@ -736,9 +736,9 @@ TEST_CASE("WebSocket protocol violations and rejected upgrades", "[router][webso
         WsTestClient none;
         CHECK(none.connect(router.port()).starts_with("HTTP/1.1 101"));
     }
-    SECTION("no wamp.2.cbor offered: 400") {
+    SECTION("no subprotocol the router speaks offered: 400") {
         WsTestClient ws;
-        CHECK(ws.connect(router.port(), "", "wamp.2.json").starts_with("HTTP/1.1 400"));
+        CHECK(ws.connect(router.port(), "", "wamp.2.msgpack").starts_with("HTTP/1.1 400"));
         CHECK(ws.closed_by_peer());
     }
     SECTION("wrong version: 426 advertising 13") {
@@ -1277,4 +1277,318 @@ TEST_CASE("WampClient speaks WebSocket: pub/sub and RPC with a RawSocket client"
     CHECK(ws_events == std::vector<std::string>{"to ws"});
     CHECK(raw_events == std::vector<std::string>{"to raw"});
     CHECK(rpc_result == "via ws callee");
+}
+
+// ---------------------------------------------------------------------------------------------------
+// JSON (wamp.2.json) sessions
+// ---------------------------------------------------------------------------------------------------
+#include <nlohmann/json.hpp>
+
+namespace {
+
+using nlohmann::json;
+
+// The next frame as a JSON message; null if it is not a text frame with valid JSON
+json ws_json_frame(WsTestClient& ws) {
+    auto frame = ws.read_frame();
+    if (!frame || frame->opcode != 0x1) return nullptr;
+    return json::parse(std::string{frame->payload.begin(), frame->payload.end()}, nullptr, false);
+}
+
+// Upgrade as wamp.2.json, HELLO, WELCOME
+bool ws_json_join(WsTestClient& ws, unsigned short port, const std::string& realm = "test.realm") {
+    const auto head = ws.connect(port, "", "wamp.2.json");
+    if (head.find("Sec-WebSocket-Protocol: wamp.2.json\r\n") == std::string::npos) return false;
+    ws.send_text(json::array({1, realm, json::object({{"roles", json::object({{"caller", json::object()}})}})}).dump());
+    auto welcome = ws_json_frame(ws);
+    return welcome.is_array() && welcome.size() >= 2 && welcome[0] == 2;
+}
+
+// RawSocket with the JSON serializer: handshake, HELLO, WELCOME
+std::unique_ptr<BareConnection> raw_json_join(unsigned short port, std::string_view realm = "test.realm") {
+    auto c = std::make_unique<BareConnection>(port);
+    c->send(rawsocket::encode_handshake_request({.max_length = rawsocket::MaxLengthCode::BYTES_16M,
+                                                 .serializer = rawsocket::Serializer::JSON}));
+    auto reply = c->read_n(4);
+    if (reply.size() != 4 || reply[0] != 0x7F || (reply[1] & 0x0F) != 1) return nullptr;
+    const auto hello = json::array({1, std::string{realm}, json::object()}).dump();
+    c->send(rawsocket::create_wamp_message(std::vector<uint8_t>(hello.begin(), hello.end())));
+    auto welcome = c->read_frame();
+    auto parsed = json::parse(std::string{welcome.begin(), welcome.end()}, nullptr, false);
+    if (!parsed.is_array() || parsed.empty() || parsed[0] != 2) return nullptr;
+    return c;
+}
+
+json raw_json_frame(BareConnection& c) {
+    auto frame = c.read_frame();
+    return json::parse(std::string{frame.begin(), frame.end()}, nullptr, false);
+}
+
+void raw_json_send(BareConnection& c, const json& message) {
+    const auto text = message.dump();
+    c.send(rawsocket::create_wamp_message(std::vector<uint8_t>(text.begin(), text.end())));
+}
+
+}  // namespace
+
+TEST_CASE("Subprotocol negotiation picks the client's first choice that is enabled", "[router][json][websocket]") {
+    SECTION("both enabled: the client's order decides") {
+        Router router{plain_config(), Router::Transport::PLAIN, 1};
+        router.start();
+        WsTestClient a;
+        CHECK(a.connect(router.port(), "", "wamp.2.json, wamp.2.cbor").find("Sec-WebSocket-Protocol: wamp.2.json\r\n") != std::string::npos);
+        WsTestClient b;
+        CHECK(b.connect(router.port(), "", "wamp.2.cbor, wamp.2.json").find("Sec-WebSocket-Protocol: wamp.2.cbor\r\n") != std::string::npos);
+        WsTestClient c;
+        CHECK(c.connect(router.port(), "", "wamp.2.msgpack, wamp.2.json").find("Sec-WebSocket-Protocol: wamp.2.json\r\n") != std::string::npos);
+        WsTestClient d;
+        CHECK(d.connect(router.port(), "", "wamp.2.msgpack").starts_with("HTTP/1.1 400"));
+    }
+    SECTION("only cbor enabled") {
+        auto config = plain_config();
+        config.websocket.subprotocols = {"wamp.2.cbor"};
+        Router router{config, Router::Transport::PLAIN, 1};
+        router.start();
+        WsTestClient a;
+        CHECK(a.connect(router.port(), "", "wamp.2.json, wamp.2.cbor").find("Sec-WebSocket-Protocol: wamp.2.cbor\r\n") != std::string::npos);
+        WsTestClient b;
+        CHECK(b.connect(router.port(), "", "wamp.2.json").starts_with("HTTP/1.1 400"));
+        auto raw = BareConnection{router.port()};   // RawSocket JSON is refused too
+        raw.send(rawsocket::encode_handshake_request({.max_length = rawsocket::MaxLengthCode::BYTES_16M,
+                                                      .serializer = rawsocket::Serializer::JSON}));
+        auto reply = raw.read_n(4);
+        REQUIRE(reply.size() == 4);
+        CHECK(rawsocket::is_handshake_error(std::span<const uint8_t>{reply}));
+    }
+    SECTION("only json enabled") {
+        auto config = plain_config();
+        config.websocket.subprotocols = {"wamp.2.json"};
+        Router router{config, Router::Transport::PLAIN, 1};
+        router.start();
+        WsTestClient a;
+        CHECK(a.connect(router.port(), "", "wamp.2.cbor").starts_with("HTTP/1.1 400"));
+        WsTestClient b;
+        CHECK(ws_json_join(b, router.port()));
+    }
+}
+
+TEST_CASE("A JSON session over WebSocket: handshake, text frames, replies", "[router][json][websocket]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 1};
+    router.start();
+    WsTestClient ws;
+    REQUIRE(ws_json_join(ws, router.port()));
+
+    ws.send_text(R"([32,7,{},"json.topic"])");
+    auto subscribed = ws_json_frame(ws);
+    REQUIRE(subscribed.is_array());
+    CHECK(subscribed[0] == 33);
+    CHECK(subscribed[1] == 7);
+
+    ws.send_text(R"([16,8,{"acknowledge":true},"json.topic",["x"]])");
+    auto published = ws_json_frame(ws);
+    REQUIRE(published.is_array());
+    CHECK(published[0] == 17);
+    CHECK(published[1] == 8);
+
+    ws.send_text(R"([64,9,{},"json.proc"])");
+    auto registered = ws_json_frame(ws);
+    REQUIRE(registered.is_array());
+    CHECK(registered[0] == 65);
+
+    ws.send_text(R"([48,10,{},"no.such.procedure"])");
+    auto error = ws_json_frame(ws);
+    REQUIRE(error.is_array());
+    CHECK(error[0] == 8);                                  // ERROR
+    CHECK(error[1] == 48);
+    CHECK(error[2] == 10);
+    CHECK(error[4] == "wamp.error.no_such_procedure");
+}
+
+TEST_CASE("JSON and CBOR sessions exchange events and calls with floats, null, nesting and binary, across shards", "[router][json][crossshard]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    WsTestClient jws;                          // shard 0, JSON
+    REQUIRE(ws_json_join(jws, router.port()));
+    jws.send_text(R"([32,1,{},"mix.topic"])");
+    REQUIRE(ws_json_frame(jws)[0] == 33);
+    jws.send_text(R"([64,2,{},"mix.echo"])");
+    REQUIRE(ws_json_frame(jws)[0] == 65);
+
+    asio::io_context io;
+    WampClient cbor_client{io};                // shard 1, CBOR
+    WampList received;
+    WampList rpc_result;
+    bool done = false;
+
+    const WampList rich{1.5, nullptr, WampList{int64_t{1}, WampDict{{"k", true}}}, WampBytes{1, 2, 3}, std::string{"\xC3\xA9"}};
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await cbor_client.connect("127.0.0.1", router.port(), "test.realm");
+        REQUIRE(router.accepted_per_shard() == std::vector<uint64_t>{1, 1});
+        co_await cbor_client.subscribe("mix.back", [&](const EventMessage& e) { received = e.arguments; });
+
+        // CBOR publisher -> JSON subscriber
+        (void)co_await cbor_client.publish("mix.topic", rich);
+        // CBOR caller -> JSON callee (answered below), the call is in flight while the main thread reads
+        co_spawn(io, [&]() -> awaitable<void> {
+            try { rpc_result = co_await cbor_client.call("mix.echo", rich); } catch (const std::exception&) {}
+        }, detached);
+        co_await pause(io, 400ms);
+        // JSON publisher -> CBOR subscriber is driven from the test body once the JSON side has answered
+        for (int i = 0; i < 100 && received.empty(); ++i) co_await pause(io, 20ms);
+        done = true;
+    }, detached);
+
+    std::thread side{[&] {
+        // JSON side, concurrently: EVENT, INVOCATION -> YIELD, then a PUBLISH
+        auto event = ws_json_frame(jws);
+        REQUIRE(event.is_array());
+        CHECK(event[0] == 36);
+        const json expected_args = json::array({1.5, nullptr, json::array({1, json::object({{"k", true}})}),
+                                                std::string{"\0AQID", 5}, "\xC3\xA9"});
+        CHECK(event[4] == expected_args);
+
+        auto invocation = ws_json_frame(jws);
+        REQUIRE(invocation.is_array());
+        CHECK(invocation[0] == 68);
+        CHECK(invocation[4] == expected_args);
+        jws.send_text(json::array({70, invocation[1], json::object(), invocation[4]}).dump());
+
+        jws.send_text(json::array({16, 3, json::object(), "mix.back", json::array({2.25, nullptr, "x"})}).dump());
+    }};
+    io.run_for(10s);
+    side.join();
+    REQUIRE(done);
+
+    // the CBOR caller got the JSON callee's YIELD back with every value intact
+    REQUIRE(rpc_result.size() == 5);
+    CHECK(std::get<double>(rpc_result[0]) == 1.5);
+    CHECK(std::holds_alternative<std::nullptr_t>(rpc_result[1]));
+    CHECK(std::get<WampList>(rpc_result[2]).size() == 2);
+    CHECK(std::get<WampBytes>(rpc_result[3]) == WampBytes{1, 2, 3});
+    CHECK(std::get<std::string>(rpc_result[4]) == "\xC3\xA9");
+    // and the JSON publisher's event reached the CBOR subscriber
+    REQUIRE(received.size() == 3);
+    CHECK(std::get<double>(received[0]) == 2.25);
+    CHECK(std::holds_alternative<std::nullptr_t>(received[1]));
+    CHECK(std::get<std::string>(received[2]) == "x");
+}
+
+TEST_CASE("JSON over RawSocket (serializer 1)", "[router][json]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 1};
+    router.start();
+
+    auto c = raw_json_join(router.port());
+    REQUIRE(c);
+    raw_json_send(*c, json::array({32, 1, json::object(), "raw.json"}));
+    auto subscribed = raw_json_frame(*c);
+    REQUIRE(subscribed.is_array());
+    CHECK(subscribed[0] == 33);
+
+    auto other = raw_json_join(router.port());
+    REQUIRE(other);
+    raw_json_send(*other, json::array({16, 2, json::object(), "raw.json", json::array({1.25, nullptr, json::object({{"a", json::array({1, 2})}})})}));
+    auto event = raw_json_frame(*c);
+    REQUIRE(event.is_array());
+    CHECK(event[0] == 36);
+    CHECK(event[4] == json::array({1.25, nullptr, json::object({{"a", json::array({1, 2})}})}));
+
+    SECTION("MessagePack is still refused") {
+        BareConnection msgpack{router.port()};
+        msgpack.send(rawsocket::encode_handshake_request({.max_length = rawsocket::MaxLengthCode::BYTES_16M,
+                                                          .serializer = rawsocket::Serializer::MSGPACK}));
+        auto reply = msgpack.read_n(4);
+        REQUIRE(reply.size() == 4);
+        CHECK(rawsocket::is_handshake_error(std::span<const uint8_t>{reply}));
+    }
+}
+
+TEST_CASE("JSON protocol violations", "[router][json]") {
+    auto config = plain_config();
+    config.max_malformed_messages = 3;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    SECTION("a binary frame on a wamp.2.json connection: close 1003") {
+        WsTestClient ws;
+        REQUIRE(ws_json_join(ws, router.port()));
+        ws.send_binary(std::vector<uint8_t>{'[', '1', ']'});
+        auto close = ws.read_frame();
+        REQUIRE(close);
+        CHECK(close->opcode == 0x8);
+        CHECK(close->payload == std::vector<uint8_t>{0x03, 0xEB});
+    }
+    SECTION("a text frame that is not valid UTF-8: close 1007") {
+        WsTestClient ws;
+        REQUIRE(ws_json_join(ws, router.port()));
+        ws.send(0x1, std::vector<uint8_t>{'[', 0xC3, 0x28, ']'});
+        auto close = ws.read_frame();
+        REQUIRE(close);
+        CHECK(close->opcode == 0x8);
+        CHECK(close->payload == std::vector<uint8_t>{0x03, 0xEF});
+    }
+    SECTION("invalid JSON counts as a malformed message; repeated, the session is aborted") {
+        WsTestClient ws;
+        REQUIRE(ws_json_join(ws, router.port()));
+        ws.send_text("{not json");
+        ws.send_text("[1,2");
+        ws.send_text(R"([32,4,{},"still.alive"])");   // a good message resets the count
+        auto subscribed = ws_json_frame(ws);
+        REQUIRE(subscribed.is_array());
+        CHECK(subscribed[0] == 33);
+        for (int i = 0; i < 3; ++i) ws.send_text("garbage");
+        auto abort = ws_json_frame(ws);
+        REQUIRE(abort.is_array());
+        CHECK(abort[0] == 3);                          // ABORT
+        CHECK(abort[2] == "wamp.error.protocol_violation");
+        auto close = ws.read_frame();
+        REQUIRE(close);
+        CHECK(close->opcode == 0x8);
+    }
+    SECTION("invalid JSON as the first message closes the connection") {
+        WsTestClient ws;
+        REQUIRE(ws.connect(router.port(), "", "wamp.2.json").starts_with("HTTP/1.1 101"));
+        ws.send_text("not json at all");
+        auto close = ws.read_frame();
+        REQUIRE(close);
+        CHECK(close->opcode == 0x8);
+    }
+    SECTION("a 1 MiB string goes through a JSON session intact") {
+        WsTestClient ws;
+        REQUIRE(ws_json_join(ws, router.port()));
+        ws.send_text(R"([32,1,{},"big.json"])");
+        REQUIRE(ws_json_frame(ws)[0] == 33);
+        const std::string big(1 << 20, 'q');
+        ws.send_text(json::array({16, 2, json::object({{"exclude_me", false}}), "big.json", json::array({big})}).dump());
+        auto event = ws_json_frame(ws);
+        REQUIRE(event.is_array());
+        CHECK(event[4][0] == big);
+    }
+}
+
+TEST_CASE("Shutdown sends a JSON session its GOODBYE as JSON", "[router][json][shutdown]") {
+    auto config = plain_config();
+    config.shutdown_grace = 3s;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    WsTestClient ws;
+    REQUIRE(ws_json_join(ws, router.port()));
+    auto raw = raw_json_join(router.port());
+    REQUIRE(raw);
+
+    std::thread stopper{[&] { router.stop(); }};
+    auto goodbye = ws_json_frame(ws);
+    REQUIRE(goodbye.is_array());
+    CHECK(goodbye[0] == 6);
+    CHECK(goodbye[2] == "wamp.close.system_shutdown");
+    auto close = ws.read_frame();
+    REQUIRE(close);
+    CHECK(close->opcode == 0x8);
+    auto raw_goodbye = raw_json_frame(*raw);
+    REQUIRE(raw_goodbye.is_array());
+    CHECK(raw_goodbye[0] == 6);
+    CHECK(raw->closed_within(2s));
+    stopper.join();
 }

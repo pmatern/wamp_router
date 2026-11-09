@@ -16,6 +16,7 @@
 #pragma once
 
 #include "base64.hpp"
+#include "utf8.hpp"
 #include <openssl/evp.h>
 #include <algorithm>
 #include <array>
@@ -38,7 +39,8 @@ namespace wamp::ws {
 // router needs: the HTTP upgrade, binary data frames (with fragmentation), ping/pong and close.
 // Not implemented: extensions (permessage-deflate), text frames (they belong to wamp.2.json).
 
-inline constexpr std::string_view kSubprotocol = "wamp.2.cbor";
+inline constexpr std::string_view kSubprotocol = "wamp.2.cbor";        // the default and first choice
+inline constexpr std::string_view kSubprotocolJson = "wamp.2.json";
 inline constexpr size_t kMaxUpgradeRequest = 8 * 1024;   // request line + headers
 
 enum class Opcode : uint8_t {
@@ -54,6 +56,7 @@ enum class Opcode : uint8_t {
 inline constexpr uint16_t kCloseNormal = 1000;
 inline constexpr uint16_t kCloseProtocolError = 1002;
 inline constexpr uint16_t kCloseUnsupportedData = 1003;
+inline constexpr uint16_t kCloseInvalidData = 1007;   // a text message that is not valid UTF-8
 inline constexpr uint16_t kCloseTooBig = 1009;
 
 // ----------------------------------------------------------------------------
@@ -97,6 +100,7 @@ struct UpgradeRequest {
     UpgradeStatus status{UpgradeStatus::INCOMPLETE};
     size_t consumed{0};     // bytes of the request including the blank line (OK only)
     std::string key;        // Sec-WebSocket-Key (OK only)
+    std::string subprotocol;   // the subprotocol chosen: the first one the client offers that is enabled (OK only)
     std::string origin;     // Origin header, empty if absent
 };
 
@@ -130,7 +134,12 @@ inline bool has_token(std::string_view list, std::string_view token) {
 // Parses the client's HTTP upgrade request. `allowed_origins` empty = any origin; otherwise a request
 // that carries an Origin header must match one entry exactly (requests without one, i.e. non-browser
 // clients, are allowed).
-inline UpgradeRequest parse_upgrade(std::span<const uint8_t> data, const std::vector<std::string>& allowed_origins) {
+inline constexpr std::array<std::string_view, 1> kCborOnly{kSubprotocol};
+
+// `enabled` lists the subprotocols the router speaks; the first one the client offers that is on the list is
+// chosen (the client's order is its preference), and a client that offers none gets 400.
+inline UpgradeRequest parse_upgrade(std::span<const uint8_t> data, const std::vector<std::string>& allowed_origins,
+                                    std::span<const std::string_view> enabled = kCborOnly) {
     UpgradeRequest request;
     const std::string_view text{reinterpret_cast<const char*>(data.data()), data.size()};
 
@@ -153,7 +162,8 @@ inline UpgradeRequest parse_upgrade(std::span<const uint8_t> data, const std::ve
     request.status = UpgradeStatus::BAD_REQUEST;
     if (!request_line.starts_with("GET ") || !request_line.ends_with(" HTTP/1.1")) return request;
 
-    bool upgrade = false, connection = false, version_13 = false, cbor = false, have_version = false;
+    bool upgrade = false, connection = false, version_13 = false, have_version = false;
+    std::vector<std::string> offered;   // subprotocols in the client's order
     std::string key;
     while (!head.empty()) {
         const auto eol = head.find("\r\n");
@@ -169,13 +179,23 @@ inline UpgradeRequest parse_upgrade(std::span<const uint8_t> data, const std::ve
         else if (name == "connection") connection = connection || detail::has_token(value, "upgrade");
         else if (name == "sec-websocket-key") key = std::string{value};
         else if (name == "sec-websocket-version") { have_version = true; version_13 = version_13 || value == "13"; }
-        else if (name == "sec-websocket-protocol") cbor = cbor || detail::has_token(value, kSubprotocol);
+        else if (name == "sec-websocket-protocol") {
+            for (auto rest = value; !rest.empty();) {
+                const auto comma = rest.find(',');
+                offered.push_back(detail::lower(detail::trim(rest.substr(0, comma))));
+                if (comma == std::string_view::npos) break;
+                rest.remove_prefix(comma + 1);
+            }
+        }
         else if (name == "origin") request.origin = std::string{value};
     }
 
     if (!upgrade || !connection || !valid_client_key(key)) return request;
     if (!have_version || !version_13) { request.status = UpgradeStatus::UPGRADE_REQUIRED; return request; }
-    if (!cbor) return request;
+    for (const auto& name : offered) {
+        if (std::ranges::find(enabled, std::string_view{name}) != enabled.end()) { request.subprotocol = name; break; }
+    }
+    if (request.subprotocol.empty()) return request;   // 400: nothing in common
     if (!allowed_origins.empty() && !request.origin.empty() &&
         std::ranges::find(allowed_origins, request.origin) == allowed_origins.end()) {
         request.status = UpgradeStatus::FORBIDDEN;
@@ -187,12 +207,12 @@ inline UpgradeRequest parse_upgrade(std::span<const uint8_t> data, const std::ve
     return request;
 }
 
-inline std::string upgrade_response(std::string_view client_key) {
+inline std::string upgrade_response(std::string_view client_key, std::string_view subprotocol = kSubprotocol) {
     std::string out = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                       "Sec-WebSocket-Accept: ";
     out += accept_key(client_key);
     out += "\r\nSec-WebSocket-Protocol: ";
-    out += kSubprotocol;
+    out += subprotocol;
     out += "\r\n\r\n";
     return out;
 }
@@ -292,7 +312,9 @@ struct Parsed {
 // `max_message` before anything is allocated.
 class FrameParser {
 public:
-    explicit FrameParser(size_t max_message) : max_message_(max_message) {}
+    // text_mode: the connection speaks wamp.2.json, so data messages must be text frames of valid UTF-8 (and binary
+    // frames are refused); otherwise (wamp.2.cbor) they must be binary frames
+    explicit FrameParser(size_t max_message, bool text_mode = false) : max_message_(max_message), text_mode_(text_mode) {}
 
     Parsed next(std::span<const uint8_t> in) {
         Parsed out;
@@ -357,7 +379,7 @@ public:
                 if (!in_message_) return fail(out, kCloseProtocolError);          // continuation with nothing to continue
             } else {
                 if (in_message_) return fail(out, kCloseProtocolError);          // new message inside a fragmented one
-                if (opcode == 0x1) return fail(out, kCloseUnsupportedData);      // text belongs to wamp.2.json
+                if ((opcode == 0x1) != text_mode_) return fail(out, kCloseUnsupportedData);   // wrong frame kind for the subprotocol
                 in_message_ = true;
             }
             const auto old_size = message_.size();
@@ -368,6 +390,12 @@ public:
 
             if (fin) {
                 in_message_ = false;
+                if (text_mode_ && !valid_utf8({reinterpret_cast<const char*>(message_.data()), message_.size()})) {
+                    out.kind = Parsed::Kind::FAIL;
+                    out.code = kCloseInvalidData;
+                    message_.clear();
+                    return out;
+                }
                 out.kind = Parsed::Kind::MESSAGE;
                 out.payload = std::exchange(message_, {});
                 return out;
@@ -389,6 +417,7 @@ private:
     }
 
     size_t max_message_;
+    bool text_mode_;
     std::vector<uint8_t> message_;
     bool in_message_{false};
 };

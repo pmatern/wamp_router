@@ -44,7 +44,7 @@ public:
 
     // Opens the connection and sends the upgrade request; returns the response head ("" if none came)
     std::string connect(unsigned short port, const std::string& extra_headers = "",
-                        const std::string& subprotocols = "wamp.2.json, wamp.2.cbor",
+                        const std::string& subprotocols = "wamp.2.cbor",
                         const std::string& version = "13") {
         socket_.connect({asio::ip::address_v4::loopback(), port});
         const std::string request =
@@ -89,6 +89,9 @@ public:
         send_raw(bytes);
     }
     void send_binary(std::span<const uint8_t> payload) { send(0x2, payload); }
+    void send_text(const std::string& text) {
+        send(0x1, std::span<const uint8_t>{reinterpret_cast<const uint8_t*>(text.data()), text.size()});
+    }
 
     // Next server frame; nullopt on timeout or when the peer closed the connection
     std::optional<WsFrame> read_frame(std::chrono::milliseconds timeout = std::chrono::milliseconds{5000}) {

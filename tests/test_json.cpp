@@ -298,24 +298,24 @@ TEST_CASE("The JSON transcoder survives garbage and mutated input", "[json][fuzz
 }
 
 TEST_CASE("UTF-8 validation", "[json]") {
-    CHECK(jsoncodec::valid_utf8(""));
-    CHECK(jsoncodec::valid_utf8("plain ascii"));
-    CHECK(jsoncodec::valid_utf8("\xC2\x80"));
-    CHECK(jsoncodec::valid_utf8("\xDF\xBF"));
-    CHECK(jsoncodec::valid_utf8("\xE0\xA0\x80"));
-    CHECK(jsoncodec::valid_utf8("\xEF\xBF\xBF"));
-    CHECK(jsoncodec::valid_utf8("\xF0\x90\x80\x80"));
-    CHECK(jsoncodec::valid_utf8("\xF4\x8F\xBF\xBF"));
-    CHECK_FALSE(jsoncodec::valid_utf8("\x80"));
-    CHECK_FALSE(jsoncodec::valid_utf8("\xC0\xAF"));
-    CHECK_FALSE(jsoncodec::valid_utf8("\xC1\xBF"));
-    CHECK_FALSE(jsoncodec::valid_utf8("\xE0\x80\x80"));
-    CHECK_FALSE(jsoncodec::valid_utf8("\xED\xA0\x80"));
-    CHECK_FALSE(jsoncodec::valid_utf8("\xF0\x80\x80\x80"));
-    CHECK_FALSE(jsoncodec::valid_utf8("\xF4\x90\x80\x80"));
-    CHECK_FALSE(jsoncodec::valid_utf8("\xF5\x80\x80\x80"));
-    CHECK_FALSE(jsoncodec::valid_utf8("\xE2\x82"));
-    CHECK_FALSE(jsoncodec::valid_utf8("a\xFFz"));
+    CHECK(valid_utf8(""));
+    CHECK(valid_utf8("plain ascii"));
+    CHECK(valid_utf8("\xC2\x80"));
+    CHECK(valid_utf8("\xDF\xBF"));
+    CHECK(valid_utf8("\xE0\xA0\x80"));
+    CHECK(valid_utf8("\xEF\xBF\xBF"));
+    CHECK(valid_utf8("\xF0\x90\x80\x80"));
+    CHECK(valid_utf8("\xF4\x8F\xBF\xBF"));
+    CHECK_FALSE(valid_utf8("\x80"));
+    CHECK_FALSE(valid_utf8("\xC0\xAF"));
+    CHECK_FALSE(valid_utf8("\xC1\xBF"));
+    CHECK_FALSE(valid_utf8("\xE0\x80\x80"));
+    CHECK_FALSE(valid_utf8("\xED\xA0\x80"));
+    CHECK_FALSE(valid_utf8("\xF0\x80\x80\x80"));
+    CHECK_FALSE(valid_utf8("\xF4\x90\x80\x80"));
+    CHECK_FALSE(valid_utf8("\xF5\x80\x80\x80"));
+    CHECK_FALSE(valid_utf8("\xE2\x82"));
+    CHECK_FALSE(valid_utf8("a\xFFz"));
 }
 
 TEST_CASE("base64", "[json]") {

@@ -139,6 +139,9 @@ struct WebSocketConfig {
     bool enabled{true};
     std::vector<std::string> allowed_origins;   // empty = any; else a request with an Origin header must match one exactly
     size_t max_message_size{(size_t{1} << 24) - 1};   // bytes; the internal frame format holds at most 2^24 - 1
+    // Subprotocols offered, in the router's order of preference when a client offers several the same way
+    // (the client's own order wins): "wamp.2.cbor" and/or "wamp.2.json"
+    std::vector<std::string> subprotocols{"wamp.2.cbor", "wamp.2.json"};
 };
 
 struct ServerConfig {
@@ -314,6 +317,24 @@ public:
                             return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
                         }
                         config.websocket.allowed_origins.push_back(origin.as_string());
+                    }
+                }
+                if (ws.contains("subprotocols")) {
+                    const auto& list = toml::find(ws, "subprotocols");
+                    config.websocket.subprotocols.clear();
+                    if (list.is_array()) {
+                        for (const auto& item : list.as_array()) {
+                            if (item.is_string() && (item.as_string() == "wamp.2.cbor" || item.as_string() == "wamp.2.json")) {
+                                config.websocket.subprotocols.push_back(item.as_string());
+                            } else {
+                                config.websocket.subprotocols.clear();
+                                break;
+                            }
+                        }
+                    }
+                    if (config.websocket.subprotocols.empty()) {
+                        spdlog::error("[server.websocket] subprotocols must be a non-empty array of \"wamp.2.cbor\" and/or \"wamp.2.json\"");
+                        return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
                     }
                 }
                 if (ws.contains("max_message_size")) {
