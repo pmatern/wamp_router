@@ -605,6 +605,26 @@ allow = ["call"]
         CHECK_FALSE(role.allows(wamp::Action::REGISTER, "com.example.add"));
     }
 
+    SECTION("ppt_schemes limits payload passthru schemes per role") {
+        auto result = load(R"(
+[auth.roles]
+alice = "limited"
+
+[roles.limited]
+ppt_schemes = ["x_protobuf"]
+
+[[roles.limited.rules]]
+uri = "com."
+match = "prefix"
+allow = ["publish"]
+)");
+        REQUIRE(result.has_value());
+        const auto& role = result->roles.at("limited");
+        CHECK(role.allows_ppt_scheme("x_protobuf"));
+        CHECK_FALSE(role.allows_ppt_scheme("mqtt"));
+        CHECK(role.allows(wamp::Action::PUBLISH, "com.x"));
+    }
+
     SECTION("no roles configured") {
         auto result = load("");
         REQUIRE(result.has_value());

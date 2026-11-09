@@ -18,6 +18,7 @@
 #include "wamp_messages.hpp"
 #include "raw_socket.hpp"
 #include "cbor.hpp"
+#include "ppt.hpp"
 #include <algorithm>
 #include <concepts>
 #include <map>
@@ -134,15 +135,23 @@ inline void write_value(cbor::Writer& w, const WampValue& value) {
     }, value);
 }
 
-// Details "roles": {name: {}} with names in sorted order
+inline WampDict read_dict(cbor::Reader& r, int depth = 0);
+
+// Details "roles": {name: {"features": {...}}} with names in sorted order ({} for a role without features)
 inline void write_roles(cbor::Writer& w, const std::vector<Role>& roles) {
     w.write_text("roles");
-    std::set<std::string> names;
-    for (const auto& role : roles) names.insert(role.name);
-    w.write_map(names.size());
-    for (const auto& name : names) {
+    std::map<std::string, const Role*> by_name;
+    for (const auto& role : roles) by_name.insert_or_assign(role.name, &role);
+    w.write_map(by_name.size());
+    for (const auto& [name, role] : by_name) {
         w.write_text(name);
-        w.write_empty_map();  // features
+        if (role->features.empty()) {
+            w.write_empty_map();
+        } else {
+            w.write_map(1);
+            w.write_text("features");
+            write_dict(w, role->features);
+        }
     }
 }
 
@@ -150,8 +159,20 @@ inline std::vector<Role> read_roles(cbor::Reader& r) {
     std::vector<Role> roles;
     auto c = r.read_map();
     while (r.next(c)) {
-        roles.push_back(Role{r.read_text(), {}});
-        r.skip();  // features
+        Role role{r.read_text(), {}};
+        if (r.peek_major() == cbor::Major::MAP) {
+            auto role_map = r.read_map();
+            while (r.next(role_map)) {
+                if (r.read_text() == "features" && r.peek_major() == cbor::Major::MAP) {
+                    role.features = read_dict(r);
+                } else {
+                    r.skip();
+                }
+            }
+        } else {
+            r.skip();
+        }
+        roles.push_back(std::move(role));
     }
     return roles;
 }
@@ -188,7 +209,7 @@ inline WampList read_list(cbor::Reader& r, int depth = 0) {
     return list;
 }
 
-inline WampDict read_dict(cbor::Reader& r, int depth = 0) {
+inline WampDict read_dict(cbor::Reader& r, int depth) {
     if (depth >= cbor::Reader::kMaxNesting) throw cbor::DecodeError("nesting too deep");
     WampDict dict;
     auto c = r.read_map();
@@ -595,7 +616,7 @@ inline std::vector<uint8_t> serialize_event(const EventMessage& msg) {
     auto w = fast::begin(out, MessageType::EVENT, 4 + fast::payload_elements(msg.arguments, msg.arguments_kw));
     w.write_uint(msg.subscription_id);
     w.write_uint(msg.publication_id);
-    w.write_empty_map();  // details
+    fast::write_dict(w, msg.details);
     fast::write_payload(w, msg.arguments, msg.arguments_kw);
     return out;
 }
@@ -606,7 +627,7 @@ inline std::expected<PublishMessage, std::error_code>
 deserialize_publish(const std::vector<uint8_t>& cbor_data) {
     return fast::decode<PublishMessage>(cbor_data, MessageType::PUBLISH, 4, "PUBLISH", [](fast::Fields& f) {
         const auto request_id = f.uint64();
-        // Only the boolean options the router acts on are kept
+        // Only the options the router acts on are kept: acknowledge, exclude_me and ppt_*
         WampDict options;
         if (!f.more()) throw fast::MalformedMessage{};
         auto& r = f.reader();
@@ -616,6 +637,8 @@ deserialize_publish(const std::vector<uint8_t>& cbor_data) {
                 const std::string key = r.read_text();
                 if ((key == "acknowledge" || key == "exclude_me") && r.peek_is_bool()) {
                     options[key] = r.read_bool();
+                } else if (ppt::is_ppt_key(key)) {
+                    options[key] = fast::read_value(r);  // passthru options, checked by ppt::valid
                 } else {
                     r.skip();
                 }
@@ -672,7 +695,7 @@ inline std::vector<uint8_t> serialize_invocation(const InvocationMessage& msg) {
     auto w = fast::begin(out, MessageType::INVOCATION, 4 + fast::payload_elements(msg.arguments, msg.arguments_kw));
     w.write_uint(msg.request_id);
     w.write_uint(msg.registration_id);
-    w.write_empty_map();  // details
+    fast::write_dict(w, msg.details);
     fast::write_payload(w, msg.arguments, msg.arguments_kw);
     return out;
 }
@@ -700,7 +723,7 @@ inline std::vector<uint8_t> serialize_result(const ResultMessage& msg) {
     // Arguments are always present (possibly empty); ArgumentsKw only when non-empty
     auto w = fast::begin(out, MessageType::RESULT, 4 + (msg.arguments_kw.empty() ? 0 : 1));
     w.write_uint(msg.request_id);
-    w.write_empty_map();  // details
+    fast::write_dict(w, msg.details);
     fast::write_list(w, msg.arguments);
     if (!msg.arguments_kw.empty()) fast::write_dict(w, msg.arguments_kw);
     return out;
@@ -713,11 +736,24 @@ inline std::expected<YieldMessage, std::error_code>
 deserialize_yield(const std::vector<uint8_t>& cbor_data) {
     return fast::decode<YieldMessage>(cbor_data, MessageType::YIELD, 3, "YIELD", [](fast::Fields& f) {
         const auto invocation_id = f.uint64();
-        if (f.more()) f.reader().skip();  // options
+        WampDict options;  // only the ppt_* entries are kept
+        if (f.more()) {
+            auto& r = f.reader();
+            if (r.peek_major() == cbor::Major::MAP) {
+                auto c = r.read_map();
+                while (r.next(c)) {
+                    std::string key = r.read_text();
+                    if (ppt::is_ppt_key(key)) options[key] = fast::read_value(r);
+                    else r.skip();
+                }
+            } else {
+                r.skip();
+            }
+        }
         WampList arguments;
         WampDict arguments_kw;
         f.payload(arguments, arguments_kw);
-        return YieldMessage{invocation_id, WampDict{}, std::move(arguments), std::move(arguments_kw)};
+        return YieldMessage{invocation_id, std::move(options), std::move(arguments), std::move(arguments_kw)};
     });
 }
 
@@ -768,7 +804,7 @@ inline std::vector<uint8_t> serialize_yield(const YieldMessage& msg) {
     out.reserve(64);
     auto w = fast::begin(out, MessageType::YIELD, 4 + (msg.arguments_kw.empty() ? 0 : 1));
     w.write_uint(msg.invocation_id);
-    w.write_empty_map();  // options
+    fast::write_dict(w, msg.options);
     fast::write_list(w, msg.arguments);
     if (!msg.arguments_kw.empty()) fast::write_dict(w, msg.arguments_kw);
     return out;
@@ -840,11 +876,16 @@ inline std::expected<ResultMessage, std::error_code>
 deserialize_result(const std::vector<uint8_t>& cbor_data) {
     return fast::decode<ResultMessage>(cbor_data, MessageType::RESULT, 3, "RESULT", [](fast::Fields& f) {
         const auto request_id = f.uint64();
-        if (f.more()) f.reader().skip();  // details
+        WampDict details;
+        if (f.more()) {
+            auto& r = f.reader();
+            if (r.peek_major() == cbor::Major::MAP) details = fast::read_dict(r);
+            else r.skip();
+        }
         WampList arguments;
         WampDict arguments_kw;
         f.payload(arguments, arguments_kw);
-        return ResultMessage{request_id, WampDict{}, std::move(arguments), std::move(arguments_kw)};
+        return ResultMessage{request_id, std::move(details), std::move(arguments), std::move(arguments_kw)};
     });
 }
 

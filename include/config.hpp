@@ -407,6 +407,9 @@ public:
             if (config_data.contains("roles")) {
                 for (const auto& [role_name, role_value] : toml::find(config_data, "roles").as_table()) {
                     Permissions role;
+                    if (role_value.contains("ppt_schemes")) {
+                        role.set_ppt_schemes(toml::find<std::vector<std::string>>(role_value, "ppt_schemes"));
+                    }
                     if (role_value.contains("rules")) {
                         for (const auto& rule : toml::find(role_value, "rules").as_array()) {
                             const auto uri = toml::find<std::string>(rule, "uri");

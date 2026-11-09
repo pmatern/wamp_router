@@ -1633,3 +1633,116 @@ TEST_CASE("WampClient speaks JSON over WebSocket and RawSocket, talking to a CBO
         CHECK(call_result == rich);
     }
 }
+
+// ----------------------------------------------------------------------------
+// Payload passthru mode (ppt_*)
+// ----------------------------------------------------------------------------
+
+namespace {
+const WampDict kPptOptions{{"ppt_scheme", std::string{"x_protobuf"}}, {"ppt_serializer", std::string{"native"}},
+                           {"ppt_cipher", std::string{"xsalsa20poly1305"}}, {"ppt_keyid", std::string{"key1"}}};
+}
+
+TEST_CASE("Passthru payloads and ppt_* options are delivered unchanged, across serializers and shards",
+          "[router][ppt][crossshard]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    asio::io_context io;
+    WampClient publisher{io}, subscriber{io}, callee{io}, caller{io};
+    subscriber.set_serializer(WampClient::Serializer::JSON);  // the blob goes out as "\0"+base64
+    caller.set_serializer(WampClient::Serializer::JSON);
+    const WampList blob{WampBytes{0x00, 0xFF, 0x7F, 0x80, 0x01}};
+
+    WampDict event_details, invocation_details, result_details;
+    WampList event_args, invocation_args, result_args;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await publisher.connect("127.0.0.1", router.port(), "test.realm");
+        co_await subscriber.connect("127.0.0.1", router.port(), "test.realm");
+        co_await callee.connect("127.0.0.1", router.port(), "test.realm");
+        co_await caller.connect("127.0.0.1", router.port(), "test.realm");
+
+        co_await subscriber.subscribe("ppt.topic", [&](const EventMessage& e) {
+            event_details = e.details;
+            event_args = e.arguments;
+        });
+        (void)co_await callee.register_procedure("ppt.echo",
+            [&](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                invocation_details = inv.details;
+                invocation_args = inv.arguments;
+                co_return YieldMessage{inv.request_id, kPptOptions, inv.arguments};
+            });
+
+        (void)co_await publisher.publish("ppt.topic", blob, {}, false, true, kPptOptions);
+        auto result = co_await caller.call_result("ppt.echo", blob, {}, 0ms, kPptOptions);
+        result_details = result.details;
+        result_args = result.arguments;
+        for (int i = 0; i < 100 && event_args.empty(); ++i) co_await pause(io, 20ms);
+        done = true;
+    }, detached);
+    io.run_for(15s);
+
+    REQUIRE(done);
+    CHECK(event_args == blob);
+    CHECK(event_details == kPptOptions);
+    CHECK(invocation_args == blob);
+    CHECK(invocation_details == kPptOptions);
+    CHECK(result_args == blob);
+    CHECK(result_details == kPptOptions);
+}
+
+TEST_CASE("Passthru is refused when the peers did not announce it", "[router][ppt]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    asio::io_context io;
+    WampClient with{io}, without{io}, callee_without{io}, publisher{io}, bad{io};
+    without.set_passthru(false);
+    callee_without.set_passthru(false);
+    const WampList blob{WampBytes{1, 2, 3}};
+
+    int with_events = 0, without_events = 0;
+    std::string no_support_callee, no_support_caller, malformed;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        for (auto* client : {&with, &without, &callee_without, &publisher, &bad}) {
+            co_await client->connect("127.0.0.1", router.port(), "test.realm");
+        }
+        co_await with.subscribe("t", [&](const EventMessage&) { ++with_events; });
+        co_await without.subscribe("t", [&](const EventMessage&) { ++without_events; });
+        (void)co_await callee_without.register_procedure("p",
+            [](const InvocationMessage& inv) -> awaitable<YieldMessage> { co_return YieldMessage{inv.request_id, {}, inv.arguments}; });
+
+        // A passthru event skips the subscriber that cannot take it; a plain event reaches both
+        (void)co_await publisher.publish("t", blob, {}, false, true, kPptOptions);
+        (void)co_await publisher.publish("t", WampList{std::string{"plain"}});
+        for (int i = 0; i < 100 && (with_events < 2 || without_events < 1); ++i) co_await pause(io, 20ms);
+
+        // A passthru call to a callee without the feature
+        try {
+            (void)co_await publisher.call_result("p", blob, {}, 0ms, kPptOptions);
+        } catch (const WampException& e) { no_support_callee = e.error_uri; }
+
+        // A client that did not announce the feature cannot use it
+        try {
+            (void)co_await without.call_result("p", blob, {}, 0ms, kPptOptions);
+        } catch (const WampException& e) { no_support_caller = e.error_uri; }
+
+        // Malformed passthru: a text argument instead of binary
+        try {
+            (void)co_await bad.call_result("p", WampList{std::string{"text"}}, {}, 0ms, kPptOptions);
+        } catch (const WampException& e) { malformed = e.error_uri; }
+        done = true;
+    }, detached);
+    io.run_for(15s);
+
+    REQUIRE(done);
+    CHECK(with_events == 2);
+    CHECK(without_events == 1);
+    CHECK(no_support_callee == "wamp.error.feature_not_supported");
+    CHECK(no_support_caller == "wamp.error.feature_not_supported");
+    CHECK(malformed == "wamp.error.invalid_argument");
+}

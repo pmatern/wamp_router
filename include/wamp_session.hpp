@@ -128,6 +128,7 @@ public:
                 ProcedureHandler::cleanup_session(*realm_ptr_, session_id_);
             }
             shard_.channels.remove(session_id_);
+            shard_.ppt_sessions.erase(session_id_);
         }
 
         spdlog::info("WAMP session disconnected");
@@ -695,6 +696,7 @@ private:
 
         const auto& hello = *hello_result;
         realm_ = hello.realm;  // Store realm for later
+        ppt_ = std::ranges::any_of(hello.roles, [](const Role& role) { return ppt::announced(role.features); });
 
         if (config_.auth_keys.empty()) {
             spdlog::info("No authentication configured, establishing session for realm '{}'", realm_);
@@ -703,7 +705,9 @@ private:
             wamp_session_established_ = true;
             realm_ptr_ = &shard_.realms.get(realm_);
 
-            WelcomeMessage welcome{session_id_, realm_};
+            if (ppt_) shard_.ppt_sessions.insert(session_id_);
+
+            auto welcome = WelcomeMessage::create_router(session_id_, realm_);
             auto welcome_cbor = serialize_welcome(welcome);
             response_buffer_ = rawsocket::create_wamp_message(welcome_cbor);
 
@@ -831,6 +835,7 @@ private:
                     session_id_, pending_authid_, realm_);
 
         shard_.channels.get_or_create(session_id_, io_);
+        if (ppt_) shard_.ppt_sessions.insert(session_id_);
 
         // Resolve the authid's permissions; an authid without a role may connect but do nothing
         static const Permissions no_permissions;
@@ -937,6 +942,34 @@ private:
                 auto publish_result = deserialize_publish(cbor_payload);
                 if (!publish_result.has_value()) {
                     return malformed("PUBLISH");
+                }
+
+                const WampDict publish_ppt = ppt::extract(publish_result->options);
+                if (!publish_ppt.empty()) {
+                    const auto ack_it = publish_result->options.find("acknowledge");
+                    const auto* ack_flag = ack_it != publish_result->options.end()
+                                               ? std::get_if<bool>(&ack_it->second) : nullptr;
+                    const bool ack = ack_flag != nullptr && *ack_flag;
+                    std::optional<ErrorMessage> refusal;
+                    if (!ppt_) {
+                        refusal = ErrorMessage::create_feature_not_supported(
+                            MessageType::PUBLISH, publish_result->request_id,
+                            "The session did not announce payload passthru mode");
+                    } else if (!ppt::valid(publish_ppt, publish_result->arguments, publish_result->arguments_kw)) {
+                        refusal = ErrorMessage::create_invalid_argument(
+                            MessageType::PUBLISH, publish_result->request_id,
+                            "Malformed ppt_* options or payload (one binary argument required)");
+                    }
+                    if (!refusal && role_ != nullptr &&
+                        !role_->allows_ppt_scheme(std::get<std::string>(publish_ppt.at("ppt_scheme")))) {
+                        refusal = ErrorMessage::create_not_authorized(MessageType::PUBLISH, publish_result->request_id,
+                                                                      "use payload passthru scheme", publish_result->topic);
+                    }
+                    if (refusal) {
+                        if (!ack) return std::span<const uint8_t>{};
+                        response_buffer_ = rawsocket::create_wamp_message(serialize_error(*refusal));
+                        return std::span<const uint8_t>(response_buffer_);
+                    }
                 }
 
                 if (!is_authorized(Action::PUBLISH, publish_result->topic)) {
@@ -1065,6 +1098,28 @@ private:
                     return malformed("CALL");
                 }
 
+                if (const WampDict call_ppt = ppt::extract(call_result->options); !call_ppt.empty()) {
+                    std::optional<ErrorMessage> refusal;
+                    if (!ppt_) {
+                        refusal = ErrorMessage::create_feature_not_supported(
+                            MessageType::CALL, call_result->request_id,
+                            "The session did not announce payload passthru mode");
+                    } else if (!ppt::valid(call_ppt, call_result->arguments, call_result->arguments_kw)) {
+                        refusal = ErrorMessage::create_invalid_argument(
+                            MessageType::CALL, call_result->request_id,
+                            "Malformed ppt_* options or payload (one binary argument required)");
+                    }
+                    if (!refusal && role_ != nullptr &&
+                        !role_->allows_ppt_scheme(std::get<std::string>(call_ppt.at("ppt_scheme")))) {
+                        refusal = ErrorMessage::create_not_authorized(MessageType::CALL, call_result->request_id,
+                                                                      "use payload passthru scheme", call_result->procedure);
+                    }
+                    if (refusal) {
+                        response_buffer_ = rawsocket::create_wamp_message(serialize_error(*refusal));
+                        return std::span<const uint8_t>(response_buffer_);
+                    }
+                }
+
                 if (!is_authorized(Action::CALL, call_result->procedure)) {
                     return deny(MessageType::CALL, call_result->request_id,
                                 Action::CALL, call_result->procedure);
@@ -1180,6 +1235,7 @@ private:
     uint64_t session_id_;
     std::string realm_;
     Realm* realm_ptr_{nullptr};  // routing state of realm_, set when the session is established
+    bool ppt_{false};                // the client announced Payload Passthru Mode in HELLO
     bool wamp_session_established_;  // True after HELLO/WELCOME handshake
 
     // Authentication state

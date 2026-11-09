@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <optional>
@@ -60,6 +61,13 @@ public:
         }
     }
 
+    // Restrict the payload passthru schemes (ppt_scheme) this class of sessions may use; none set = any
+    void set_ppt_schemes(std::vector<std::string> schemes) { ppt_schemes_ = std::move(schemes); }
+
+    [[nodiscard]] bool allows_ppt_scheme(std::string_view scheme) const {
+        return ppt_schemes_.empty() || std::ranges::find(ppt_schemes_, scheme) != ppt_schemes_.end();
+    }
+
     [[nodiscard]] bool allows(Action action, std::string_view uri) const {
         const auto& rules = rules_[static_cast<size_t>(action)];
         if (rules.exact.find(uri) != rules.exact.end()) return true;
@@ -79,6 +87,7 @@ private:
         std::vector<std::string> prefixes;
     };
     std::array<Rules, 4> rules_;
+    std::vector<std::string> ppt_schemes_;
 };
 
 } // namespace wamp

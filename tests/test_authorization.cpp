@@ -117,7 +117,7 @@ ServerConfig authz_config(const std::string& public_hex) {
 
 // Runs the RawSocket handshake and Cryptosign flow; returns the WELCOME
 WelcomeMessage establish(WampSession& session, const KeyPair& kp, const std::string& authid,
-                         const std::string& realm = "com.example.realm") {
+                         const std::string& realm = "com.example.realm", bool passthru = false) {
     session.on_connect();
 
     auto handshake = rawsocket::encode_handshake_request({
@@ -126,6 +126,7 @@ WelcomeMessage establish(WampSession& session, const KeyPair& kp, const std::str
     REQUIRE(session.process(std::span{handshake.data(), handshake.size()}).has_value());
 
     HelloMessage hello{realm};
+    if (passthru) hello.roles = HelloMessage::create_client(realm).roles;
     hello.authid = authid;
     hello.authmethods = std::vector<std::string>{"cryptosign"};
     auto hello_frame = rawsocket::create_wamp_message(serialize_hello(hello));
@@ -208,6 +209,42 @@ TEST_CASE("Session enforces role permissions", "[authz][wamp_session]") {
         require_not_authorized(send(session, serialize_call(CallMessage{9, {}, "com.example.mul"})),
                                MessageType::CALL, 9);
     }
+}
+
+TEST_CASE("A role can be limited to certain payload passthru schemes", "[authz][ppt][wamp_session]") {
+    auto kp = make_keypair();
+    asio::io_context io;
+    auto config = authz_config(kp.public_hex);
+    config.roles.at("user").set_ppt_schemes({"x_protobuf"});
+    WampSession session{io, config, test_shard()};
+    (void)establish(session, kp, "alice", "com.example.realm", true);
+
+    const WampList blob{WampBytes{1, 2, 3}};
+    auto options = [](const std::string& scheme) {
+        return WampDict{{"acknowledge", true}, {"ppt_scheme", scheme}};
+    };
+
+    auto ok = send(session, serialize_publish(PublishMessage{1, options("x_protobuf"), "com.example.news", blob}));
+    REQUIRE(get_message_type_from_cbor(ok) == MessageType::PUBLISHED);
+    require_not_authorized(
+        send(session, serialize_publish(PublishMessage{2, options("x_other"), "com.example.news", blob})),
+        MessageType::PUBLISH, 2);
+    require_not_authorized(
+        send(session, serialize_call(CallMessage{3, WampDict{{"ppt_scheme", std::string{"x_other"}}},
+                                                 "com.example.add", blob})),
+        MessageType::CALL, 3);
+    // without ppt_* the scheme list does not matter
+    auto plain = send(session, serialize_publish(PublishMessage{4, WampDict{{"acknowledge", true}}, "com.example.news"}));
+    REQUIRE(get_message_type_from_cbor(plain) == MessageType::PUBLISHED);
+}
+
+TEST_CASE("Permissions: ppt schemes", "[authz][ppt]") {
+    Permissions any;
+    CHECK(any.allows_ppt_scheme("whatever"));
+    Permissions limited;
+    limited.set_ppt_schemes({"a", "b"});
+    CHECK(limited.allows_ppt_scheme("a"));
+    CHECK_FALSE(limited.allows_ppt_scheme("c"));
 }
 
 TEST_CASE("Authid without a role can connect but do nothing", "[authz][wamp_session]") {

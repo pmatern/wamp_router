@@ -162,14 +162,17 @@ struct HelloMessage {
         : realm(std::move(realm_uri))
     {}
 
-    static HelloMessage create_client(const std::string& realm_uri) {
+    // passthru: announce Payload Passthru Mode (ppt_* options, one binary argument) for every role
+    static HelloMessage create_client(const std::string& realm_uri, bool passthru = true) {
         HelloMessage msg{realm_uri};
 
         // Add basic client roles
-        msg.roles.push_back(Role{"caller", {}});
-        msg.roles.push_back(Role{"callee", {}});
-        msg.roles.push_back(Role{"publisher", {}});
-        msg.roles.push_back(Role{"subscriber", {}});
+        WampDict features;
+        if (passthru) features["payload_passthru_mode"] = true;
+        msg.roles.push_back(Role{"caller", features});
+        msg.roles.push_back(Role{"callee", features});
+        msg.roles.push_back(Role{"publisher", features});
+        msg.roles.push_back(Role{"subscriber", features});
 
         return msg;
     }
@@ -219,8 +222,8 @@ struct WelcomeMessage {
         WelcomeMessage msg{session_id, realm_uri};
 
         // Add basic router roles
-        msg.roles.push_back(Role{"broker", {}});
-        msg.roles.push_back(Role{"dealer", {}});
+        msg.roles.push_back(Role{"broker", WampDict{{"payload_passthru_mode", true}}});
+        msg.roles.push_back(Role{"dealer", WampDict{{"payload_passthru_mode", true}}});
 
         return msg;
     }
@@ -701,6 +704,20 @@ struct ErrorMessage {
         WampDict details;
         details["message"] = reason;
         return ErrorMessage{MessageType::CALL, request_id, details, "wamp.error.timeout"};
+    }
+
+    static ErrorMessage create_invalid_argument(MessageType request_type, uint64_t request_id,
+                                                const std::string& reason) {
+        WampDict details;
+        details["message"] = reason;
+        return ErrorMessage{request_type, request_id, details, "wamp.error.invalid_argument"};
+    }
+
+    static ErrorMessage create_feature_not_supported(MessageType request_type, uint64_t request_id,
+                                                     const std::string& reason) {
+        WampDict details;
+        details["message"] = reason;
+        return ErrorMessage{request_type, request_id, details, "wamp.error.feature_not_supported"};
     }
 
     static ErrorMessage create_callee_failure(uint64_t request_id, const std::string& reason) {

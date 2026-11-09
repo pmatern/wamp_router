@@ -47,6 +47,7 @@ struct CrossPublish {
     std::string realm;
     std::string topic;
     EventTemplate event;
+    bool ppt{false};  // a passthru event: only subscribers that announced the feature get it
 };
 using CrossPublishPtr = std::shared_ptr<const CrossPublish>;
 
@@ -59,6 +60,7 @@ struct CrossCall {
     uint64_t caller_session{};
     uint64_t request_id{};   // the caller's CALL request id
     int64_t timeout_ms{0};   // CALL timeout option, 0 = shard default
+    WampDict ppt;            // the CALL's ppt_* options, forwarded as INVOCATION details
     WampList arguments;
     WampDict arguments_kw;
 };

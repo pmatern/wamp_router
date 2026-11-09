@@ -16,6 +16,7 @@ This router acts as the central message broker, routing messages between clients
 - **PubSub Support**: `SUBSCRIBE`, `PUBLISH`, `EVENT` messaging
 - **RawSocket and WebSocket Transport**: both on the same port, told apart by the first byte of the connection
 - **CBOR and JSON serializers**: `wamp.2.cbor` and `wamp.2.json` over WebSocket, serializers 3 and 1 over RawSocket; sessions with different serializers talk to each other (MessagePack is not supported yet)
+- **Payload passthru mode**: `ppt_*` options and an opaque binary payload (protobuf, encrypted data, custom envelopes) are routed without being decoded; see [Payload passthru](#payload-passthru)
 - **Lossless payloads**: null, booleans, integers, floats, strings, byte strings, lists and dicts of any nesting pass through unchanged
 - **TLS 1.3 Support**: Encrypted transport with optional client certificates
 - **WAMP-Cryptosign Authentication**: Ed25519 signature-based authentication
@@ -279,6 +280,17 @@ A client opens a normal WebSocket connection (`ws://` or, with TLS, `wss://`; an
 - JSON numbers above 2^53 lose precision in JavaScript clients; the router passes them through exactly.
 - Cost: converting a 10-argument message takes about 0.9 µs (CBOR to JSON) and 1.0 µs (JSON to CBOR) on the machine used for the other micro-benchmarks, per message per JSON session. A JSON subscriber therefore costs more per delivered event than a CBOR one (60 ns with the stamped template); in the in-process load test with 10 subscribers JSON fan-out ran at about 75% of the CBOR rate and JSON RPC at 82%, with the client's own conversion included.
 - Tested with Autobahn|Python over `wss://` and `rss://` with `JsonSerializer` and Cryptosign, including floats, `None`, nested containers and bytes.
+
+### Payload passthru
+
+WAMP's Payload Passthru Mode (`payload_passthru_mode`) lets an application carry its own payload format through the router. A PUBLISH or CALL (and the YIELD answering it) carries the options `ppt_scheme` (required), `ppt_serializer`, `ppt_cipher` and `ppt_keyid`, and the payload is exactly one binary argument. The router never looks inside the payload. It checks the shape and forwards the `ppt_*` entries unchanged, in the EVENT, INVOCATION or RESULT `details` (a callee's ERROR already carries its own details).
+
+- **Negotiation:** a client announces `payload_passthru_mode` in the `features` of its HELLO roles; the router announces it for `broker` and `dealer` in WELCOME. A session that did not announce it cannot send `ppt_*` (`wamp.error.feature_not_supported`).
+- **Delivery:** a passthru PUBLISH reaches only subscribers that announced the feature (the others get nothing; a plain PUBLISH reaches everyone). A passthru CALL to a callee that did not announce it fails with `wamp.error.feature_not_supported`.
+- **Validation:** a missing or empty `ppt_scheme`, a `ppt_*` option that is not a string, or a payload that is not one binary argument without keyword arguments gets `wamp.error.invalid_argument` (an unacknowledged PUBLISH gets no reply). A callee's YIELD that violates the same rule reaches the caller as `wamp.error.invalid_argument`.
+- **Authorization:** `ppt_schemes = ["x_protobuf"]` in a role table (`[roles.<name>]`) limits the schemes that role may use in PUBLISH and CALL; without it any scheme is allowed.
+- **Serializers:** the blob is a CBOR byte string, or `"\u0000" + base64` for JSON sessions, so passthru works across serializers. The router does not check ppt cipher or key ids, it never decrypts anything, and the size limit is the transport's message limit.
+- **Not done:** the router does not check that the caller of a passthru CALL accepts a passthru RESULT; a callee's passthru YIELD is forwarded as it is.
 
 ### Authentication
 ### Authentication

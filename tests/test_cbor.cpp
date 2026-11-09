@@ -210,14 +210,15 @@ TEST_CASE("Session handshake messages produce the bytes nlohmann produced", "[cb
         HelloMessage hello = HelloMessage::create_client("realm1");
         hello.authid = "alice";
         hello.authmethods = std::vector<std::string>{"cryptosign", "ticket"};
+        const auto ppt_role = json::object({{"features", json::object({{"payload_passthru_mode", true}})}});
         REQUIRE(serialize_hello(hello) ==
                 reference(json::array({1, "realm1",
                                        json::object({{"authid", "alice"},
                                                      {"authmethods", json::array({"cryptosign", "ticket"})},
-                                                     {"roles", json::object({{"caller", json::object()},
-                                                                             {"callee", json::object()},
-                                                                             {"publisher", json::object()},
-                                                                             {"subscriber", json::object()}})}})})));
+                                                     {"roles", json::object({{"caller", ppt_role},
+                                                                             {"callee", ppt_role},
+                                                                             {"publisher", ppt_role},
+                                                                             {"subscriber", ppt_role}})}})})));
         // minimal HELLO: no authid / authmethods, no roles
         REQUIRE(serialize_hello(HelloMessage{"r"}) ==
                 reference(json::array({1, "r", json::object({{"roles", json::object()}})})));
@@ -232,8 +233,8 @@ TEST_CASE("Session handshake messages produce the bytes nlohmann produced", "[cb
                 reference(json::array({2, 4242,
                                        json::object({{"authid", "alice"}, {"authrole", "user"},
                                                      {"authmethod", "cryptosign"},
-                                                     {"roles", json::object({{"broker", json::object()},
-                                                                             {"dealer", json::object()}})}})})));
+                                                     {"roles", json::object({{"broker", json::object({{"features", {{"payload_passthru_mode", true}}}})},
+                                                                             {"dealer", json::object({{"features", {{"payload_passthru_mode", true}}}})}})}})})));
     }
 
     SECTION("GOODBYE / ABORT / CHALLENGE / AUTHENTICATE") {

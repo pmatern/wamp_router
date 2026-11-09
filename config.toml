@@ -115,6 +115,8 @@ queue_size = 8192
 "user1" = "user"
 "admin" = { realm1 = "admin", realm2 = "user" }
 
+# Optional per role: ppt_schemes = ["x_protobuf"] limits Payload Passthru Mode (ppt_scheme) to those schemes;
+# without it any scheme is allowed.
 [[roles.user.rules]]
 uri = "com.example."
 match = "prefix"

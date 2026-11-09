@@ -70,6 +70,8 @@ public:
     std::vector<uint32_t> congested;
     // Sessions here that forwarded a CALL to another shard; their disconnect must cancel those calls there
     std::unordered_set<uint64_t> remote_callers;
+    // Sessions here that announced Payload Passthru Mode (ppt.hpp); only they get ppt_* events and invocations
+    std::unordered_set<uint64_t> ppt_sessions;
 
     // Counters the owning thread bumps and any thread may read (Router::stats())
     struct alignas(64) Counters {

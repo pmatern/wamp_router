@@ -282,6 +282,7 @@ wamp_router/
 │   ├── wamp_serializer.hpp   # CBOR serialization/deserialization
 │   ├── raw_socket.hpp        # RawSocket framing (4-byte header)
 │   ├── connection_limiter.hpp # ConnectionLimiter (total and per-address connection caps), open-file limit helpers
+│   ├── ppt.hpp               # Payload passthru mode helpers (ppt_* extraction/validation, feature name)
 │   ├── json.hpp              # JSON <-> CBOR streaming transcoders for wamp.2.json (edge of a JSON session)
 │   ├── base64.hpp / utf8.hpp # base64 (JSON binary strings, WebSocket accept key), UTF-8 validation
 │   ├── websocket.hpp         # WebSocket (RFC 6455): upgrade parsing, frame parser, frame encoding (wamp.2.cbor only)
@@ -308,6 +309,7 @@ wamp_router/
     ├── test_router.cpp
     ├── test_websocket.cpp
     ├── test_json.cpp
+    ├── test_ppt.cpp
     ├── test_logging.cpp
     ├── test_cpu_limits.cpp
     ├── test_cbor.cpp
@@ -376,6 +378,9 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 #### JSON (json.hpp)
 - The router core always works on CBOR. A JSON session converts at its edge: `core_payload()` (JSON text to CBOR on input), `to_wire()` / `ws_wrap()` (CBOR replies to JSON), and `session_writer` (queued shared frames to JSON text, per recipient). `jsoncodec::to_cbor` writes indefinite-length containers, which the CBOR reader accepts.
 - The value model (`WampValue` in `wamp_messages.hpp`) is lossless: null, bool, int64, double, string, bytes, list, dict, nested without limit except the 64-level depth cap.
+
+#### Payload passthru (ppt.hpp)
+- `ppt_*` PUBLISH/CALL options and a single binary argument are validated (`ppt::valid`) and forwarded as EVENT/INVOCATION/RESULT details; YIELD options are kept for this. A session announces `payload_passthru_mode` in its HELLO role features (`WampSession::ppt_`, registered in `Shard::ppt_sessions`); the router announces it in WELCOME. Subscribers/callees without it are skipped / refused (`wamp.error.feature_not_supported`). `[roles.<name>] ppt_schemes` restricts schemes (`Permissions::allows_ppt_scheme`).
 
 #### Router (router.hpp)
 - `Router(config, Transport::PLAIN|TLS, threads)` starts one acceptor thread and N worker threads, each with its own `io_context(1)` and `Shard`. The acceptor passes each accepted socket (as a native handle) to the shard with the fewest sessions; the TLS handshake and the whole session then run on that shard's thread. `main.cpp` uses it (`[server] threads`, default 1).
@@ -544,6 +549,7 @@ Tests use Catch2 framework with CTest integration:
 - **test_cbor.cpp**: Direct CBOR codec vs nlohmann (byte-identical output, decoding, malformed/fuzzed input)
 - **test_realms.cpp**: Realm isolation of topics and procedures
 - **test_crypto_utils.cpp**: Ed25519 signature verification and challenge generation
+- **test_ppt.cpp**: payload passthru (ppt_* validation, option round trips, EventTemplate details, role features); end-to-end passthru tests are in test_router.cpp
 - **test_json.cpp**: JSON <-> CBOR transcoding (spec vectors, errors, nesting limits, nlohmann oracle on random payloads, fuzz), UTF-8, base64; JSON end-to-end tests are in test_router.cpp
 - **test_websocket.cpp**: WebSocket upgrade parsing, frame parser (lengths, masking, fragmentation, violations, fuzz); end-to-end WebSocket tests live in test_router.cpp (`tests/ws_test_client.hpp` is the blocking test client)
 - **test_logging.cpp**: Async logger (slow sink does not stall the caller), shard tag on log lines

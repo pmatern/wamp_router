@@ -133,6 +133,9 @@ public:
     enum class Serializer { CBOR, JSON };
     void set_serializer(Serializer serializer) { json_ = serializer == Serializer::JSON; }
 
+    // Announce Payload Passthru Mode in HELLO (default true). Off, the router refuses ppt_* from and to this client.
+    void set_passthru(bool enabled) { passthru_ = enabled; }
+
     // Connect to WAMP router (unauthenticated)
     awaitable<void> connect(std::string host, uint16_t port, std::string realm) {
         co_await connect_with_auth(std::move(host), port, std::move(realm), std::nullopt, std::nullopt);
@@ -320,14 +323,15 @@ public:
     }
 
     // Publish with payload. exclude_me=false delivers the event to this client's own subscriptions too.
+    // `extra_options` are added to the PUBLISH options, e.g. ppt_scheme for Payload Passthru Mode.
     awaitable<uint64_t> publish(std::string topic, WampList args, WampDict args_kw = {},
-                                bool acknowledge = false, bool exclude_me = true) {
+                                bool acknowledge = false, bool exclude_me = true, WampDict extra_options = {}) {
         if (state_ != State::ESTABLISHED) {
             throw std::runtime_error("Not connected");
         }
 
         uint64_t request_id = next_request_id();
-        WampDict options;
+        WampDict options = std::move(extra_options);
         if (acknowledge) {
             options["acknowledge"] = acknowledge;
         }
@@ -416,14 +420,16 @@ public:
     }
 
     // Call a procedure and return the complete RESULT message (arguments and keyword arguments).
+    // `extra_options` are added to the CALL options, e.g. ppt_scheme for Payload Passthru Mode.
     awaitable<ResultMessage> call_result(std::string procedure, WampList args = {}, WampDict args_kw = {},
-                                         std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
+                                         std::chrono::milliseconds timeout = std::chrono::milliseconds{0},
+                                         WampDict extra_options = {}) {
         if (state_ != State::ESTABLISHED) {
             throw std::runtime_error("Not connected");
         }
 
         uint64_t request_id = next_request_id();
-        WampDict options;
+        WampDict options = std::move(extra_options);
         if (timeout.count() > 0) {
             options["timeout"] = static_cast<int64_t>(timeout.count());
         }
@@ -1131,7 +1137,7 @@ private:
     awaitable<void> send_hello() {
         spdlog::info("send_hello() called, preparing HELLO message");
 
-        HelloMessage hello = HelloMessage::create_client(realm_);
+        HelloMessage hello = HelloMessage::create_client(realm_, passthru_);
 
         // Add authentication info if provided
         if (authid_.has_value()) {
@@ -1355,6 +1361,7 @@ private:
     std::unordered_map<uint64_t, EventCallback> event_handlers_;
     std::unordered_map<std::string, uint64_t> topic_to_subscription_id_;
     std::unordered_map<uint64_t, InvocationHandler> invocation_handlers_;
+    bool passthru_{true};  // announce Payload Passthru Mode in HELLO
     std::unordered_map<uint64_t, std::shared_ptr<asio::cancellation_signal>> running_invocations_;
     std::unordered_map<std::string, uint64_t> uri_to_registration_id_;
 };

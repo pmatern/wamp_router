@@ -229,7 +229,8 @@ public:
                      registration->session_id, registration->registration_id);
 
         if (auto failure = start_call(realm.shard, *registration, caller_session_id, call.request_id,
-                                      call.arguments, call.arguments_kw, call_timeout(realm.shard, call), -1)) {
+                                      call.arguments, call.arguments_kw, ppt::extract(call.options),
+                                      call_timeout(realm.shard, call), -1)) {
             return rawsocket::create_wamp_message(serialize_error(*failure));
         }
 
@@ -247,7 +248,7 @@ public:
         } else {
             auto timeout = call.timeout_ms > 0 ? std::chrono::milliseconds{call.timeout_ms} : shard.call_timeout;
             failure = start_call(shard, *registration, call.caller_session, call.request_id, call.arguments,
-                                 call.arguments_kw, timeout, static_cast<int32_t>(call.caller_shard));
+                                 call.arguments_kw, call.ppt, timeout, static_cast<int32_t>(call.caller_shard));
         }
         if (failure) {
             auto frame = std::make_shared<std::vector<uint8_t>>(
@@ -285,10 +286,16 @@ public:
         spdlog::debug("Routing YIELD to caller session {} with original request_id={}",
                      caller_session_id, call_request_id);
 
-        // Forward arguments from YIELD to RESULT
-        auto result = ResultMessage{call_request_id, {}, yield_msg.arguments, yield_msg.arguments_kw};
-        auto result_cbor = serialize_result(result);
-        auto result_frame = rawsocket::create_wamp_message(result_cbor);
+        // Forward arguments from YIELD to RESULT; passthru options become RESULT details
+        std::vector<uint8_t> result_frame;
+        if (!yield_msg.options.empty() && !ppt::valid(yield_msg.options, yield_msg.arguments, yield_msg.arguments_kw)) {
+            spdlog::warn("YIELD from callee session {} has malformed passthru options or payload", callee_session_id);
+            result_frame = rawsocket::create_wamp_message(serialize_error(ErrorMessage::create_invalid_argument(
+                MessageType::CALL, call_request_id, "The callee's passthru payload is malformed")));
+        } else {
+            auto result = ResultMessage{call_request_id, yield_msg.options, yield_msg.arguments, yield_msg.arguments_kw};
+            result_frame = rawsocket::create_wamp_message(serialize_result(result));
+        }
 
         if (!deliver_to_caller(shard, *pending_call, std::move(result_frame))) {
             spdlog::error("Failed to send RESULT to caller session {} (channel full or closed)",
@@ -361,11 +368,16 @@ private:
     static std::optional<ErrorMessage> start_call(Shard& shard, const RegistrationInfo& registration,
                                                   uint64_t caller_session_id, uint64_t call_request_id,
                                                   const WampList& arguments, const WampDict& arguments_kw,
-                                                  std::chrono::milliseconds timeout, int32_t caller_shard) {
+                                                  const WampDict& ppt, std::chrono::milliseconds timeout,
+                                                  int32_t caller_shard) {
         const uint64_t callee_session_id = registration.session_id;
+        if (!ppt.empty() && !shard.ppt_sessions.contains(callee_session_id)) {
+            return ErrorMessage::create_feature_not_supported(
+                MessageType::CALL, call_request_id, "The callee does not support payload passthru mode");
+        }
         const uint64_t invocation_id = shard.ids.invocation.generate();
 
-        auto invocation = InvocationMessage{invocation_id, registration.registration_id, {}, arguments, arguments_kw};
+        auto invocation = InvocationMessage{invocation_id, registration.registration_id, ppt, arguments, arguments_kw};
         auto invocation_data = std::make_shared<std::vector<uint8_t>>(
             rawsocket::create_wamp_message(serialize_invocation(invocation)));
 
@@ -404,7 +416,7 @@ private:
         spdlog::debug("Forwarding CALL '{}' to shard {}", call.procedure, owner);
         const bool sent = shard.group->send_to(owner,
             CrossCall{realm.name, call.procedure, shard.index, caller_session_id, call.request_id,
-                      timeout_option(call), call.arguments, call.arguments_kw},
+                      timeout_option(call), ppt::extract(call.options), call.arguments, call.arguments_kw},
             shard.congested);
         if (!sent) {
             return rawsocket::create_wamp_message(serialize_error(

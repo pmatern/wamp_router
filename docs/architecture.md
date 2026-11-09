@@ -26,6 +26,8 @@ RawSocket and WebSocket (`wamp.2.cbor`) share one port. `WampSession` looks at t
 
 Serializers: a session speaks CBOR (`wamp.2.cbor`, RawSocket serializer 3) or JSON (`wamp.2.json`, serializer 1). The router core works in CBOR only; a JSON session converts at its edge (`include/json.hpp`): incoming JSON text is transcoded to CBOR before the normal handling, direct replies are transcoded on the way out, and `session_writer` transcodes each shared frame for its JSON recipient (the shared frames, `EventTemplate` and the cross-shard messages never change). A JSON delivery therefore costs about 0.9 µs more than a CBOR one.
 
+Payload passthru (`include/ppt.hpp`): `ppt_*` options travel as ordinary `details` of EVENT, INVOCATION and RESULT, so `EventTemplate`, `CrossPublish` (which also carries a `ppt` flag) and `CrossCall` (a `ppt` dict) need no new message types. Which sessions announced the feature is tracked per shard (`Shard::ppt_sessions`), so the check for a subscriber or callee happens on the shard that owns it, including for cross-shard deliveries.
+
 Everything inside the router (handlers, `EventTemplate`, cross-shard frames) builds RawSocket-framed messages, `[4-byte header][CBOR]`, shared as `shared_ptr<const vector>` between sessions and shards. A WebSocket session converts at the edge only: direct responses are re-wrapped as binary WebSocket frames in `WampSession`, and `session_writer` gathers a small unmasked WebSocket header followed by the shared payload (skipping the 4-byte RawSocket header), so event fan-out stays zero-copy for both transports. Consequence: a WebSocket message is limited to the same 16 MiB - 1 as a RawSocket frame.
 
 ### Connection limits

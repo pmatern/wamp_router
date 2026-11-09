@@ -66,6 +66,7 @@ public:
         Realm& realm = shard.realms.get(message.realm);
         realm.subscriptions.for_each_subscriber(message.topic,
             [&](uint64_t subscription_id, uint64_t subscriber_session) {
+                if (message.ppt && !shard.ppt_sessions.contains(subscriber_session)) return;
                 (void)shard.channels.deliver(subscriber_session,
                     EventToSend{subscriber_session, std::make_shared<std::vector<uint8_t>>(
                                                         message.event.frame_for(subscription_id))});
@@ -150,6 +151,10 @@ public:
             }
         }
 
+        // Passthru options travel as EVENT details, and only subscribers that announced the feature get the event
+        WampDict ppt = ppt::extract(publish.options);
+        const bool passthru = !ppt.empty();
+
         // Serialize the EVENT once; each subscriber only needs its subscription id stamped in
         std::optional<EventTemplate> event_template;
         size_t subscriber_count = 0;
@@ -162,9 +167,12 @@ public:
                 if (exclude_me && subscriber_session == session_id) {
                     return;
                 }
+                if (passthru && !realm.shard.ppt_sessions.contains(subscriber_session)) {
+                    return;
+                }
 
                 if (!event_template) {
-                    event_template.emplace(EventMessage{0, publication_id, {},
+                    event_template.emplace(EventMessage{0, publication_id, ppt,
                                                         publish.arguments, publish.arguments_kw});
                 }
 
@@ -189,8 +197,9 @@ public:
                 auto message = std::make_shared<const CrossPublish>(CrossPublish{
                     realm.name, publish.topic,
                     event_template ? *event_template
-                                   : EventTemplate{EventMessage{0, publication_id, {}, publish.arguments,
-                                                                publish.arguments_kw}}});
+                                   : EventTemplate{EventMessage{0, publication_id, ppt, publish.arguments,
+                                                                publish.arguments_kw}},
+                    passthru});
                 group->send(targets, message, realm.shard.congested);
                 subscriber_count += targets.size();
             }
