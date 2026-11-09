@@ -1140,6 +1140,18 @@ private:
                 return std::span<const uint8_t>(response_buffer_);
             }
 
+            case MessageType::CANCEL: {
+                spdlog::debug("Received CANCEL from caller");
+
+                auto cancel_result = deserialize_cancel(cbor_payload);
+                if (!cancel_result.has_value()) {
+                    return malformed("CANCEL");
+                }
+
+                ProcedureHandler::handle_cancel(shard_, *cancel_result, session_id_);
+                return std::span<const uint8_t>{};
+            }
+
             case MessageType::YIELD: {
                 spdlog::debug("Received YIELD from callee");
 

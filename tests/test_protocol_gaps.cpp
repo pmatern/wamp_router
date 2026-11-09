@@ -526,3 +526,124 @@ TEST_CASE("Unanswered calls time out", "[protocol][rpc][timeout]") {
         REQUIRE(ProcedureHandler::expire_calls(test_shard(), steady_clock::now() + 1s) == 0);
     }
 }
+
+TEST_CASE("CANCEL stops a pending call in the three modes", "[protocol][rpc][cancel]") {
+    Sessions s;
+    auto ch_callee = s.add(910051);
+    auto ch_caller = s.add(910052);
+    REQUIRE(ProcedureHandler::handle_register(kRealm(), RegisterMessage{1, {}, "proto.cancel"}, 910051).has_value());
+    auto cancel = [](uint64_t request_id, const char* mode) {
+        WampDict options;
+        if (mode != nullptr) options["mode"] = std::string{mode};
+        return CancelMessage{request_id, options};
+    };
+    auto start = [&](uint64_t request_id) {
+        REQUIRE(ProcedureHandler::handle_call(kRealm(), CallMessage{request_id, {}, "proto.cancel"}, 910052).has_value());
+        auto invocation = deserialize_invocation(payload_of(pop_frame(*ch_callee)));
+        REQUIRE(invocation.has_value());
+        return invocation->request_id;
+    };
+    auto expect_canceled = [&](uint64_t request_id) {
+        auto err = deserialize_error(payload_of(pop_frame(*ch_caller)));
+        REQUIRE(err.has_value());
+        REQUIRE(err->request_type == MessageType::CALL);
+        REQUIRE(err->request_id == request_id);
+        REQUIRE(err->error_uri == "wamp.error.canceled");
+    };
+
+    SECTION("skip (the default): the caller gets the error, the callee is not told, its answer is dropped") {
+        const auto invocation_id = start(70);
+        ProcedureHandler::handle_cancel(test_shard(), cancel(70, nullptr), 910052);
+        expect_canceled(70);
+        REQUIRE(pop_frame(*ch_callee).empty());
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation_id, {}}, 910051);
+        REQUIRE(pop_frame(*ch_caller).empty());
+    }
+
+    SECTION("killnowait: the caller gets the error and the callee is interrupted") {
+        const auto invocation_id = start(71);
+        ProcedureHandler::handle_cancel(test_shard(), cancel(71, "killnowait"), 910052);
+        expect_canceled(71);
+        auto interrupt = deserialize_interrupt(payload_of(pop_frame(*ch_callee)));
+        REQUIRE(interrupt.has_value());
+        REQUIRE(interrupt->request_id == invocation_id);
+        REQUIRE(std::get<std::string>(interrupt->options.at("mode")) == "killnowait");
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation_id, {}}, 910051);
+        REQUIRE(pop_frame(*ch_caller).empty());
+    }
+
+    SECTION("kill: the callee is interrupted and its answer reaches the caller") {
+        const auto invocation_id = start(72);
+        ProcedureHandler::handle_cancel(test_shard(), cancel(72, "kill"), 910052);
+        REQUIRE(pop_frame(*ch_caller).empty());   // nothing yet
+        auto interrupt = deserialize_interrupt(payload_of(pop_frame(*ch_callee)));
+        REQUIRE(interrupt.has_value());
+        REQUIRE(std::get<std::string>(interrupt->options.at("mode")) == "kill");
+
+        auto error = ErrorMessage::create_canceled(invocation_id, "stopped");
+        REQUIRE(ProcedureHandler::handle_invocation_error(test_shard(), error, 910051).has_value());
+        expect_canceled(72);
+    }
+
+    SECTION("unknown modes mean skip; unknown, finished and foreign calls are ignored") {
+        const auto invocation_id = start(73);
+        ProcedureHandler::handle_cancel(test_shard(), cancel(999, "kill"), 910052);   // never existed
+        ProcedureHandler::handle_cancel(test_shard(), cancel(73, "kill"), 910099);    // someone else's session
+        REQUIRE(pop_frame(*ch_callee).empty());
+        REQUIRE(pop_frame(*ch_caller).empty());
+
+        ProcedureHandler::handle_cancel(test_shard(), cancel(73, "bogus"), 910052);
+        expect_canceled(73);
+        REQUIRE(pop_frame(*ch_callee).empty());
+
+        ProcedureHandler::handle_cancel(test_shard(), cancel(73, nullptr), 910052);   // already canceled
+        REQUIRE(pop_frame(*ch_caller).empty());
+        (void)invocation_id;
+    }
+
+    SECTION("a call that was answered cannot be canceled") {
+        const auto invocation_id = start(74);
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation_id, {}}, 910051);
+        REQUIRE(deserialize_result(payload_of(pop_frame(*ch_caller))).has_value());
+        ProcedureHandler::handle_cancel(test_shard(), cancel(74, "kill"), 910052);
+        REQUIRE(pop_frame(*ch_callee).empty());
+        REQUIRE(pop_frame(*ch_caller).empty());
+    }
+}
+
+TEST_CASE("CANCEL round-trips", "[protocol][serializer]") {
+    auto msg = deserialize_cancel(serialize_cancel(CancelMessage{12, {{"mode", std::string{"kill"}}}}));
+    REQUIRE(msg.has_value());
+    REQUIRE(msg->request_id == 12);
+    REQUIRE(std::get<std::string>(msg->options.at("mode")) == "kill");
+    auto no_options = deserialize_cancel(serialize_cancel(CancelMessage{13}));
+    REQUIRE(no_options.has_value());
+    REQUIRE(no_options->options.empty());
+}
+
+TEST_CASE("InvocationTracker finds calls by caller session and request id, through every removal path", "[protocol][rpc][cancel]") {
+    InvocationTracker tracker{3};
+    tracker.track(PendingCall{1, 100, 10, 200});
+    tracker.track(PendingCall{2, 100, 11, 200});
+    tracker.track(PendingCall{3, 101, 10, 201});
+    REQUIRE(tracker.find_by_call(100, 10)->invocation_id == 1);
+    REQUIRE(tracker.find_by_call(101, 10)->invocation_id == 3);   // same request id, other session
+    REQUIRE_FALSE(tracker.find_by_call(100, 12).has_value());
+
+    tracker.track(PendingCall{4, 102, 10, 200});                   // evicts the oldest (invocation 1)
+    REQUIRE_FALSE(tracker.find_by_call(100, 10).has_value());
+
+    REQUIRE(tracker.retrieve(2).has_value());
+    REQUIRE_FALSE(tracker.find_by_call(100, 11).has_value());
+
+    (void)tracker.remove_caller_session(101);
+    REQUIRE_FALSE(tracker.find_by_call(101, 10).has_value());
+    (void)tracker.remove_callee_session(200);
+    REQUIRE_FALSE(tracker.find_by_call(102, 10).has_value());
+    REQUIRE(tracker.pending_count() == 0);
+
+    tracker.track(PendingCall{5, 103, 10, 200, std::chrono::steady_clock::now()});
+    REQUIRE(tracker.find_by_call(103, 10).has_value());
+    REQUIRE(tracker.remove_expired(std::chrono::steady_clock::now() + std::chrono::seconds{1}).size() == 1);
+    REQUIRE_FALSE(tracker.find_by_call(103, 10).has_value());
+}

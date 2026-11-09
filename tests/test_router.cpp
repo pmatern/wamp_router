@@ -1746,3 +1746,67 @@ TEST_CASE("Passthru is refused when the peers did not announce it", "[router][pp
     CHECK(no_support_caller == "wamp.error.feature_not_supported");
     CHECK(malformed == "wamp.error.invalid_argument");
 }
+
+// ----------------------------------------------------------------------------
+// Call canceling
+// ----------------------------------------------------------------------------
+
+TEST_CASE("CANCEL works in every mode, also when the callee is on another shard", "[router][cancel][crossshard]") {
+    for (const unsigned threads : {1u, 2u}) {
+        INFO(std::to_string(threads) + " thread(s)");
+        Router router{plain_config(), Router::Transport::PLAIN, threads};
+        router.start();
+
+        asio::io_context io;
+        WampClient callee{io};
+        WampClient caller{io};
+        std::atomic<int> interrupted{0};
+        int started = 0;
+        std::map<std::string, std::string> outcome;  // mode -> error uri the caller saw
+        bool done = false;
+
+        co_spawn(io, [&]() -> awaitable<void> {
+            co_await callee.connect("127.0.0.1", router.port(), "test.realm");
+            co_await caller.connect("127.0.0.1", router.port(), "test.realm");
+
+            (void)co_await callee.register_procedure("cancel.hang",
+                [&](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                    ++started;
+                    asio::steady_timer timer{io};
+                    timer.expires_after(60s);
+                    auto [ec] = co_await timer.async_wait(asio::as_tuple(use_awaitable));
+                    if (ec) ++interrupted;   // the client cancels the handler's wait on INTERRUPT
+                    co_return YieldMessage{inv.request_id, {}};
+                });
+
+            struct Case { const char* name; WampClient::CancelMode mode; };
+            for (const auto& c : {Case{"skip", WampClient::CancelMode::SKIP},
+                                  Case{"killnowait", WampClient::CancelMode::KILLNOWAIT},
+                                  Case{"kill", WampClient::CancelMode::KILL}}) {
+                const int before = started;
+                auto call = co_await caller.start_call("cancel.hang");
+                for (int i = 0; i < 100 && started == before; ++i) co_await pause(io, 20ms);
+                co_await caller.cancel_call(call, c.mode);
+                try {
+                    (void)co_await caller.await_call(call);
+                    outcome[c.name] = "result";
+                } catch (const WampException& e) {
+                    outcome[c.name] = e.error_uri;
+                }
+            }
+            for (int i = 0; i < 100 && interrupted < 2; ++i) co_await pause(io, 20ms);
+            co_await caller.disconnect();
+            co_await callee.disconnect();
+            done = true;
+        }, detached);
+        io.run_for(20s);
+
+        REQUIRE(done);
+        CHECK(outcome["skip"] == "wamp.error.canceled");
+        CHECK(outcome["killnowait"] == "wamp.error.canceled");
+        // kill waits for the callee's own answer; the client's handler returns a YIELD when interrupted, so the
+        // caller sees a result or the canceled error depending on the callee; either way it is not left hanging
+        CHECK_FALSE(outcome["kill"].empty());
+        CHECK(interrupted >= 2);   // killnowait and kill interrupted the callee, skip did not
+    }
+}

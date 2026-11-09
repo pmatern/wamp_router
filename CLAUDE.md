@@ -379,6 +379,9 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 - The router core always works on CBOR. A JSON session converts at its edge: `core_payload()` (JSON text to CBOR on input), `to_wire()` / `ws_wrap()` (CBOR replies to JSON), and `session_writer` (queued shared frames to JSON text, per recipient). `jsoncodec::to_cbor` writes indefinite-length containers, which the CBOR reader accepts.
 - The value model (`WampValue` in `wamp_messages.hpp`) is lossless: null, bool, int64, double, string, bytes, list, dict, nested without limit except the 64-level depth cap.
 
+#### Call canceling
+- `CANCEL` (caller) is handled by `ProcedureHandler::handle_cancel`: it finds the call through `InvocationTracker::find_by_call` (index by caller session + request id) and applies `skip`, `killnowait` or `kill`; for a callee on another shard it sends `CrossCancelCall` to the other shards, and the one holding the call answers the caller with a `CrossFrame`. The dealer announces `call_canceling`.
+
 #### Payload passthru (ppt.hpp)
 - `ppt_*` PUBLISH/CALL options and a single binary argument are validated (`ppt::valid`) and forwarded as EVENT/INVOCATION/RESULT details; YIELD options are kept for this. A session announces `payload_passthru_mode` in its HELLO role features (`WampSession::ppt_`, registered in `Shard::ppt_sessions`); the router announces it in WELCOME. Subscribers/callees without it are skipped / refused (`wamp.error.feature_not_supported`). `[roles.<name>] ppt_schemes` restricts schemes (`Permissions::allows_ppt_scheme`).
 

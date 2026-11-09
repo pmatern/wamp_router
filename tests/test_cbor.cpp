@@ -215,7 +215,7 @@ TEST_CASE("Session handshake messages produce the bytes nlohmann produced", "[cb
                 reference(json::array({1, "realm1",
                                        json::object({{"authid", "alice"},
                                                      {"authmethods", json::array({"cryptosign", "ticket"})},
-                                                     {"roles", json::object({{"caller", ppt_role},
+                                                     {"roles", json::object({{"caller", json::object({{"features", json::object({{"call_canceling", true}, {"payload_passthru_mode", true}})}})},
                                                                              {"callee", ppt_role},
                                                                              {"publisher", ppt_role},
                                                                              {"subscriber", ppt_role}})}})})));
@@ -234,7 +234,7 @@ TEST_CASE("Session handshake messages produce the bytes nlohmann produced", "[cb
                                        json::object({{"authid", "alice"}, {"authrole", "user"},
                                                      {"authmethod", "cryptosign"},
                                                      {"roles", json::object({{"broker", json::object({{"features", {{"payload_passthru_mode", true}}}})},
-                                                                             {"dealer", json::object({{"features", {{"payload_passthru_mode", true}}}})}})}})})));
+                                                                             {"dealer", json::object({{"features", {{"call_canceling", true}, {"payload_passthru_mode", true}}}})}})}})})));
     }
 
     SECTION("GOODBYE / ABORT / CHALLENGE / AUTHENTICATE") {

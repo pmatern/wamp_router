@@ -974,6 +974,23 @@ deserialize_unregistered(const std::vector<uint8_t>& cbor_data) {
     });
 }
 
+// Format: [49, CALL.Request|id, Options|dict]
+inline std::vector<uint8_t> serialize_cancel(const CancelMessage& msg) {
+    std::vector<uint8_t> out;
+    auto w = fast::begin(out, MessageType::CANCEL, 3);
+    w.write_uint(msg.request_id);
+    fast::write_dict(w, msg.options);
+    return out;
+}
+
+inline std::expected<CancelMessage, std::error_code>
+deserialize_cancel(const std::vector<uint8_t>& cbor_data) {
+    return fast::decode<CancelMessage>(cbor_data, MessageType::CANCEL, 2, "CANCEL", [](fast::Fields& f) {
+        const auto request_id = f.uint64();
+        return CancelMessage{request_id, f.dict()};
+    });
+}
+
 // Format: [69, INVOCATION.Request|id, Options|dict]
 inline std::vector<uint8_t> serialize_interrupt(const InterruptMessage& msg) {
     std::vector<uint8_t> out;

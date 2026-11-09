@@ -12,7 +12,7 @@ This router acts as the central message broker, routing messages between clients
 
 ## Features
 
-- **RPC Support**: Full `CALL`, `REGISTER`, `YIELD`, `INVOCATION`, `RESULT` workflow
+- **RPC Support**: Full `CALL`, `REGISTER`, `YIELD`, `INVOCATION`, `RESULT` workflow, with call timeouts and call canceling (`CANCEL`, modes `skip`, `kill`, `killnowait`)
 - **PubSub Support**: `SUBSCRIBE`, `PUBLISH`, `EVENT` messaging
 - **RawSocket and WebSocket Transport**: both on the same port, told apart by the first byte of the connection
 - **CBOR and JSON serializers**: `wamp.2.cbor` and `wamp.2.json` over WebSocket, serializers 3 and 1 over RawSocket; sessions with different serializers talk to each other (MessagePack is not supported yet)
@@ -280,6 +280,16 @@ A client opens a normal WebSocket connection (`ws://` or, with TLS, `wss://`; an
 - JSON numbers above 2^53 lose precision in JavaScript clients; the router passes them through exactly.
 - Cost: converting a 10-argument message takes about 0.9 µs (CBOR to JSON) and 1.0 µs (JSON to CBOR) on the machine used for the other micro-benchmarks, per message per JSON session. A JSON subscriber therefore costs more per delivered event than a CBOR one (60 ns with the stamped template); in the in-process load test with 10 subscribers JSON fan-out ran at about 75% of the CBOR rate and JSON RPC at 82%, with the client's own conversion included.
 - Tested with Autobahn|Python over `wss://` and `rss://` with `JsonSerializer` and Cryptosign, including floats, `None`, nested containers and bytes.
+
+### Call canceling
+
+A caller can send `CANCEL` for a call it is waiting on (`call_canceling` is announced in WELCOME). The `mode` option decides what happens:
+
+- **`skip`** (default): the caller gets `wamp.error.canceled` at once; the callee is not told, and its answer, when it comes, is dropped.
+- **`killnowait`**: as `skip`, and the callee gets an INTERRUPT (mode `killnowait`).
+- **`kill`**: the callee gets an INTERRUPT (mode `kill`) and its answer is the call's answer, usually `wamp.error.canceled`. If the callee never answers, only the call timeout ends the call.
+
+A call that is no longer pending (answered, timed out, unknown, or another session's) is ignored, as the spec says. When the callee lives on another shard the CANCEL is forwarded to the shards that could hold the call (only if the session has a call outstanding on another shard). `WampClient::start_call()`, `cancel_call()` and `await_call()` drive it from C++.
 
 ### Payload passthru
 

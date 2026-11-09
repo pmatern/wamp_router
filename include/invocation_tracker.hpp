@@ -64,19 +64,32 @@ public:
         if (map_it != invocation_map_.end()) {
             // Already exists - move to front (most recent)
             lru_list_.splice(lru_list_.begin(), lru_list_, map_it->second);
+            by_call_.erase(CallKey{map_it->second->second.caller_session_id, map_it->second->second.call_request_id});
             map_it->second->second = call_info;
+            by_call_[CallKey{call_info.caller_session_id, call_info.call_request_id}] = invocation_id;
             return;
         }
 
         if (lru_list_.size() >= max_pending_calls_) {
             // Evict oldest (back of list)
             auto& oldest = lru_list_.back();
+            forget(oldest.second);
             invocation_map_.erase(oldest.first);
             lru_list_.pop_back();
         }
 
         lru_list_.emplace_front(invocation_id, call_info);
         invocation_map_[invocation_id] = lru_list_.begin();
+        by_call_[CallKey{call_info.caller_session_id, call_info.call_request_id}] = invocation_id;
+    }
+
+    // The pending call a caller session started with CALL request id `call_request_id` (kept pending)
+    [[nodiscard]] std::optional<PendingCall> find_by_call(uint64_t caller_session_id, uint64_t call_request_id) const {
+        const auto it = by_call_.find(CallKey{caller_session_id, call_request_id});
+        if (it == by_call_.end()) return std::nullopt;
+        const auto map_it = invocation_map_.find(it->second);
+        if (map_it == invocation_map_.end()) return std::nullopt;
+        return map_it->second->second;
     }
 
     // Retrieve and remove invocation info (called when YIELD received)
@@ -90,6 +103,7 @@ public:
         auto list_it = map_it->second;
         PendingCall info = list_it->second;
 
+        forget(info);
         lru_list_.erase(list_it);
         invocation_map_.erase(map_it);
 
@@ -103,6 +117,7 @@ public:
         while (it != lru_list_.end()) {
             if (it->second.caller_session_id == caller_session_id) {
                 removed.push_back(it->second);
+                forget(it->second);
                 invocation_map_.erase(it->first);
                 it = lru_list_.erase(it);
             } else {
@@ -119,6 +134,7 @@ public:
         while (it != lru_list_.end()) {
             if (it->second.callee_session_id == callee_session_id) {
                 removed.push_back(it->second);
+                forget(it->second);
                 invocation_map_.erase(it->first);
                 it = lru_list_.erase(it);
             } else {
@@ -135,6 +151,7 @@ public:
         while (it != lru_list_.end()) {
             if (it->second.deadline <= now) {
                 removed.push_back(it->second);
+                forget(it->second);
                 invocation_map_.erase(it->first);
                 it = lru_list_.erase(it);
             } else {
@@ -153,6 +170,19 @@ public:
     }
 
 private:
+    // (caller session, CALL request id): how CANCEL finds its call without scanning the list
+    struct CallKey {
+        uint64_t session;
+        uint64_t request;
+        bool operator==(const CallKey&) const = default;
+    };
+    struct CallKeyHash {
+        size_t operator()(const CallKey& key) const noexcept {
+            return std::hash<uint64_t>{}(key.session * 0x9E3779B97F4A7C15ull ^ key.request);
+        }
+    };
+    void forget(const PendingCall& call) { by_call_.erase(CallKey{call.caller_session_id, call.call_request_id}); }
+
     size_t max_pending_calls_;
 
     // LRU list: front = most recent, back = oldest
@@ -160,6 +190,7 @@ private:
     std::list<std::pair<uint64_t, PendingCall>> lru_list_;
 
     std::unordered_map<uint64_t, decltype(lru_list_)::iterator> invocation_map_;
+    std::unordered_map<CallKey, uint64_t, CallKeyHash> by_call_;  // -> invocation_id
 };
 
 } // namespace wamp

@@ -45,6 +45,7 @@ enum class MessageType : uint8_t {
     UNSUBSCRIBED = 35,
     EVENT = 36,
     CALL = 48,
+    CANCEL = 49,
     RESULT = 50,
     REGISTER = 64,
     REGISTERED = 65,
@@ -169,7 +170,9 @@ struct HelloMessage {
         // Add basic client roles
         WampDict features;
         if (passthru) features["payload_passthru_mode"] = true;
-        msg.roles.push_back(Role{"caller", features});
+        WampDict caller_features = features;
+        caller_features["call_canceling"] = true;
+        msg.roles.push_back(Role{"caller", caller_features});
         msg.roles.push_back(Role{"callee", features});
         msg.roles.push_back(Role{"publisher", features});
         msg.roles.push_back(Role{"subscriber", features});
@@ -223,7 +226,7 @@ struct WelcomeMessage {
 
         // Add basic router roles
         msg.roles.push_back(Role{"broker", WampDict{{"payload_passthru_mode", true}}});
-        msg.roles.push_back(Role{"dealer", WampDict{{"payload_passthru_mode", true}}});
+        msg.roles.push_back(Role{"dealer", WampDict{{"payload_passthru_mode", true}, {"call_canceling", true}}});
 
         return msg;
     }
@@ -625,6 +628,20 @@ struct UnregisteredMessage {
 };
 
 // ============================================================================
+// CANCEL Message: [49, CALL.Request|id, Options|dict]
+// ============================================================================
+// Caller -> router: stop waiting for a call. Options "mode": "skip" (default), "kill" or "killnowait".
+struct CancelMessage {
+    static constexpr MessageType TYPE = MessageType::CANCEL;
+
+    uint64_t request_id{};  // The CALL request id
+    WampDict options{};
+
+    CancelMessage(uint64_t req_id, WampDict opts = {})
+        : request_id(req_id), options(std::move(opts)) {}
+};
+
+// ============================================================================
 // INTERRUPT Message: [69, INVOCATION.Request|id, Options|dict]
 // ============================================================================
 // Router -> callee: stop working on an invocation (the call timed out or was canceled)
@@ -694,6 +711,13 @@ struct ErrorMessage {
         return ErrorMessage{request_type, request_id, details, "wamp.error.not_authorized"};
     }
 
+    // The caller's CALL was canceled (CANCEL)
+    static ErrorMessage create_call_canceled(uint64_t call_request_id, const std::string& reason) {
+        WampDict details;
+        details["message"] = reason;
+        return ErrorMessage{MessageType::CALL, call_request_id, details, "wamp.error.canceled"};
+    }
+
     static ErrorMessage create_canceled(uint64_t request_type_request_id, const std::string& reason) {
         WampDict details;
         details["message"] = reason;
@@ -750,6 +774,7 @@ using WampMessage = std::variant<
     UnsubscribedMessage,
     UnregisterMessage,
     UnregisteredMessage,
+    CancelMessage,
     InterruptMessage,
     ErrorMessage
 >;

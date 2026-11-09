@@ -76,7 +76,16 @@ struct CrossCancel {
     uint64_t caller_session{};
 };
 
-using CrossMessage = std::variant<CrossPublishPtr, CrossCall, CrossFrame, CrossCancel>;
+// A caller sent CANCEL for a call that is not pending on its own shard: the shard that holds the pending call
+// applies the cancellation mode and answers the caller with a CrossFrame
+struct CrossCancelCall {
+    uint32_t caller_shard{};
+    uint64_t caller_session{};
+    uint64_t request_id{};  // the caller's CALL request id
+    std::string mode;       // "skip", "kill" or "killnowait"
+};
+
+using CrossMessage = std::variant<CrossPublishPtr, CrossCall, CrossFrame, CrossCancel, CrossCancelCall>;
 
 // ============================================================================
 // ShardGroup - how shards of one Router reach each other

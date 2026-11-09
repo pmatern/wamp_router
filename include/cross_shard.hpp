@@ -31,6 +31,8 @@ inline asio::awaitable<void> dispatch_cross_messages(Shard& shard, std::vector<C
             PubSubHandler::deliver_remote(shard, **publish);
         } else if (auto* call = std::get_if<CrossCall>(&message)) {
             ProcedureHandler::accept_remote_call(shard, std::move(*call));
+        } else if (auto* cancel_call = std::get_if<CrossCancelCall>(&message)) {
+            ProcedureHandler::accept_remote_cancel(shard, *cancel_call);
         } else if (auto* cancel = std::get_if<CrossCancel>(&message)) {
             ProcedureHandler::cancel_caller(shard, cancel->caller_session);
         } else if (auto* frame = std::get_if<CrossFrame>(&message)) {

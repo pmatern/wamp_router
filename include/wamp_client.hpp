@@ -84,7 +84,7 @@ concept ClientMessage = std::same_as<M, SubscribeMessage> || std::same_as<M, Uns
                         std::same_as<M, UnregisterMessage> || std::same_as<M, PublishMessage> ||
                         std::same_as<M, RegisterMessage> || std::same_as<M, CallMessage> ||
                         std::same_as<M, YieldMessage> || std::same_as<M, ErrorMessage> ||
-                        std::same_as<M, GoodbyeMessage>;
+                        std::same_as<M, GoodbyeMessage> || std::same_as<M, CancelMessage>;
 
 // Callback types for client
 using EventCallback = std::function<void(const EventMessage&)>;
@@ -428,21 +428,53 @@ public:
             throw std::runtime_error("Not connected");
         }
 
+        auto call = co_await start_call(procedure, std::move(args), std::move(args_kw), timeout,
+                                        std::move(extra_options));
+        auto result = co_await await_call(call);
+        spdlog::debug("Received RESULT for call to '{}'", procedure);
+        co_return result;
+    }
+
+    // A call that has been sent and not answered yet; await_call() waits for the answer
+    struct StartedCall {
+        uint64_t request_id{};
+        std::shared_ptr<ReplyChannel<ResultMessage>> channel;
+    };
+
+    // Sends a CALL without waiting for the answer, so the caller can cancel it meanwhile (cancel_call).
+    awaitable<StartedCall> start_call(std::string procedure, WampList args = {}, WampDict args_kw = {},
+                                      std::chrono::milliseconds timeout = std::chrono::milliseconds{0},
+                                      WampDict extra_options = {}) {
+        if (state_ != State::ESTABLISHED) {
+            throw std::runtime_error("Not connected");
+        }
+
         uint64_t request_id = next_request_id();
         WampDict options = std::move(extra_options);
         if (timeout.count() > 0) {
             options["timeout"] = static_cast<int64_t>(timeout.count());
         }
-        CallMessage msg{request_id, std::move(options), procedure, std::move(args), std::move(args_kw)};
+        CallMessage msg{request_id, std::move(options), std::move(procedure), std::move(args), std::move(args_kw)};
 
         auto channel = std::make_shared<ResultChannel>(io_, 1);
         pending_calls_[request_id] = channel;
 
         co_await send_wamp_message(msg);
+        co_return StartedCall{request_id, std::move(channel)};
+    }
 
-        auto result = co_await await_reply<ResultMessage>(channel, request_id, "RESULT");
-        spdlog::debug("Received RESULT for call to '{}'", procedure);
-        co_return result;
+    // The RESULT of a started call; throws WampException if the answer is an ERROR (wamp.error.canceled after a cancel).
+    awaitable<ResultMessage> await_call(const StartedCall& call) {
+        co_return co_await await_reply<ResultMessage>(call.channel, call.request_id, "RESULT");
+    }
+
+    // Asks the router to stop the call. skip: the call fails with wamp.error.canceled at once and the callee is not
+    // told; killnowait: same, and the callee is interrupted; kill: the callee is interrupted and its answer is the
+    // call's answer.
+    enum class CancelMode { SKIP, KILL, KILLNOWAIT };
+    awaitable<void> cancel_call(const StartedCall& call, CancelMode mode = CancelMode::SKIP) {
+        const char* name = mode == CancelMode::KILL ? "kill" : mode == CancelMode::KILLNOWAIT ? "killnowait" : "skip";
+        co_await send_wamp_message(CancelMessage{call.request_id, WampDict{{"mode", std::string{name}}}});
     }
 
 private:
@@ -1217,6 +1249,8 @@ private:
             cbor_payload = serialize_error(msg);
         } else if constexpr (std::is_same_v<Msg, GoodbyeMessage>) {
             cbor_payload = serialize_goodbye(msg);
+        } else if constexpr (std::is_same_v<Msg, CancelMessage>) {
+            cbor_payload = serialize_cancel(msg);
         } else {
             static_assert(sizeof(Msg) == 0, "Unsupported message type");
         }

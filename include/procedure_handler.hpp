@@ -69,13 +69,42 @@ public:
     }
 
     // Tell the callee to stop working on a call nobody waits for any more
-    static void interrupt_callee(Shard& shard, const PendingCall& pending) {
+    static void interrupt_callee(Shard& shard, const PendingCall& pending, const char* mode = "killnowait") {
         if (pending.callee_session_id == 0) return;
-        auto interrupt = InterruptMessage{pending.invocation_id, {{"mode", std::string{"killnowait"}}}};
+        auto interrupt = InterruptMessage{pending.invocation_id, {{"mode", std::string{mode}}}};
         auto idata = std::make_shared<std::vector<uint8_t>>(
             rawsocket::create_wamp_message(serialize_interrupt(interrupt)));
         (void)shard.channels.deliver(pending.callee_session_id,
             EventToSend{pending.callee_session_id, idata}, /*may_defer=*/false);
+    }
+
+    // The caller sent CANCEL for its CALL `cancel.request_id`. Modes (WAMP call canceling):
+    //   skip       the caller gets wamp.error.canceled now, the callee is not told (its answer is dropped)
+    //   killnowait the caller gets wamp.error.canceled now, the callee is interrupted (its answer is dropped)
+    //   kill       the callee is interrupted and the caller gets whatever the callee answers
+    // A call that is not pending (finished already, or never existed) is ignored, as the spec says.
+    static void handle_cancel(Shard& shard, const CancelMessage& cancel, uint64_t caller_session_id) {
+        const std::string mode = cancel_mode(cancel);
+        if (auto pending = shard.invocations.find_by_call(caller_session_id, cancel.request_id)) {
+            apply_cancel(shard, *pending, mode);
+            return;
+        }
+        // The call may be pending on the callee's shard
+        if (shard.group && shard.remote_callers.contains(caller_session_id)) {
+            std::vector<uint32_t> ignored;
+            for (uint32_t to = 0; to < shard.group->size(); ++to) {
+                if (to == shard.index) continue;
+                (void)shard.group->send_to(
+                    to, CrossCancelCall{shard.index, caller_session_id, cancel.request_id, mode}, ignored);
+            }
+        }
+    }
+
+    // Runs on the callee's shard: a CANCEL forwarded from the caller's shard
+    static void accept_remote_cancel(Shard& shard, const CrossCancelCall& cancel) {
+        auto pending = shard.invocations.find_by_call(cancel.caller_session, cancel.request_id);
+        if (!pending || pending->caller_shard != static_cast<int32_t>(cancel.caller_shard)) return;
+        apply_cancel(shard, *pending, cancel.mode);
     }
 
     // A caller disconnected: forget its pending calls and interrupt their callees
@@ -350,6 +379,30 @@ public:
         return std::vector<uint8_t>{};
     }
 private:
+    // The CANCEL "mode" option; anything but "kill" and "killnowait" means "skip"
+    static std::string cancel_mode(const CancelMessage& cancel) {
+        if (auto it = cancel.options.find("mode"); it != cancel.options.end()) {
+            if (const auto* mode = std::get_if<std::string>(&it->second);
+                mode && (*mode == "kill" || *mode == "killnowait")) {
+                return *mode;
+            }
+        }
+        return "skip";
+    }
+
+    static void apply_cancel(Shard& shard, const PendingCall& pending, const std::string& mode) {
+        if (mode == "kill") {
+            // The callee's answer (usually wamp.error.canceled) is forwarded to the caller as for any call
+            interrupt_callee(shard, pending, "kill");
+            return;
+        }
+        (void)shard.invocations.retrieve(pending.invocation_id);
+        if (mode == "killnowait") interrupt_callee(shard, pending, "killnowait");
+        auto frame = rawsocket::create_wamp_message(serialize_error(
+            ErrorMessage::create_call_canceled(pending.call_request_id, "Call canceled by the caller")));
+        (void)deliver_to_caller(shard, pending, std::move(frame), /*may_defer=*/false);
+    }
+
     // The CALL's "timeout" option in milliseconds, 0 if absent
     static int64_t timeout_option(const CallMessage& call) {
         if (auto it = call.options.find("timeout"); it != call.options.end()) {
