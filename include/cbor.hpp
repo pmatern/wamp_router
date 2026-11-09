@@ -82,6 +82,11 @@ public:
         }
     }
 
+    // Indefinite-length containers: items follow, then write_break(). Used when the item count is not known yet.
+    void begin_indefinite_array() { out_.push_back(0x9F); }
+    void begin_indefinite_map() { out_.push_back(0xBF); }
+    void write_break() { out_.push_back(0xFF); }
+
     // Appends bytes that are already encoded CBOR
     void write_raw(std::span<const uint8_t> encoded) { out_.insert(out_.end(), encoded.begin(), encoded.end()); }
 

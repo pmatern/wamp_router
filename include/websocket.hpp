@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "base64.hpp"
 #include <openssl/evp.h>
 #include <algorithm>
 #include <array>
@@ -59,32 +60,7 @@ inline constexpr uint16_t kCloseTooBig = 1009;
 // Handshake helpers
 // ----------------------------------------------------------------------------
 
-inline std::string base64_encode(std::span<const uint8_t> in) {
-    static constexpr char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve((in.size() + 2) / 3 * 4);
-    size_t i = 0;
-    for (; i + 2 < in.size(); i += 3) {
-        const uint32_t v = (uint32_t{in[i]} << 16) | (uint32_t{in[i + 1]} << 8) | in[i + 2];
-        out += kAlphabet[(v >> 18) & 63];
-        out += kAlphabet[(v >> 12) & 63];
-        out += kAlphabet[(v >> 6) & 63];
-        out += kAlphabet[v & 63];
-    }
-    if (const size_t rest = in.size() - i; rest == 1) {
-        const uint32_t v = uint32_t{in[i]} << 16;
-        out += kAlphabet[(v >> 18) & 63];
-        out += kAlphabet[(v >> 12) & 63];
-        out += "==";
-    } else if (rest == 2) {
-        const uint32_t v = (uint32_t{in[i]} << 16) | (uint32_t{in[i + 1]} << 8);
-        out += kAlphabet[(v >> 18) & 63];
-        out += kAlphabet[(v >> 12) & 63];
-        out += kAlphabet[(v >> 6) & 63];
-        out += '=';
-    }
-    return out;
-}
+using wamp::base64_encode;   // (include/base64.hpp)
 
 // SHA-1 of the client key plus the protocol GUID, base64 encoded (RFC 6455 section 4.2.2). SHA-1 is part
 // of the handshake definition, not used for any security property here.
