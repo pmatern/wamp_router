@@ -1,6 +1,6 @@
 # WAMP Router
 
-A header only C++23 implementation of a [WAMP](https://wamp-proto.org/) (Web Application Messaging Protocol) router using CBOR serialization over RawSocket or WebSocket (`wamp.2.cbor`) transport, on one port.
+A header only C++23 implementation of a [WAMP](https://wamp-proto.org/) (Web Application Messaging Protocol) router speaking CBOR or JSON over RawSocket or WebSocket, on one port.
 
 ## What is WAMP?
 
@@ -14,8 +14,9 @@ This router acts as the central message broker, routing messages between clients
 
 - **RPC Support**: Full `CALL`, `REGISTER`, `YIELD`, `INVOCATION`, `RESULT` workflow
 - **PubSub Support**: `SUBSCRIBE`, `PUBLISH`, `EVENT` messaging
-- **RawSocket and WebSocket Transport**: both on the same port, told apart by the first byte of the connection (WebSocket uses the `wamp.2.cbor` subprotocol; JSON and MessagePack are not supported yet)
-- **CBOR Serialization**: Compact binary message format
+- **RawSocket and WebSocket Transport**: both on the same port, told apart by the first byte of the connection
+- **CBOR and JSON serializers**: `wamp.2.cbor` and `wamp.2.json` over WebSocket, serializers 3 and 1 over RawSocket; sessions with different serializers talk to each other (MessagePack is not supported yet)
+- **Lossless payloads**: null, booleans, integers, floats, strings, byte strings, lists and dicts of any nesting pass through unchanged
 - **TLS 1.3 Support**: Encrypted transport with optional client certificates
 - **WAMP-Cryptosign Authentication**: Ed25519 signature-based authentication
 - **C++20 Coroutines**: Asynchronous I/O using `asio::awaitable`
@@ -71,6 +72,7 @@ call_timeout_ms = 30000   # callee answer deadline, 0 = none; a CALL's "timeout"
 [server.websocket]
 enabled = true            # accept WebSocket (wamp.2.cbor) upgrades on the same port
 allowed_origins = []      # empty = any origin; otherwise a request with an Origin header must match one entry exactly
+subprotocols = ["wamp.2.cbor", "wamp.2.json"]   # offered on the upgrade; "wamp.2.json" also enables JSON over RawSocket
 # max_message_size = 16777215   # bytes (the maximum)
 
 # Per-session event queue and overflow policy: see "Event queue and backpressure" below
@@ -248,40 +250,37 @@ ctest --test-dir build-local --output-on-failure
 
 ## Connecting Clients
 
-The router uses CBOR serialization over TLS 1.3, with either WAMP RawSocket or WebSocket transport. Both are served on the same port; the router looks at the first byte of each connection (`0x7F` = RawSocket, `G` of `GET` = WebSocket upgrade):
+The router speaks CBOR or JSON over TLS 1.3, with either WAMP RawSocket or WebSocket transport. All of them are served on the same port; the router looks at the first byte of each connection (`0x7F` = RawSocket, `G` of `GET` = WebSocket upgrade) and the client picks the serializer:
 
 - **Protocol**: WAMP v2
-- **Transport**: RawSocket, or WebSocket (RFC 6455, subprotocol `wamp.2.cbor`), over TLS 1.3 (TCP)
-- **Serializer**: CBOR only (JSON and MessagePack are not supported yet)
+- **Transport**: RawSocket, or WebSocket (RFC 6455), over TLS 1.3 (TCP)
+- **Serializer**: CBOR (`wamp.2.cbor`, RawSocket serializer 3) or JSON (`wamp.2.json`, RawSocket serializer 1); MessagePack is not supported yet
 - **Default Port**: Configured in config.toml (typically 8080)
 - **Authentication**: WAMP-Cryptosign with Ed25519 signatures (optional)
 
 ### WebSocket
 
-A client opens a normal WebSocket connection (`ws://` or, with TLS, `wss://`; any path) and offers the `wamp.2.cbor` subprotocol. Each WAMP message is one binary WebSocket message. Behavior:
+A client opens a normal WebSocket connection (`ws://` or, with TLS, `wss://`; any path) and offers `wamp.2.cbor` and/or `wamp.2.json` in `Sec-WebSocket-Protocol`. Each WAMP message is one WebSocket message: a binary frame for CBOR, a text frame for JSON. Behavior:
 
-- **Handshake:** the router answers `101` with `Sec-WebSocket-Protocol: wamp.2.cbor`. Requests that do not offer that subprotocol get `400`, a version other than 13 gets `426`, and a disallowed origin gets `403`; the connection is then closed.
+- **Handshake:** the router answers `101` with the subprotocol it chose: the first one the client offers that is listed in `[server.websocket] subprotocols`. Requests that offer none of them get `400`, a version other than 13 gets `426`, and a disallowed origin gets `403`; the connection is then closed.
 - **Origin check:** browsers send an `Origin` header and cannot be stopped from opening connections to any host, so set `[server.websocket] allowed_origins` to the sites that may use the router. A request with an `Origin` that is not on the list is refused; requests without one (non-browser clients) are accepted. An empty list accepts any origin.
-- **Frames:** fragmented messages are reassembled, pings are answered with pongs, and a client close frame is echoed before the connection is closed. After a WAMP GOODBYE the router sends a close frame. Client frames must be masked and use no extensions (no `permessage-deflate`); text frames are refused with close code 1003 because they belong to `wamp.2.json`.
+- **Frames:** fragmented messages are reassembled, pings are answered with pongs, and a client close frame is echoed before the connection is closed. After a WAMP GOODBYE the router sends a close frame. Client frames must be masked and use no extensions (no `permessage-deflate`). A frame of the wrong kind for the subprotocol (text on `wamp.2.cbor`, binary on `wamp.2.json`) closes the connection with code 1003; a JSON text message that is not valid UTF-8 closes it with 1007.
 - **Limits:** a message may be at most `max_message_size` bytes (default and maximum 16,777,215, the same limit as RawSocket). The router does not send pings of its own.
 - **Everything else is shared:** authentication, realms, authorization and routing are identical to RawSocket, and WebSocket and RawSocket sessions see each other's events and calls, also across shards.
 
-### Connections that stall
+### JSON
 
-A client that connects and then sends nothing (or trickles bytes) would otherwise hold a file descriptor and some memory indefinitely. `[server] handshake_timeout_ms` (default 10,000; 0 disables) is a deadline for the whole path to an established session: TLS handshake, RawSocket or WebSocket handshake, HELLO and Cryptosign authentication together. Sending bytes slowly does not extend it. When it expires the router closes the connection and counts it (`handshake_timeouts` in `Router::stats()`, logged at shutdown). Established sessions are not affected; a WAMP session may be idle for as long as it likes.
+`wamp.2.json` (WebSocket text frames) and RawSocket serializer 1 carry the same messages as CBOR. A JSON session and a CBOR session can publish to and call each other: the router works in CBOR internally and converts at the edge of a JSON session (`include/json.hpp`), so CBOR sessions pay nothing. Rules:
 
-### Connection limits
+- Payloads are lossless in both directions: null, true/false, integers, floats, strings, lists and objects of any nesting (up to 64 levels). Integers outside int64 become floats on the way in. A JSON number with a fraction or exponent is a float; `2.0` stays a float.
+- **Binary data** is a string that starts with a NUL character followed by standard base64 (`"\u0000AQID"`), as the WAMP spec says; it corresponds to a CBOR byte string. A JSON object key is never binary.
+- CBOR NaN and infinities have no JSON form and are sent as `null` (as `JSON.stringify` does). CBOR tags are dropped. Text must be valid UTF-8 in both directions.
+- Invalid JSON counts as a malformed message (see below); as the first message of a session it closes the connection.
+- JSON numbers above 2^53 lose precision in JavaScript clients; the router passes them through exactly.
+- Cost: converting a 10-argument message takes about 0.9 µs (CBOR to JSON) and 1.0 µs (JSON to CBOR) on the machine used for the other micro-benchmarks, per message per JSON session. A JSON subscriber therefore costs more per delivered event than a CBOR one (60 ns with the stamped template); in the in-process load test with 10 subscribers JSON fan-out ran at about 75% of the CBOR rate and JSON RPC at 82%, with the client's own conversion included.
+- Tested with Autobahn|Python over `wss://` and `rss://` with `JsonSerializer` and Cryptosign, including floats, `None`, nested containers and bytes.
 
-`[server] max_connections` caps open connections (default `"auto"`: the process's open-file limit minus a reserve of 128; the router raises that limit to the hard limit at startup, and an integer or `0` for unlimited overrides it). `max_connections_per_ip` caps connections from one client address (default 0 = off; behind a proxy, load balancer or NAT every client shares an address, so leave it off there). A connection over a limit is closed immediately at accept, without a reply, and counted (`Router::rejected_connections()`, logged at shutdown, and the first rejection plus every 1,000th are logged as a warning). Limits count a connection from accept until its session ends, so connections still in the handshake count too. If the process does run out of descriptors anyway, the acceptor logs once per 1,000 errors and retries every 100 ms instead of spinning.
-
-### Shutdown
-
-On SIGINT/SIGTERM the router stops accepting, delivers the cross-shard messages already queued, and then sends every established session `GOODBYE wamp.close.system_shutdown` (queued after whatever that session was already due to receive, so no event is cut off). The router closes each connection once its GOODBYE is written (a WebSocket session also gets a close frame with code 1001) and waits up to `[server] shutdown_grace_ms` (default 3,000; 0 = do not wait) for all sessions to be gone, then stops the shard threads. Connections still in their handshake have nothing to be told; they are cut after the grace period (or when the router object is destroyed). A session whose output queue is completely full cannot be sent the GOODBYE and is cut at the deadline. Tested with Autobahn|Python on both transports: each client reports leaving with `wamp.close.system_shutdown`, and the router exits in about 40 ms.
-
-### Malformed messages
-
-A message of a known type whose body does not decode (wrong field types, truncated) is dropped and the session carries on, but a client that keeps sending them is broken or hostile. After `[server] max_malformed_messages` of them in a row (default 10; any message that decodes resets the count; 0 = never) the router sends `ABORT wamp.error.protocol_violation` and closes the connection (WebSocket: a close frame follows). Only the first malformed message of a run is logged at warning level, the rest at debug. Decoding a bad message is not cheaper than a good one: the decoder reports failures with exceptions, which costs about 4-10 µs per message against 0.8 µs for a valid CALL (`wamp_bench "bench: malformed input"`). That is in the same range as the router's CPU cost per valid call, so malformed traffic is no better a denial-of-service lever than valid traffic; the limit above keeps one connection from sending it indefinitely.
-
+### Authentication
 ### Authentication
 
 If `[auth.keys]` is configured in config.toml, clients must authenticate using WAMP-Cryptosign:
@@ -375,7 +374,7 @@ runner = ApplicationRunner(
 runner.run(MyComponent)
 ```
 
-To use WebSocket instead, change only the URL to `wss://localhost:8080/ws` (also run and verified; the router logs `WebSocket upgrade complete`). Output:
+To use WebSocket instead, change only the URL to `wss://localhost:8080/ws` (also run and verified; the router logs `WebSocket upgrade complete`). For JSON use `serializers=[JsonSerializer()]` (from `autobahn.wamp.serializer`) with either URL; this was run too, with the same output. Output:
 
 ```
 Authenticated as admin (role admin)
@@ -398,16 +397,17 @@ Baseline (Release, Intel i7-1068NG7 @ 2.3 GHz, single thread, mean of 50 samples
 | Benchmark | Mean |
 |---|---|
 | Serialize CALL / EVENT, no args | 64 ns / 46 ns (was 0.62 / 0.50 µs) |
-| Serialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 0.26 – 0.29 µs (was 1.9 – 2.8 µs) |
-| Deserialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 0.83 – 0.92 µs (was 4.5 – 5.1 µs); message type peek 11 ns |
+| Serialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 0.26 – 0.33 µs (was 1.9 – 2.8 µs) |
+| Deserialize CALL / PUBLISH / EVENT / INVOCATION / RESULT, 10 args + kw | 0.89 – 1.01 µs (was 4.5 – 5.1 µs); message type peek 11 ns |
 | RawSocket frame 128 B / 16 KiB | 54 ns / 171 ns |
 | `for_each_subscriber` (in place), 1 / 100 / 10,000 subscribers | 29 ns / 226 ns / 21 µs |
 | `get_subscribers` (copies the id set), 1 / 100 / 10,000 subscribers | 67 ns / 274 ns / 18 µs |
 | `find_callee` (1,000 registrations) | 35 ns |
 | Invocation tracker track + retrieve | 90 ns |
 | EVENT per subscriber: full serialize + frame / `EventTemplate::frame_for` | 0.33 µs / 62 ns |
-| PUBLISH fan-out to 1 / 10 / 100 subscribers (incl. drain) | 1.5 µs / 3.0 µs / 16.6 µs (was 3.1 / 28 / 279 µs) |
+| PUBLISH fan-out to 1 / 10 / 100 subscribers (incl. drain) | 1.5 µs / 2.7 µs / 15.7 µs (was 3.1 / 28 / 279 µs) |
 | CALL → INVOCATION → YIELD → RESULT through the handlers (no socket I/O) | 4.0 µs (was 12.5 µs) |
+| JSON edge conversion, 10 args + kw: CBOR → JSON / JSON → CBOR | 0.86 µs / 1.0 µs (paid per message by JSON sessions only) |
 
 These are in-process numbers: they exclude socket I/O and TLS. Before the direct CBOR codec (`include/cbor.hpp`) the cost was dominated by (de)serialization through nlohmann::json. PUBLISH fan-out serializes the EVENT once and stamps in each subscriber's subscription id (`EventTemplate`), so a subscriber costs about 62 ns (`frame_for`) instead of a full serialize and frame each time (0.33 µs now, 2.6 µs with the old nlohmann path).
 

@@ -24,6 +24,8 @@ A thread-per-core, shared-nothing router. Each **shard** is one thread with its 
 
 RawSocket and WebSocket (`wamp.2.cbor`) share one port. `WampSession` looks at the first byte of the connection: `0x7F` is the RawSocket handshake, `G` is an HTTP upgrade request (if `[server.websocket] enabled`). This happens on the shard thread, after any TLS handshake, so the acceptor and the shard placement do not depend on the transport.
 
+Serializers: a session speaks CBOR (`wamp.2.cbor`, RawSocket serializer 3) or JSON (`wamp.2.json`, serializer 1). The router core works in CBOR only; a JSON session converts at its edge (`include/json.hpp`): incoming JSON text is transcoded to CBOR before the normal handling, direct replies are transcoded on the way out, and `session_writer` transcodes each shared frame for its JSON recipient (the shared frames, `EventTemplate` and the cross-shard messages never change). A JSON delivery therefore costs about 0.9 µs more than a CBOR one.
+
 Everything inside the router (handlers, `EventTemplate`, cross-shard frames) builds RawSocket-framed messages, `[4-byte header][CBOR]`, shared as `shared_ptr<const vector>` between sessions and shards. A WebSocket session converts at the edge only: direct responses are re-wrapped as binary WebSocket frames in `WampSession`, and `session_writer` gathers a small unmasked WebSocket header followed by the shared payload (skipping the 4-byte RawSocket header), so event fan-out stays zero-copy for both transports. Consequence: a WebSocket message is limited to the same 16 MiB - 1 as a RawSocket frame.
 
 ### Connection limits
@@ -87,6 +89,7 @@ Scheduling within a shard is cooperative and single-threaded: asio resumes a cor
 * **Placement ignores load.** A hot connection can overload one shard while others idle.
 * **One callee per procedure** means a hot procedure is limited to one core (many procedures spread evenly).
 * **Waking an idle shard** costs about 0.2–0.3 ms per crossing on EC2 (not visible under load). A spin-before-sleep option would remove it at the price of CPU; not built.
+* **JSON recipients transcode every delivery** in their own writer (about 0.9 µs per message, no sharing between JSON subscribers); a JSON `EventTemplate` that stamps the subscription id like the CBOR one would remove most of it.
 * **Inbox is a mutex vector**, not an SPSC ring. The measurements showed no contention; the two were never benchmarked against each other.
 * **Connections still in their handshake at shutdown** are not told anything; they are cut after the grace period.
 

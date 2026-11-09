@@ -33,6 +33,7 @@
 #include "include/registration_manager.hpp"
 #include "include/subscription_manager.hpp"
 #include "include/wamp_serializer.hpp"
+#include "include/json.hpp"
 
 using namespace wamp;
 
@@ -152,6 +153,33 @@ TEST_CASE("bench: deserialize", "[bench][serializer]") {
 // ============================================================================
 // RawSocket framing
 // ============================================================================
+
+TEST_CASE("bench: JSON transcoding", "[bench][serializer][json]") {
+    const WampList args = make_args(10);
+    const WampDict kw = make_kw();
+    const auto call_cbor = serialize_call(CallMessage{1, {}, kProcedure, args, kw});
+    const auto event_cbor = serialize_event(EventMessage{10, 20, {}, args, kw});
+    std::string call_json, event_json;
+    (void)jsoncodec::from_cbor(call_cbor, call_json);
+    (void)jsoncodec::from_cbor(event_cbor, event_json);
+
+    // The cost a JSON session adds per message: converting at its edge, on top of the normal CBOR handling
+    BENCHMARK("CBOR -> JSON, EVENT (10 args + kw)") {
+        std::string out;
+        (void)jsoncodec::from_cbor(event_cbor, out);
+        return out;
+    };
+    BENCHMARK("JSON -> CBOR, CALL (10 args + kw)") {
+        std::vector<uint8_t> out;
+        (void)jsoncodec::to_cbor(call_json, out);
+        return out;
+    };
+    BENCHMARK("JSON -> CBOR -> CALL struct (the full inbound path)") {
+        std::vector<uint8_t> out;
+        (void)jsoncodec::to_cbor(call_json, out);
+        return deserialize_call(out);
+    };
+}
 
 TEST_CASE("bench: malformed input", "[bench][serializer][malformed]") {
     const WampList args = make_args(10);

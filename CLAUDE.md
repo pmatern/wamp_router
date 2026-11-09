@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a C++23 WAMP (Web Application Messaging Protocol) router implementation using CBOR serialization over RawSocket or WebSocket (`wamp.2.cbor`) transport, both on one port. The project runs inside a Docker container (`cpp23-builder`) that provides Clang 18+, CMake, Ninja, and vcpkg for dependency management.
+This is a C++23 WAMP (Web Application Messaging Protocol) router implementation speaking CBOR or JSON over RawSocket or WebSocket, all on one port. The project runs inside a Docker container (`cpp23-builder`) that provides Clang 18+, CMake, Ninja, and vcpkg for dependency management.
 
 **Key Architecture**: Thread-per-core, shared-nothing asynchronous I/O (N shard threads, default 1, plus an acceptor thread; see `docs/architecture.md`) using C++20 coroutines with standalone Asio (no Boost). The router implements the WAMP protocol's core features: RPC (CALL/REGISTER/YIELD) and PubSub (PUBLISH/SUBSCRIBE/EVENT). The architecture uses `awaitable` coroutines and concurrent operations via `parallel_group` for handling both socket I/O and event channel notifications.
 
@@ -282,6 +282,8 @@ wamp_router/
 │   ├── wamp_serializer.hpp   # CBOR serialization/deserialization
 │   ├── raw_socket.hpp        # RawSocket framing (4-byte header)
 │   ├── connection_limiter.hpp # ConnectionLimiter (total and per-address connection caps), open-file limit helpers
+│   ├── json.hpp              # JSON <-> CBOR streaming transcoders for wamp.2.json (edge of a JSON session)
+│   ├── base64.hpp / utf8.hpp # base64 (JSON binary strings, WebSocket accept key), UTF-8 validation
 │   ├── websocket.hpp         # WebSocket (RFC 6455): upgrade parsing, frame parser, frame encoding (wamp.2.cbor only)
 │   ├── wamp_id.hpp           # ID generators (global, router-scoped)
 │   ├── pubsub_handler.hpp    # SUBSCRIBE/PUBLISH/EVENT handling
@@ -305,6 +307,7 @@ wamp_router/
     ├── test_authorization.cpp
     ├── test_router.cpp
     ├── test_websocket.cpp
+    ├── test_json.cpp
     ├── test_logging.cpp
     ├── test_cpu_limits.cpp
     ├── test_cbor.cpp
@@ -368,7 +371,11 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 - `WampSession` decides the transport from the first byte: `0x7F` = RawSocket handshake, `G` (and `[server.websocket] enabled`) = HTTP upgrade. After the upgrade `process_websocket()` parses frames with `ws::FrameParser` and hands each complete binary message to the same `handle_wamp_message` RawSocket uses.
 - All code that builds outgoing messages still produces RawSocket frames (4-byte header + CBOR payload), which are shared between sessions and shards. A WebSocket session converts at the edge: `ws_wrap` for direct responses, and `session_writer` (wamp_server.hpp) gathers a small WebSocket header plus the shared payload (offset 4) for queued events, with no copy.
 - `WampSession::should_close()` tells `handle_socket_read_completion` to close after the pending output (an HTTP error or a WebSocket close frame) is written.
-- Only `wamp.2.cbor`. JSON would use text frames and needs its own serializer (and an `EventTemplate` equivalent).
+- `wamp.2.cbor` (binary frames) and `wamp.2.json` (text frames, `Wire::JSON` in `WampSession`); the choice is made at the upgrade (`ws::parse_upgrade` picks the client's first enabled subprotocol).
+
+#### JSON (json.hpp)
+- The router core always works on CBOR. A JSON session converts at its edge: `core_payload()` (JSON text to CBOR on input), `to_wire()` / `ws_wrap()` (CBOR replies to JSON), and `session_writer` (queued shared frames to JSON text, per recipient). `jsoncodec::to_cbor` writes indefinite-length containers, which the CBOR reader accepts.
+- The value model (`WampValue` in `wamp_messages.hpp`) is lossless: null, bool, int64, double, string, bytes, list, dict, nested without limit except the 64-level depth cap.
 
 #### Router (router.hpp)
 - `Router(config, Transport::PLAIN|TLS, threads)` starts one acceptor thread and N worker threads, each with its own `io_context(1)` and `Shard`. The acceptor passes each accepted socket (as a native handle) to the shard with the fewest sessions; the TLS handshake and the whole session then run on that shard's thread. `main.cpp` uses it (`[server] threads`, default 1).
@@ -537,6 +544,7 @@ Tests use Catch2 framework with CTest integration:
 - **test_cbor.cpp**: Direct CBOR codec vs nlohmann (byte-identical output, decoding, malformed/fuzzed input)
 - **test_realms.cpp**: Realm isolation of topics and procedures
 - **test_crypto_utils.cpp**: Ed25519 signature verification and challenge generation
+- **test_json.cpp**: JSON <-> CBOR transcoding (spec vectors, errors, nesting limits, nlohmann oracle on random payloads, fuzz), UTF-8, base64; JSON end-to-end tests are in test_router.cpp
 - **test_websocket.cpp**: WebSocket upgrade parsing, frame parser (lengths, masking, fragmentation, violations, fuzz); end-to-end WebSocket tests live in test_router.cpp (`tests/ws_test_client.hpp` is the blocking test client)
 - **test_logging.cpp**: Async logger (slow sink does not stall the caller), shard tag on log lines
 
