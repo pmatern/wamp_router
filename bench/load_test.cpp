@@ -64,16 +64,19 @@ struct Options {
     size_t queue_size = 100;     // embedded router: per-session event queue size
     std::string overflow = "backpressure";  // embedded router: backpressure | drop
     size_t rate = 2000;          // events/s, 0 = unpaced (stress: the router drops events when subscriber queues fill)
-    bool websocket = false;      // clients speak WebSocket (wamp.2.cbor) instead of RawSocket
+    bool websocket = false;      // clients speak WebSocket instead of RawSocket
+    bool json = false;           // clients speak wamp.2.json instead of wamp.2.cbor
     bool verbose = false;
 };
 
 // Set once from the command line; every client the scenarios create speaks this transport
 bool g_websocket = false;
+bool g_json = false;
 
 std::shared_ptr<WampClient> make_client(asio::io_context& io) {
     auto client = std::make_shared<WampClient>(io);
     if (g_websocket) client->set_transport(WampClient::Transport::WEBSOCKET);
+    if (g_json) client->set_serializer(WampClient::Serializer::JSON);
     return client;
 }
 
@@ -95,6 +98,7 @@ void usage() {
         "  --queue-size N           embedded router: per-session event queue size (default 100)\n"
         "  --overflow P             embedded router: backpressure | drop (default backpressure)\n"
         "  --host H --port P        target an external plain-TCP router (default: embedded)\n"
+        "  --serializer cbor|json    client serializer (default cbor; json = wamp.2.json)\n"
         "  --transport rawsocket|ws  client transport (default rawsocket; ws = WebSocket wamp.2.cbor, plain TCP)\n"
         "  --verbose                keep router/client logging on\n");
 }
@@ -111,6 +115,7 @@ bool parse(int argc, char** argv, Options& o) {
         };
         if (a == "--help" || a == "-h") { usage(); return false; }
         else if (a == "--verbose") o.verbose = true;
+        else if (a == "--serializer") { const char* v = next(); if (!v) return false; o.json = std::string{v} == "json"; }
         else if (a == "--transport") { const char* v = next(); if (!v) return false; o.websocket = std::string{v} == "ws"; }
         else if (a == "--mode") { const char* v = next(); if (!v) return false; o.mode = v; }
         else if (a == "--host") { const char* v = next(); if (!v) return false; o.host = v; }
@@ -505,6 +510,7 @@ int main(int argc, char** argv) {
     }
     std::setvbuf(stdout, nullptr, _IOLBF, 0);
     g_websocket = opts.websocket;
+    g_json = opts.json;
     spdlog::set_level(opts.verbose ? spdlog::level::info : spdlog::level::off);
 
     std::unique_ptr<EmbeddedRouter> router;

@@ -1592,3 +1592,44 @@ TEST_CASE("Shutdown sends a JSON session its GOODBYE as JSON", "[router][json][s
     CHECK(raw->closed_within(2s));
     stopper.join();
 }
+
+TEST_CASE("WampClient speaks JSON over WebSocket and RawSocket, talking to a CBOR client", "[router][json][client]") {
+    for (const bool websocket : {true, false}) {
+        INFO(std::string{websocket ? "WebSocket" : "RawSocket"});
+        Router router{plain_config(), Router::Transport::PLAIN, 2};
+        router.start();
+
+        asio::io_context io;
+        WampClient json_client{io};
+        json_client.set_serializer(WampClient::Serializer::JSON);
+        if (websocket) json_client.set_transport(WampClient::Transport::WEBSOCKET);
+        WampClient cbor_client{io};
+
+        WampList json_got, cbor_got, call_result;
+        bool done = false;
+        const WampList rich{1.5, nullptr, WampList{int64_t{1}, WampDict{{"k", true}}}, WampBytes{9, 8}, std::string{"\xC3\xA9"}};
+
+        co_spawn(io, [&]() -> awaitable<void> {
+            co_await json_client.connect("127.0.0.1", router.port(), "test.realm");
+            co_await cbor_client.connect("127.0.0.1", router.port(), "test.realm");
+            co_await json_client.subscribe("jc.topic", [&](const EventMessage& e) { json_got = e.arguments; });
+            co_await cbor_client.subscribe("cj.topic", [&](const EventMessage& e) { cbor_got = e.arguments; });
+            (void)co_await json_client.register_procedure("jc.echo",
+                [](const InvocationMessage& inv) -> awaitable<YieldMessage> { co_return YieldMessage{inv.request_id, {}, inv.arguments}; });
+
+            (void)co_await cbor_client.publish("jc.topic", rich);
+            (void)co_await json_client.publish("cj.topic", rich);
+            call_result = co_await cbor_client.call("jc.echo", rich);
+            for (int i = 0; i < 100 && (json_got.empty() || cbor_got.empty()); ++i) co_await pause(io, 20ms);
+            co_await json_client.disconnect();
+            co_await cbor_client.disconnect();
+            done = true;
+        }, detached);
+        io.run_for(15s);
+
+        REQUIRE(done);
+        CHECK(json_got == rich);
+        CHECK(cbor_got == rich);
+        CHECK(call_result == rich);
+    }
+}
