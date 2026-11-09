@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -56,6 +57,33 @@ public:
     }
 
     void write_bool(bool b) { out_.push_back(b ? 0xF5 : 0xF4); }
+    void write_null() { out_.push_back(0xF6); }
+
+    // A byte string
+    void write_bytes(std::span<const uint8_t> bytes) {
+        head(2, bytes.size());
+        out_.insert(out_.end(), bytes.begin(), bytes.end());
+    }
+
+    // A double in the shortest form that keeps its value: single precision when that is exact, else double
+    // (NaN and infinities too; this matches what the nlohmann test oracle writes)
+    void write_double(double v) {
+        const float f = static_cast<float>(v);
+        if (static_cast<double>(f) == v || std::isnan(v)) {
+            uint32_t bits;
+            std::memcpy(&bits, &f, 4);
+            out_.push_back(0xFA);
+            put_be(bits, 4);
+        } else {
+            uint64_t bits;
+            std::memcpy(&bits, &v, 8);
+            out_.push_back(0xFB);
+            put_be(bits, 8);
+        }
+    }
+
+    // Appends bytes that are already encoded CBOR
+    void write_raw(std::span<const uint8_t> encoded) { out_.insert(out_.end(), encoded.begin(), encoded.end()); }
 
     void write_array(uint64_t count) { head(4, count); }
     void write_map(uint64_t count) { head(5, count); }
@@ -122,7 +150,8 @@ public:
 
     [[nodiscard]] bool peek_is_null() {
         skip_tags();
-        return need(1)[0] == 0xF6;
+        const uint8_t b = need(1)[0];
+        return b == 0xF6 || b == 0xF7;   // null or undefined
     }
 
     [[nodiscard]] bool peek_is_bool() {
@@ -213,6 +242,47 @@ public:
     }
 
     std::string read_text() { return std::string{read_text_view()}; }
+
+    // Byte string, valid for as long as the underlying buffer
+    std::span<const uint8_t> read_bytes_view() {
+        skip_tags();
+        const uint8_t b = need(1)[0];
+        if ((b >> 5) != 2) throw DecodeError("expected byte string");
+        if ((b & 0x1F) == 31) throw DecodeError("indefinite-length strings are not supported");
+        ++p_;
+        const uint64_t len = argument(b & 0x1F);
+        const uint8_t* s = need(len);
+        p_ += len;
+        return {s, static_cast<size_t>(len)};
+    }
+
+    // Half, single or double precision float (an integer item is not accepted here; use read_int)
+    double read_double() {
+        skip_tags();
+        const uint8_t b = need(1)[0];
+        if (!(static_cast<Major>(b >> 5) == Major::SIMPLE && b >= 0xF9 && b <= 0xFB)) {
+            throw DecodeError("expected float");
+        }
+        return read_float();
+    }
+
+    // True for a float item (half, single or double precision)
+    [[nodiscard]] bool peek_is_float() {
+        skip_tags();
+        const uint8_t b = need(1)[0];
+        return static_cast<Major>(b >> 5) == Major::SIMPLE && b >= 0xF9 && b <= 0xFB;
+    }
+
+    // Consumes a null (or undefined) item
+    void read_null() {
+        skip_tags();
+        const uint8_t b = need(1)[0];
+        if (b != 0xF6 && b != 0xF7) throw DecodeError("expected null");
+        ++p_;
+    }
+
+    // Nesting limit for recursive readers
+    static constexpr int kMaxNesting = 64;
 
     // Skips one whole item of any type
     void skip(int depth = 0) {

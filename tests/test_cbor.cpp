@@ -317,16 +317,23 @@ TEST_CASE("Hot-path deserializers read nlohmann-produced CBOR", "[cbor][serializ
         REQUIRE(msg->arguments_kw == kKw);
     }
 
-    SECTION("values the router cannot represent are dropped, not fatal") {
-        // null, nested array and float inside Arguments; a null and an array inside ArgumentsKw
+    SECTION("every kind of value in the payload is kept, in place") {
+        // null, a nested array, a float and bytes inside Arguments; a null and nested containers inside ArgumentsKw
         auto data = reference(json::array({48, 1, json::object(), "p",
                                            json::array({"a", nullptr, json::array({1}), 2.9, true}),
                                            json::object({{"x", nullptr}, {"y", json::array()}, {"z", 1}})}));
         auto msg = deserialize_call(data);
         REQUIRE(msg.has_value());
-        REQUIRE(msg->arguments == WampList{std::string{"a"}, int64_t{2}, true});
-        REQUIRE(msg->arguments_kw.size() == 1);
-        REQUIRE(std::get<int64_t>(msg->arguments_kw.at("z")) == 1);
+        REQUIRE(msg->arguments.size() == 5);
+        CHECK(std::get<std::string>(msg->arguments[0]) == "a");
+        CHECK(std::holds_alternative<std::nullptr_t>(msg->arguments[1]));
+        CHECK(std::get<WampList>(msg->arguments[2]) == WampList{int64_t{1}});
+        CHECK(std::get<double>(msg->arguments[3]) == 2.9);
+        CHECK(std::get<bool>(msg->arguments[4]) == true);
+        REQUIRE(msg->arguments_kw.size() == 3);
+        CHECK(std::holds_alternative<std::nullptr_t>(msg->arguments_kw.at("x")));
+        CHECK(std::get<WampList>(msg->arguments_kw.at("y")).empty());
+        CHECK(std::get<int64_t>(msg->arguments_kw.at("z")) == 1);
     }
 
     SECTION("PUBLISH keeps only the boolean options it understands") {
@@ -526,4 +533,147 @@ TEST_CASE("Deserializers survive truncated and corrupted input", "[cbor][seriali
         run_all(garbage);
     }
     SUCCEED();
+}
+
+// ----------------------------------------------------------------------------
+// The value model carries any payload without loss
+// ----------------------------------------------------------------------------
+namespace {
+
+json to_oracle(const WampValue& v) {
+    return std::visit([]<typename T>(const T& x) -> json {
+        if constexpr (std::is_same_v<T, std::nullptr_t>) return nullptr;
+        else if constexpr (std::is_same_v<T, WampBytes>) return json::binary(std::vector<uint8_t>(x.begin(), x.end()));
+        else if constexpr (std::is_same_v<T, WampList>) {
+            json a = json::array();
+            for (const auto& item : x) a.push_back(to_oracle(item));
+            return a;
+        } else if constexpr (std::is_same_v<T, WampDict>) {
+            json o = json::object();
+            for (const auto& [key, item] : x) o[key] = to_oracle(item);
+            return o;
+        } else return x;
+    }, v);
+}
+
+WampValue random_value(std::mt19937_64& rng, int depth) {
+    switch (rng() % (depth >= 3 ? 7 : 9)) {
+        case 0: return WampValue{};
+        case 1: return WampValue{rng() % 2 == 0};
+        case 2: return WampValue{static_cast<int64_t>(rng()) >> (rng() % 60)};
+        case 3: {
+            static const double specials[] = {0.0, -0.0, 0.5, 1.5, 2.9, 1e300, -1e-300, 0.1, 3.14159265358979, 65504.0, 5.960464477539063e-8};
+            return WampValue{specials[rng() % 11]};
+        }
+        case 4: {
+            std::string s(rng() % 20, 'x');
+            for (auto& c : s) c = static_cast<char>('a' + rng() % 26);
+            return WampValue{s};
+        }
+        case 5: {
+            WampBytes b(rng() % 20);
+            for (auto& x : b) x = static_cast<uint8_t>(rng());
+            return WampValue{b};
+        }
+        case 6: return WampValue{std::string("\xC3\xA9\xE2\x82\xAC")};   // multi-byte UTF-8
+        case 7: {
+            WampList l;
+            for (size_t n = rng() % 5; n > 0; --n) l.push_back(random_value(rng, depth + 1));
+            return WampValue{l};
+        }
+        default: {
+            WampDict d;
+            for (size_t n = rng() % 5; n > 0; --n) d[std::string(1, static_cast<char>('a' + rng() % 8))] = random_value(rng, depth + 1);
+            return WampValue{d};
+        }
+    }
+}
+
+}  // namespace
+
+TEST_CASE("WampValue payloads round-trip through CBOR without loss and match the oracle bytes", "[cbor][value]") {
+    std::mt19937_64 rng(777);
+    for (int i = 0; i < 1000; ++i) {
+        WampList args;
+        for (size_t n = 1 + rng() % 6; n > 0; --n) args.push_back(random_value(rng, 0));
+        WampDict kw;
+        for (size_t n = 1 + rng() % 4; n > 0; --n) kw[std::string(1, static_cast<char>('a' + rng() % 8))] = random_value(rng, 0);
+        const uint64_t id = rng() >> 12;
+
+        const auto wire = serialize_call(CallMessage{id, {}, "p", args, kw});
+        // same bytes as the independent oracle writes for the same tree
+        json expected = json::array({48, id, json::object(), "p", to_oracle(WampValue{args}), to_oracle(WampValue{kw})});
+        REQUIRE(wire == json::to_cbor(expected));
+
+        auto back = deserialize_call(wire);
+        REQUIRE(back.has_value());
+        REQUIRE(back->arguments == args);
+        REQUIRE(back->arguments_kw == kw);
+    }
+}
+
+TEST_CASE("WampValue edge cases", "[cbor][value]") {
+    SECTION("floats: NaN and infinities survive") {
+        std::vector<uint8_t> out;
+        cbor::Writer w{out};
+        w.write_array(3);
+        w.write_double(std::nan(""));
+        w.write_double(INFINITY);
+        w.write_double(-INFINITY);
+        cbor::Reader r{out};
+        auto list = fast::read_list(r);
+        REQUIRE(list.size() == 3);
+        CHECK(std::isnan(std::get<double>(list[0])));
+        CHECK(std::get<double>(list[1]) == INFINITY);
+        CHECK(std::get<double>(list[2]) == -INFINITY);
+    }
+    SECTION("half-precision floats from other encoders are read") {
+        const std::vector<uint8_t> half{0xF9, 0x3C, 0x00};   // 1.0
+        cbor::Reader r{half};
+        CHECK(std::get<double>(fast::read_value(r)) == 1.0);
+    }
+    SECTION("integers at the int64 limits, and one past them") {
+        for (int64_t v : {INT64_MIN, INT64_MAX}) {
+            std::vector<uint8_t> out;
+            cbor::Writer{out}.write_int(v);
+            cbor::Reader r{out};
+            CHECK(std::get<int64_t>(fast::read_value(r)) == v);
+        }
+        const std::vector<uint8_t> two_pow_63{0x1B, 0x80, 0, 0, 0, 0, 0, 0, 0};
+        cbor::Reader too_big{two_pow_63};
+        CHECK_THROWS_AS(fast::read_value(too_big), cbor::DecodeError);
+    }
+    SECTION("tags are transparent, undefined reads as null") {
+        const std::vector<uint8_t> tagged_bytes{0xC1, 0x18, 0x2A};   // tag 1 around 42
+        cbor::Reader tagged{tagged_bytes};
+        CHECK(std::get<int64_t>(fast::read_value(tagged)) == 42);
+        const std::vector<uint8_t> undefined_bytes{0xF7};
+        cbor::Reader undef{undefined_bytes};
+        CHECK(std::holds_alternative<std::nullptr_t>(fast::read_value(undef)));
+    }
+    SECTION("nesting deeper than the limit is an error, not a stack overflow") {
+        std::vector<uint8_t> deep(10000, 0x81);   // [[[[...
+        deep.push_back(0x00);
+        cbor::Reader r{deep};
+        CHECK_THROWS_AS(fast::read_value(r), cbor::DecodeError);
+        std::vector<uint8_t> deep_map;
+        for (int i = 0; i < 5000; ++i) { deep_map.push_back(0xA1); deep_map.push_back(0x61); deep_map.push_back('k'); }
+        deep_map.push_back(0x00);
+        cbor::Reader rm{deep_map};
+        CHECK_THROWS_AS(fast::read_value(rm), cbor::DecodeError);
+        // within the limit is fine
+        std::vector<uint8_t> ok(60, 0x81);
+        ok.push_back(0x00);
+        cbor::Reader r_ok{ok};
+        CHECK_NOTHROW(fast::read_value(r_ok));
+    }
+    SECTION("literals build the types one expects") {
+        WampList args{"text", 5, 5U, 5L, int64_t{5}, true, 1.5, nullptr, WampBytes{1, 2}};
+        CHECK(std::holds_alternative<std::string>(args[0]));
+        for (int i = 1; i <= 4; ++i) CHECK(std::get<int64_t>(args[i]) == 5);
+        CHECK(std::holds_alternative<bool>(args[5]));
+        CHECK(std::holds_alternative<double>(args[6]));
+        CHECK(std::holds_alternative<std::nullptr_t>(args[7]));
+        CHECK(std::holds_alternative<WampBytes>(args[8]));
+    }
 }

@@ -21,6 +21,8 @@
 #include <cstdint>
 #include <vector>
 #include <variant>
+#include <concepts>
+#include <cstddef>
 #include <optional>
 #include <system_error>
 
@@ -104,15 +106,39 @@ struct std::is_error_code_enum<wamp::WampError> : std::true_type {};
 
 namespace wamp {
 
-// Type aliases for WAMP data structures
-using WampDict = std::unordered_map<std::string, std::variant<
-    std::string,
-    int64_t,
-    bool,
-    std::unordered_map<std::string, std::string>  // Nested dict for roles
->>;
+// ----------------------------------------------------------------------------
+// WampValue - any value that can appear in a WAMP message payload or in Options/Details
+// ----------------------------------------------------------------------------
+// null, boolean, integer, float, text string, byte string, list, dict: the common ground of CBOR and JSON
+// (and MessagePack). The router never looks inside Arguments / ArgumentsKw; it only carries them, so the
+// model has to be able to carry anything a client sends without loss. It derives from std::variant so
+// std::get / std::get_if / std::holds_alternative / std::visit work on it directly.
+class WampValue;
+using WampList = std::vector<WampValue>;
+using WampDict = std::unordered_map<std::string, WampValue>;
+using WampBytes = std::vector<uint8_t>;
 
-using WampList = std::vector<std::variant<std::string, int64_t, bool>>;
+class WampValue : public std::variant<std::nullptr_t, bool, int64_t, double, std::string, WampBytes, WampList, WampDict> {
+    using Base = std::variant<std::nullptr_t, bool, int64_t, double, std::string, WampBytes, WampList, WampDict>;
+
+public:
+    using Base::Base;
+    WampValue() = default;   // null
+
+    // Every integer type that is not bool is an int64 (a bare `5` would otherwise be ambiguous with double)
+    template<std::integral I>
+        requires (!std::same_as<I, bool> && !std::same_as<I, int64_t>)
+    WampValue(I value) : Base(static_cast<int64_t>(value)) {}   // NOLINT: implicit on purpose, like the variant
+
+    // A string literal is a string, not a bool
+    WampValue(const char* text) : Base(std::string{text}) {}   // NOLINT
+
+    // The string-to-string map older code used for nested Details
+    WampValue(const std::unordered_map<std::string, std::string>& map) : Base(WampDict{}) {   // NOLINT
+        auto& dict = std::get<WampDict>(*this);
+        for (const auto& [key, text] : map) dict.emplace(key, WampValue{text});
+    }
+};
 
 // Role types
 struct Role {

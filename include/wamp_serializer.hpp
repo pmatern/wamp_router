@@ -90,34 +90,14 @@ namespace wamp {
 
 namespace fast {
 
+inline void write_value(cbor::Writer& w, const WampValue& value);
+
 inline void write_list(cbor::Writer& w, const WampList& list) {
     w.write_array(list.size());
-    for (const auto& item : list) {
-        std::visit([&w]<typename T>(const T& v) {
-            if constexpr (std::is_same_v<T, std::string>) w.write_text(v);
-            else if constexpr (std::is_same_v<T, bool>) w.write_bool(v);
-            else w.write_int(v);
-        }, item);
-    }
+    for (const auto& item : list) write_value(w, item);
 }
 
-inline void write_dict_value(cbor::Writer& w, const WampDict::mapped_type& value) {
-    std::visit([&w]<typename T>(const T& v) {
-        if constexpr (std::is_same_v<T, std::string>) {
-            w.write_text(v);
-        } else if constexpr (std::is_same_v<T, bool>) {
-            w.write_bool(v);
-        } else if constexpr (std::is_same_v<T, int64_t>) {
-            w.write_int(v);
-        } else {  // nested string map
-            w.write_map(v.size());
-            for (const auto& [k, nested] : v) {
-                w.write_text(k);
-                w.write_text(nested);
-            }
-        }
-    }, value);
-}
+inline void write_dict_value(cbor::Writer& w, const WampValue& value) { write_value(w, value); }
 
 // Entries are written in key order, so the bytes do not depend on unordered_map's iteration order
 inline void write_dict(cbor::Writer& w, const WampDict& dict) {
@@ -137,6 +117,21 @@ inline void write_dict(cbor::Writer& w, const WampDict& dict) {
         w.write_text(entry->first);
         write_dict_value(w, entry->second);
     }
+}
+
+inline void write_dict(cbor::Writer& w, const WampDict& dict);
+
+inline void write_value(cbor::Writer& w, const WampValue& value) {
+    std::visit([&w]<typename T>(const T& v) {
+        if constexpr (std::is_same_v<T, std::nullptr_t>) w.write_null();
+        else if constexpr (std::is_same_v<T, bool>) w.write_bool(v);
+        else if constexpr (std::is_same_v<T, int64_t>) w.write_int(v);
+        else if constexpr (std::is_same_v<T, double>) w.write_double(v);
+        else if constexpr (std::is_same_v<T, std::string>) w.write_text(v);
+        else if constexpr (std::is_same_v<T, WampBytes>) w.write_bytes(v);
+        else if constexpr (std::is_same_v<T, WampList>) write_list(w, v);
+        else write_dict(w, v);
+    }, value);
 }
 
 // Details "roles": {name: {}} with names in sorted order
@@ -181,52 +176,46 @@ inline void write_payload(cbor::Writer& w, const WampList& args, const WampDict&
     if (!args_kw.empty()) write_dict(w, args_kw);
 }
 
-// Elements that are not string/integer/boolean (null, nested containers) are dropped, as before
-inline WampList read_list(cbor::Reader& r) {
+// Any CBOR value as a WampValue, nothing dropped or converted: ints stay ints, floats stay floats, null, byte
+// strings and nested lists/maps are kept. Nesting deeper than cbor::Reader::kMaxNesting is an error.
+inline WampValue read_value(cbor::Reader& r, int depth = 0);
+
+inline WampList read_list(cbor::Reader& r, int depth = 0) {
+    if (depth >= cbor::Reader::kMaxNesting) throw cbor::DecodeError("nesting too deep");
     WampList list;
     auto c = r.read_array();
-    while (r.next(c)) {
-        switch (r.peek_major()) {
-            case cbor::Major::TEXT: list.emplace_back(r.read_text()); break;
-            case cbor::Major::UNSIGNED:
-            case cbor::Major::NEGATIVE: list.emplace_back(r.read_int()); break;
-            default:
-                if (r.peek_is_bool()) list.emplace_back(r.read_bool());
-                else if (r.peek_is_number()) list.emplace_back(r.read_int());
-                else r.skip();
-        }
-    }
+    while (r.next(c)) list.push_back(read_value(r, depth + 1));
     return list;
 }
 
-// Values that are not string/integer/boolean/map are dropped; nested maps keep their string values
-inline WampDict read_dict(cbor::Reader& r) {
+inline WampDict read_dict(cbor::Reader& r, int depth = 0) {
+    if (depth >= cbor::Reader::kMaxNesting) throw cbor::DecodeError("nesting too deep");
     WampDict dict;
     auto c = r.read_map();
     while (r.next(c)) {
         std::string key = r.read_text();
-        switch (r.peek_major()) {
-            case cbor::Major::TEXT: dict.insert_or_assign(std::move(key), r.read_text()); break;
-            case cbor::Major::UNSIGNED:
-            case cbor::Major::NEGATIVE: dict.insert_or_assign(std::move(key), r.read_int()); break;
-            case cbor::Major::MAP: {
-                std::unordered_map<std::string, std::string> nested;
-                auto nc = r.read_map();
-                while (r.next(nc)) {
-                    std::string nk = r.read_text();
-                    if (r.peek_major() == cbor::Major::TEXT) nested[std::move(nk)] = r.read_text();
-                    else r.skip();
-                }
-                dict.insert_or_assign(std::move(key), std::move(nested));
-                break;
-            }
-            default:
-                if (r.peek_is_bool()) dict.insert_or_assign(std::move(key), r.read_bool());
-                else if (r.peek_is_number()) dict.insert_or_assign(std::move(key), r.read_int());
-                else r.skip();
-        }
+        dict.insert_or_assign(std::move(key), read_value(r, depth + 1));
     }
     return dict;
+}
+
+inline WampValue read_value(cbor::Reader& r, int depth) {
+    switch (r.peek_major()) {
+        case cbor::Major::UNSIGNED:
+        case cbor::Major::NEGATIVE: return WampValue{r.read_int()};
+        case cbor::Major::BYTES: {
+            const auto bytes = r.read_bytes_view();
+            return WampValue{WampBytes(bytes.begin(), bytes.end())};
+        }
+        case cbor::Major::TEXT: return WampValue{r.read_text()};
+        case cbor::Major::ARRAY: return WampValue{read_list(r, depth)};
+        case cbor::Major::MAP: return WampValue{read_dict(r, depth)};
+        default:
+            if (r.peek_is_bool()) return WampValue{r.read_bool()};
+            if (r.peek_is_float()) return WampValue{r.read_double()};
+            r.read_null();   // null / undefined; anything else is invalid and throws
+            return WampValue{};
+    }
 }
 
 // Thrown when a message has fewer elements than its type requires
@@ -253,12 +242,16 @@ public:
     // Optional Arguments|list and ArgumentsKw|dict
     void payload(WampList& args, WampDict& args_kw) {
         if (more()) {
-            if (r_.peek_major() == cbor::Major::ARRAY) args = read_list(r_); else r_.skip();
+            // Arguments must be a list and ArgumentsKw a dict; anything else used to be skipped, which
+            // silently changed what a message meant
+            if (r_.peek_major() != cbor::Major::ARRAY) throw MalformedMessage{};
+            args = read_list(r_);
         } else {
             return;
         }
         if (more()) {
-            if (r_.peek_major() == cbor::Major::MAP) args_kw = read_dict(r_); else r_.skip();
+            if (r_.peek_major() != cbor::Major::MAP) throw MalformedMessage{};
+            args_kw = read_dict(r_);
         }
     }
 
