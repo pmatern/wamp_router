@@ -405,3 +405,15 @@ changes how much Stage 0 buys, not whether the design scales.
    all clients today).
 4. Decide the supported guarantees explicitly (per-publisher, per-topic ordering; subscribe-then-publish visibility) and write the
    ordering tests first.
+
+## Unpaced fan-out loss at 2 threads: cause and fix (EC2, 2026-11)
+
+Earlier runs of the unpaced fan-out at 2 router threads came up 0-8% short on the generator side. With the per-subscriber sequence check and counters on every drop path it turned out to be real loss, shed at the cross-shard inbox cap (`inbox_dropped` 48k-126k per run on the receiving shard, none on the other). The mechanism: a session that publishes to another shard is slowed through `Shard::congested`, a list that belongs to the shard. `handle_socket_read_completion` read it only after waiting for full subscriber queues, and during that wait another session's `process()` cleared it, so with the default queue of 100 the publisher was not slowed. The list is now taken right after `process()`, before anything suspends.
+
+Router pinned to 2 cores of a c7i.4xlarge, 4 x c7i.2xlarge generators, 28 `wamp_load --mode pubsub` processes (28 topics, 1 unpaced publisher and 10 subscribers each), 11.2M deliveries per run:
+
+| Router | Runs losing events | Lost per losing run | Cause counter |
+|---|---|---|---|
+| before the fix, `--queue-size 100` (default) | 3 of 4 | 1-4% | `inbox_dropped` 48k-126k, `event_drops` up to 2.4k |
+| before the fix, `--queue-size 1000` | 0 of 4 | none | (subscribers rarely block, so the signal was rarely lost) |
+| after the fix, `--queue-size 100` | 0 of 5 | none | all counters 0 |
