@@ -41,6 +41,7 @@ namespace wamp::ws {
 
 inline constexpr std::string_view kSubprotocol = "wamp.2.cbor";        // the default and first choice
 inline constexpr std::string_view kSubprotocolJson = "wamp.2.json";
+inline constexpr std::string_view kSubprotocolMsgpack = "wamp.2.msgpack";
 inline constexpr size_t kMaxUpgradeRequest = 8 * 1024;   // request line + headers
 
 enum class Opcode : uint8_t {

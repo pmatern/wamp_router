@@ -69,6 +69,7 @@ add_executable(wamp_tests
     tests/test_logging.cpp
     tests/test_websocket.cpp
     tests/test_json.cpp
+    tests/test_msgpack.cpp
     tests/test_ppt.cpp
     tests/test_patterns.cpp
     tests/test_concepts.cpp

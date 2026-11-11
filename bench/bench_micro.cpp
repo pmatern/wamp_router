@@ -34,6 +34,7 @@
 #include "include/subscription_manager.hpp"
 #include "include/wamp_serializer.hpp"
 #include "include/json.hpp"
+#include "include/msgpack.hpp"
 
 using namespace wamp;
 
@@ -178,6 +179,28 @@ TEST_CASE("bench: JSON transcoding", "[bench][serializer][json]") {
         std::vector<uint8_t> out;
         (void)jsoncodec::to_cbor(call_json, out);
         return deserialize_call(out);
+    };
+}
+
+TEST_CASE("bench: MessagePack transcoding", "[bench][serializer][msgpack]") {
+    const WampList args = make_args(10);
+    const WampDict kw = make_kw();
+    const auto call_cbor = serialize_call(CallMessage{1, {}, kProcedure, args, kw});
+    const auto event_cbor = serialize_event(EventMessage{10, 20, {}, args, kw});
+    std::string call_mp;
+    (void)msgpackcodec::from_cbor(call_cbor, call_mp);
+    const std::vector<uint8_t> call_mp_bytes(call_mp.begin(), call_mp.end());
+
+    // The cost a MessagePack session adds per message, on top of the normal CBOR handling
+    BENCHMARK("CBOR -> MessagePack, EVENT (10 args + kw)") {
+        std::string out;
+        (void)msgpackcodec::from_cbor(event_cbor, out);
+        return out;
+    };
+    BENCHMARK("MessagePack -> CBOR, CALL (10 args + kw)") {
+        std::vector<uint8_t> out;
+        (void)msgpackcodec::to_cbor(call_mp_bytes, out);
+        return out;
     };
 }
 

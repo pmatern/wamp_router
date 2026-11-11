@@ -284,7 +284,7 @@ session_reader(SocketType& socket, ReadState<SocketType>& state, WampSession& pr
 template<WampSocket SocketType>
 inline asio::awaitable<std::expected<void, std::error_code>>
 session_writer(SocketType& socket, EventChannel& channel, const std::string& remote_address,
-               WriteLock& write_lock, bool websocket, bool json) {
+               WriteLock& write_lock, bool websocket, Wire wire) {
     std::vector<std::shared_ptr<const std::vector<uint8_t>>> frames;
     std::vector<asio::const_buffer> buffers;
     // WebSocket: the router's frames are [4-byte RawSocket header][payload]; each is sent as a binary
@@ -313,21 +313,24 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
             if (!ec && event.event_data && !closing) {
                 closing = event.close_after;
                 bytes += event.event_data->size();
-                if (json) {
-                    // header + CBOR payload -> header + JSON text. An event that cannot be written as JSON (CBOR
-                    // text that is not UTF-8, say) is skipped for this subscriber; it must not end the session.
+                if (wire != Wire::CBOR) {
+                    // header + CBOR payload -> header + JSON text or MessagePack. An event that cannot be written in
+                    // that format (CBOR text that is not UTF-8, say) is skipped for this subscriber; it must not end
+                    // the session.
                     if (event.event_data->size() <= rawsocket::FRAME_HEADER_SIZE) return;
                     std::string text;
-                    if (auto converted = jsoncodec::from_cbor(
-                            std::span<const uint8_t>{*event.event_data}.subspan(rawsocket::FRAME_HEADER_SIZE), text); !converted) {
-                        spdlog::warn("Skipped an event that cannot be written as JSON: {}", converted.error().message());
+                    if (auto converted = wirecodec::from_cbor(
+                            wire, std::span<const uint8_t>{*event.event_data}.subspan(rawsocket::FRAME_HEADER_SIZE), text); !converted) {
+                        spdlog::warn("Skipped an event that cannot be written as {}: {}", to_string(wire),
+                                     converted.error().message());
                         closing = closing || event.close_after;
                         return;
                     }
                     json_texts.push_back(std::move(text));
                     const auto& body = json_texts.back();
                     if (websocket) {
-                        ws_headers.push_back(ws::encode_header(ws::Opcode::TEXT, body.size()));
+                        ws_headers.push_back(ws::encode_header(
+                            wire == Wire::JSON ? ws::Opcode::TEXT : ws::Opcode::BINARY, body.size()));
                     } else {
                         ws::FrameHeaderBytes header;
                         const auto raw = rawsocket::encode_frame_header(
@@ -469,7 +472,7 @@ handle_wamp_session(SocketType socket, asio::io_context& io, const ServerConfig&
                 session_reader(socket, read_state, protocol, remote_address, write_lock),
                 asio::deferred),
             asio::co_spawn(executor,
-                session_writer(socket, *event_channel, remote_address, write_lock, protocol.is_websocket(), protocol.is_json()),
+                session_writer(socket, *event_channel, remote_address, write_lock, protocol.is_websocket(), protocol.wire()),
                 asio::deferred)
         ).async_wait(asio::experimental::wait_for_one(), asio::use_awaitable);
 

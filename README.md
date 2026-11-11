@@ -1,6 +1,6 @@
 # WAMP Router
 
-A header only C++23 implementation of a [WAMP](https://wamp-proto.org/) (Web Application Messaging Protocol) router speaking CBOR or JSON over RawSocket or WebSocket, on one port.
+A header only C++23 implementation of a [WAMP](https://wamp-proto.org/) (Web Application Messaging Protocol) router speaking CBOR, JSON or MessagePack over RawSocket or WebSocket, on one port.
 
 ## What is WAMP?
 
@@ -15,7 +15,7 @@ This router acts as the central message broker, routing messages between clients
 - **RPC Support**: Full `CALL`, `REGISTER`, `YIELD`, `INVOCATION`, `RESULT` workflow, with call timeouts and call canceling (`CANCEL`, modes `skip`, `kill`, `killnowait`)
 - **PubSub Support**: `SUBSCRIBE`, `PUBLISH`, `EVENT` messaging
 - **RawSocket and WebSocket Transport**: both on the same port, told apart by the first byte of the connection
-- **CBOR and JSON serializers**: `wamp.2.cbor` and `wamp.2.json` over WebSocket, serializers 3 and 1 over RawSocket; sessions with different serializers talk to each other (MessagePack is not supported yet)
+- **CBOR, JSON and MessagePack serializers**: `wamp.2.cbor`, `wamp.2.json` and `wamp.2.msgpack` over WebSocket, serializers 3, 1 and 2 over RawSocket; sessions with different serializers talk to each other
 - **Payload passthru mode**: `ppt_*` options and an opaque binary payload (protobuf, encrypted data, custom envelopes) are routed without being decoded; see [Payload passthru](#payload-passthru)
 - **Lossless payloads**: null, booleans, integers, floats, strings, byte strings, lists and dicts of any nesting pass through unchanged
 - **TLS 1.3 Support**: Encrypted transport with optional client certificates
@@ -73,7 +73,7 @@ call_timeout_ms = 30000   # callee answer deadline, 0 = none; a CALL's "timeout"
 [server.websocket]
 enabled = true            # accept WebSocket (wamp.2.cbor) upgrades on the same port
 allowed_origins = []      # empty = any origin; otherwise a request with an Origin header must match one entry exactly
-subprotocols = ["wamp.2.cbor", "wamp.2.json"]   # offered on the upgrade; "wamp.2.json" also enables JSON over RawSocket
+subprotocols = ["wamp.2.cbor", "wamp.2.json", "wamp.2.msgpack"]   # offered on the upgrade; JSON and MessagePack also enable RawSocket serializers 1 and 2
 # max_message_size = 16777215   # bytes (the maximum)
 
 # Per-session event queue and overflow policy: see "Event queue and backpressure" below
@@ -251,17 +251,17 @@ ctest --test-dir build-local --output-on-failure
 
 ## Connecting Clients
 
-The router speaks CBOR or JSON over TLS 1.3, with either WAMP RawSocket or WebSocket transport. All of them are served on the same port; the router looks at the first byte of each connection (`0x7F` = RawSocket, `G` of `GET` = WebSocket upgrade) and the client picks the serializer:
+The router speaks CBOR, JSON or MessagePack over TLS 1.3, with either WAMP RawSocket or WebSocket transport. All of them are served on the same port; the router looks at the first byte of each connection (`0x7F` = RawSocket, `G` of `GET` = WebSocket upgrade) and the client picks the serializer:
 
 - **Protocol**: WAMP v2
 - **Transport**: RawSocket, or WebSocket (RFC 6455), over TLS 1.3 (TCP)
-- **Serializer**: CBOR (`wamp.2.cbor`, RawSocket serializer 3) or JSON (`wamp.2.json`, RawSocket serializer 1); MessagePack is not supported yet
+- **Serializer**: CBOR (`wamp.2.cbor`, RawSocket serializer 3), JSON (`wamp.2.json`, serializer 1) or MessagePack (`wamp.2.msgpack`, serializer 2)
 - **Default Port**: Configured in config.toml (typically 8080)
 - **Authentication**: WAMP-Cryptosign with Ed25519 signatures (optional)
 
 ### WebSocket
 
-A client opens a normal WebSocket connection (`ws://` or, with TLS, `wss://`; any path) and offers `wamp.2.cbor` and/or `wamp.2.json` in `Sec-WebSocket-Protocol`. Each WAMP message is one WebSocket message: a binary frame for CBOR, a text frame for JSON. Behavior:
+A client opens a normal WebSocket connection (`ws://` or, with TLS, `wss://`; any path) and offers `wamp.2.cbor`, `wamp.2.json` and/or `wamp.2.msgpack` in `Sec-WebSocket-Protocol`. Each WAMP message is one WebSocket message: a binary frame for CBOR, a text frame for JSON. Behavior:
 
 - **Handshake:** the router answers `101` with the subprotocol it chose: the first one the client offers that is listed in `[server.websocket] subprotocols`. Requests that offer none of them get `400`, a version other than 13 gets `426`, and a disallowed origin gets `403`; the connection is then closed.
 - **Origin check:** browsers send an `Origin` header and cannot be stopped from opening connections to any host, so set `[server.websocket] allowed_origins` to the sites that may use the router. A request with an `Origin` that is not on the list is refused; requests without one (non-browser clients) are accepted. An empty list accepts any origin.
@@ -280,6 +280,17 @@ A client opens a normal WebSocket connection (`ws://` or, with TLS, `wss://`; an
 - JSON numbers above 2^53 lose precision in JavaScript clients; the router passes them through exactly.
 - Cost: converting a 10-argument message takes about 0.9 µs (CBOR to JSON) and 1.0 µs (JSON to CBOR) on the machine used for the other micro-benchmarks, per message per JSON session. A JSON subscriber therefore costs more per delivered event than a CBOR one (60 ns with the stamped template); in the in-process load test with 10 subscribers JSON fan-out ran at about 75% of the CBOR rate and JSON RPC at 82%, with the client's own conversion included.
 - Tested with Autobahn|Python over `wss://` and `rss://` with `JsonSerializer` and Cryptosign, including floats, `None`, nested containers and bytes.
+
+### MessagePack
+
+`wamp.2.msgpack` (WebSocket binary frames) and RawSocket serializer 2 carry the same messages as CBOR, converted at the edge of the session exactly like JSON (`include/msgpack.hpp`; sessions with any serializers publish to and call each other, and CBOR sessions pay nothing). Rules:
+
+- nil, booleans, integers, floats, `str`, `bin`, arrays and maps of any nesting (up to 64 levels) are lossless in both directions. `bin` is a CBOR byte string (no base64, unlike JSON); `str` must be valid UTF-8; map keys must be strings.
+- A `uint64` above `INT64_MAX` becomes a float on the way in (as for JSON); a `float32` is widened to a float64. Extension types (including the timestamp) are refused as malformed messages. NaN and infinities are kept (MessagePack can express them).
+- Output always uses the shortest integer forms, `float64` for floats, and definite-length containers.
+- An undecodable message counts as malformed (see below); as the first message of a session it closes the connection. On WebSocket a text frame is the wrong kind and closes the connection (1003).
+- Cost: converting a 10-argument message takes about 0.5 µs in either direction, against about 0.9-1.0 µs for JSON (micro-benchmark, per message per MessagePack session). In the in-process load test (10 subscribers, unpaced) fan-out ran at about 84% of the CBOR rate (JSON: 74%) and RPC at 97% (JSON: 93%), with the client's own conversion included.
+- Tested with Autobahn|Python over `wss://` and `rss://` with `MsgPackSerializer` and Cryptosign (patterns, floats, `None`, nested containers, bytes, `é`, negative and 2^40 integers); `wamp_load --serializer msgpack`.
 
 ### Pattern-based subscriptions and registrations
 

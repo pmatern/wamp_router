@@ -56,8 +56,8 @@ call_timeout_ms = 30000
 # apart by the first byte of the connection. TLS applies to both.
 enabled = true
 # Subprotocols offered on the upgrade; a client that offers several gets its first choice that is listed here.
-# "wamp.2.json" also enables JSON over RawSocket (serializer 1) on the same port.
-subprotocols = ["wamp.2.cbor", "wamp.2.json"]
+# "wamp.2.json" and "wamp.2.msgpack" also enable JSON (serializer 1) and MessagePack (serializer 2) over RawSocket.
+subprotocols = ["wamp.2.cbor", "wamp.2.json", "wamp.2.msgpack"]
 # Browsers send an Origin header. Empty = accept any origin; otherwise a request that carries an Origin
 # must match one entry exactly (scheme://host[:port]). Requests without an Origin (non-browser clients) pass.
 allowed_origins = []

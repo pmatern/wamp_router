@@ -19,7 +19,7 @@
 #include "uri_match.hpp"
 #include "wamp_serializer.hpp"
 #include "raw_socket.hpp"
-#include "json.hpp"
+#include "wire.hpp"
 #include "websocket.hpp"
 #include "crypto_utils.hpp"
 #include <asio.hpp>
@@ -129,10 +129,12 @@ public:
     enum class Transport { RAWSOCKET, WEBSOCKET };
     void set_transport(Transport transport) { transport_ = transport; }
 
-    // Which serializer to speak (wamp.2.cbor or wamp.2.json; RawSocket serializer 3 or 1); call before connect().
-    // The client works in CBOR internally and converts at the socket, like the router's JSON sessions.
-    enum class Serializer { CBOR, JSON };
-    void set_serializer(Serializer serializer) { json_ = serializer == Serializer::JSON; }
+    // Which serializer to speak (wamp.2.cbor, wamp.2.json or wamp.2.msgpack; RawSocket serializer 3, 1 or 2); call
+    // before connect(). The client works in CBOR internally and converts at the socket, like the router's sessions.
+    enum class Serializer { CBOR, JSON, MSGPACK };
+    void set_serializer(Serializer serializer) {
+        wire_ = serializer == Serializer::JSON ? Wire::JSON : serializer == Serializer::MSGPACK ? Wire::MSGPACK : Wire::CBOR;
+    }
 
     // Announce Payload Passthru Mode in HELLO (default true). Off, the router refuses ppt_* from and to this client.
     void set_passthru(bool enabled) { passthru_ = enabled; }
@@ -609,10 +611,10 @@ private:
     void handle_frame(rawsocket::FrameType type, const std::vector<uint8_t>& payload) {
         switch (type) {
             case rawsocket::FrameType::REGULAR:
-                if (json_ && transport_ == Transport::RAWSOCKET) {   // (WebSocket text was converted on arrival)
+                if (wire_ != Wire::CBOR && transport_ == Transport::RAWSOCKET) {   // (WebSocket was converted on arrival)
                     std::vector<uint8_t> cbor;
-                    if (auto converted = jsoncodec::to_cbor({reinterpret_cast<const char*>(payload.data()), payload.size()}, cbor); !converted) {
-                        spdlog::error("Received invalid JSON from the router: {}", converted.error().message());
+                    if (auto converted = wirecodec::to_cbor(wire_, payload, cbor); !converted) {
+                        spdlog::error("Received invalid {} from the router: {}", to_string(wire_), converted.error().message());
                         break;
                     }
                     handle_wamp_message(cbor);
@@ -1052,7 +1054,7 @@ private:
         const std::string request =
             "GET /ws HTTP/1.1\r\nHost: " + host + "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
             "Sec-WebSocket-Key: " + key + "\r\nSec-WebSocket-Version: 13\r\n"
-            "Sec-WebSocket-Protocol: " + std::string{json_ ? ws::kSubprotocolJson : ws::kSubprotocol} + "\r\n\r\n";
+            "Sec-WebSocket-Protocol: " + std::string{subprotocol()} + "\r\n\r\n";
         co_await asio::async_write(socket_, asio::buffer(request), use_awaitable);
 
         std::string head;
@@ -1064,7 +1066,7 @@ private:
         }
         if (!head.starts_with("HTTP/1.1 101") ||
             head.find("Sec-WebSocket-Accept: " + ws::accept_key(key) + "\r\n") == std::string::npos ||
-            head.find("Sec-WebSocket-Protocol: " + std::string{json_ ? ws::kSubprotocolJson : ws::kSubprotocol} + "\r\n") == std::string::npos) {
+            head.find("Sec-WebSocket-Protocol: " + std::string{subprotocol()} + "\r\n") == std::string::npos) {
             throw std::runtime_error("WebSocket upgrade refused: " + head.substr(0, head.find("\r\n")));
         }
         spdlog::debug("WebSocket upgrade complete");
@@ -1074,14 +1076,15 @@ private:
     std::vector<uint8_t> to_websocket_frame(const std::vector<uint8_t>& rawsocket_frame) {
         std::string json_text;
         std::span<const uint8_t> payload = std::span<const uint8_t>{rawsocket_frame}.subspan(rawsocket::FRAME_HEADER_SIZE);
-        if (json_) {
-            if (auto converted = jsoncodec::from_cbor(payload, json_text); !converted) {
-                throw std::runtime_error("Cannot write message as JSON: " + converted.error().message());
+        if (wire_ != Wire::CBOR) {
+            if (auto converted = wirecodec::from_cbor(wire_, payload, json_text); !converted) {
+                throw std::runtime_error(std::string{"Cannot write message as "} + to_string(wire_) + ": " +
+                                         converted.error().message());
             }
             payload = {reinterpret_cast<const uint8_t*>(json_text.data()), json_text.size()};
         }
         std::vector<uint8_t> out;
-        const auto header = ws::encode_header(json_ ? ws::Opcode::TEXT : ws::Opcode::BINARY, payload.size());
+        const auto header = ws::encode_header(wire_ == Wire::JSON ? ws::Opcode::TEXT : ws::Opcode::BINARY, payload.size());
         out.reserve(header.size + 4 + payload.size());
         out.insert(out.end(), header.bytes.begin(), header.bytes.begin() + static_cast<std::ptrdiff_t>(header.size));
         out[1] |= 0x80;   // mask bit
@@ -1114,17 +1117,18 @@ private:
             }
             if (ws_in_.size() - pos < header + length) break;
             if (opcode == 0x8) return false;                                   // close
-            if (opcode == 0x1 && json_) {                                      // text: one WAMP message in JSON
+            const bool text_wire = wire_ == Wire::JSON;
+            if ((opcode == 0x1 && text_wire) || (opcode == 0x2 && wire_ == Wire::MSGPACK)) {   // one converted WAMP message
                 std::vector<uint8_t> cbor;
-                if (auto converted = jsoncodec::to_cbor({reinterpret_cast<const char*>(p + header), static_cast<size_t>(length)}, cbor); !converted) {
-                    spdlog::error("Received invalid JSON from the router: {}", converted.error().message());
+                if (auto converted = wirecodec::to_cbor(wire_, {p + header, static_cast<size_t>(length)}, cbor); !converted) {
+                    spdlog::error("Received invalid {} from the router: {}", to_string(wire_), converted.error().message());
                     return false;
                 }
                 const auto frame_header = rawsocket::encode_frame_header(
                     rawsocket::FrameHeader{rawsocket::FrameType::REGULAR, static_cast<uint32_t>(cbor.size())});
                 read_buffer_.insert(read_buffer_.end(), frame_header.begin(), frame_header.end());
                 read_buffer_.insert(read_buffer_.end(), cbor.begin(), cbor.end());
-            } else if (opcode == 0x2 && !json_) {                              // binary: one WAMP message
+            } else if (opcode == 0x2 && wire_ == Wire::CBOR) {                 // binary: one WAMP message
                 const auto frame_header = rawsocket::encode_frame_header(
                     rawsocket::FrameHeader{rawsocket::FrameType::REGULAR, static_cast<uint32_t>(length)});
                 read_buffer_.insert(read_buffer_.end(), frame_header.begin(), frame_header.end());
@@ -1141,7 +1145,8 @@ private:
 
         rawsocket::HandshakeRequest request{
             .max_length = rawsocket::MaxLengthCode::BYTES_16M,
-            .serializer = json_ ? rawsocket::Serializer::JSON : rawsocket::Serializer::CBOR
+            .serializer = wire_ == Wire::JSON ? rawsocket::Serializer::JSON
+                        : wire_ == Wire::MSGPACK ? rawsocket::Serializer::MSGPACK : rawsocket::Serializer::CBOR
         };
 
         auto handshake_bytes = rawsocket::encode_handshake_request(request);
@@ -1277,10 +1282,10 @@ private:
         std::vector<uint8_t> converted;
         if (transport_ == Transport::WEBSOCKET) {
             converted = to_websocket_frame(frame_cbor);
-        } else if (json_ && (frame_cbor[0] & 0x07) == static_cast<uint8_t>(rawsocket::FrameType::REGULAR)) {
+        } else if (wire_ != Wire::CBOR && (frame_cbor[0] & 0x07) == static_cast<uint8_t>(rawsocket::FrameType::REGULAR)) {
             std::string text;
-            if (auto r = jsoncodec::from_cbor(std::span<const uint8_t>{frame_cbor}.subspan(rawsocket::FRAME_HEADER_SIZE), text); !r) {
-                throw std::runtime_error("Cannot write message as JSON: " + r.error().message());
+            if (auto r = wirecodec::from_cbor(wire_, std::span<const uint8_t>{frame_cbor}.subspan(rawsocket::FRAME_HEADER_SIZE), text); !r) {
+                throw std::runtime_error(std::string{"Cannot write message as "} + to_string(wire_) + ": " + r.error().message());
             }
             const auto header = rawsocket::encode_frame_header(
                 rawsocket::FrameHeader{rawsocket::FrameType::REGULAR, static_cast<uint32_t>(text.size())});
@@ -1350,7 +1355,10 @@ private:
     std::vector<uint8_t> read_buffer_;
     Transport transport_{Transport::RAWSOCKET};
     std::vector<uint8_t> ws_in_;                    // WebSocket bytes not yet a complete frame
-    bool json_{false};                              // speak wamp.2.json instead of wamp.2.cbor
+    Wire wire_{Wire::CBOR};                         // the serializer spoken on the wire (the client works in CBOR)
+    [[nodiscard]] std::string_view subprotocol() const {
+        return wire_ == Wire::JSON ? ws::kSubprotocolJson : wire_ == Wire::MSGPACK ? ws::kSubprotocolMsgpack : ws::kSubprotocol;
+    }
     std::minstd_rand next_mask_{std::random_device{}()};   // client frame masks (not security relevant here)
     rawsocket::FrameHeader current_frame_header_{};
     uint32_t expected_payload_length_;

@@ -738,7 +738,7 @@ TEST_CASE("WebSocket protocol violations and rejected upgrades", "[router][webso
     }
     SECTION("no subprotocol the router speaks offered: 400") {
         WsTestClient ws;
-        CHECK(ws.connect(router.port(), "", "wamp.2.msgpack").starts_with("HTTP/1.1 400"));
+        CHECK(ws.connect(router.port(), "", "wamp.2.unknown").starts_with("HTTP/1.1 400"));
         CHECK(ws.closed_by_peer());
     }
     SECTION("wrong version: 426 advertising 13") {
@@ -1340,9 +1340,9 @@ TEST_CASE("Subprotocol negotiation picks the client's first choice that is enabl
         WsTestClient b;
         CHECK(b.connect(router.port(), "", "wamp.2.cbor, wamp.2.json").find("Sec-WebSocket-Protocol: wamp.2.cbor\r\n") != std::string::npos);
         WsTestClient c;
-        CHECK(c.connect(router.port(), "", "wamp.2.msgpack, wamp.2.json").find("Sec-WebSocket-Protocol: wamp.2.json\r\n") != std::string::npos);
+        CHECK(c.connect(router.port(), "", "wamp.2.msgpack, wamp.2.json").find("Sec-WebSocket-Protocol: wamp.2.msgpack\r\n") != std::string::npos);
         WsTestClient d;
-        CHECK(d.connect(router.port(), "", "wamp.2.msgpack").starts_with("HTTP/1.1 400"));
+        CHECK(d.connect(router.port(), "", "wamp.2.unknown").starts_with("HTTP/1.1 400"));
     }
     SECTION("only cbor enabled") {
         auto config = plain_config();
@@ -1494,8 +1494,12 @@ TEST_CASE("JSON over RawSocket (serializer 1)", "[router][json]") {
     CHECK(event[0] == 36);
     CHECK(event[4] == json::array({1.25, nullptr, json::object({{"a", json::array({1, 2})}})}));
 
-    SECTION("MessagePack is still refused") {
-        BareConnection msgpack{router.port()};
+    SECTION("MessagePack is refused when it is not enabled") {
+        auto config = plain_config();
+        config.websocket.subprotocols = {"wamp.2.cbor", "wamp.2.json"};
+        Router no_msgpack{config, Router::Transport::PLAIN, 1};
+        no_msgpack.start();
+        BareConnection msgpack{no_msgpack.port()};
         msgpack.send(rawsocket::encode_handshake_request({.max_length = rawsocket::MaxLengthCode::BYTES_16M,
                                                           .serializer = rawsocket::Serializer::MSGPACK}));
         auto reply = msgpack.read_n(4);
@@ -1956,4 +1960,143 @@ TEST_CASE("A wildcard registration answers when no exact or prefix registration 
     CHECK(answer == "ok");
     CHECK(seen_procedure == "svc.db.status");
     CHECK(missing_error == "wamp.error.no_such_procedure");
+}
+
+// ----------------------------------------------------------------------------
+// MessagePack (wamp.2.msgpack)
+// ----------------------------------------------------------------------------
+
+namespace {
+// The next WebSocket message as a nlohmann value read from MessagePack (null if not a binary frame)
+json ws_msgpack_frame(WsTestClient& ws) {
+    auto frame = ws.read_frame();
+    if (!frame || frame->opcode != 0x2) return nullptr;
+    return json::from_msgpack(frame->payload, true, false);
+}
+}  // namespace
+
+TEST_CASE("A MessagePack session over WebSocket: handshake, binary frames, replies", "[router][msgpack][websocket]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 1};
+    router.start();
+    WsTestClient ws;
+    const auto head = ws.connect(router.port(), "", "wamp.2.msgpack");
+    REQUIRE(head.find("Sec-WebSocket-Protocol: wamp.2.msgpack\r\n") != std::string::npos);
+
+    auto send = [&](const json& message) { ws.send_binary(json::to_msgpack(message)); };
+    send(json::array({1, "test.realm", json::object()}));
+    auto welcome = ws_msgpack_frame(ws);
+    REQUIRE(welcome.is_array());
+    CHECK(welcome[0] == 2);
+
+    send(json::array({32, 7, json::object(), "mp.topic"}));
+    auto subscribed = ws_msgpack_frame(ws);
+    REQUIRE(subscribed.is_array());
+    CHECK(subscribed[0] == 33);
+    CHECK(subscribed[1] == 7);
+
+    // a payload with every MessagePack type the model has, published to ourselves
+    const auto payload = json::array({1.25, nullptr, json::array({1, json::object({{"a", json::array({1, 2})}})}),
+                                      json::binary({1, 2, 3}), "\xC3\xA9", -70000, true});
+    send(json::array({16, 8, json::object({{"acknowledge", true}, {"exclude_me", false}}), "mp.topic", payload}));
+    auto first = ws_msgpack_frame(ws);
+    auto second = ws_msgpack_frame(ws);
+    json event = first.is_array() && first[0] == 36 ? first : second;
+    json published = first.is_array() && first[0] == 17 ? first : second;
+    REQUIRE(event.is_array());
+    CHECK(event[4] == payload);
+    CHECK(published[0] == 17);
+
+    // a text frame is the wrong kind for wamp.2.msgpack
+    ws.send_text("[1]");
+    auto closing = ws.read_frame();
+    REQUIRE(closing.has_value());
+    CHECK(closing->opcode == 0x8);
+}
+
+TEST_CASE("MessagePack over RawSocket (serializer 2), and garbage is a protocol violation", "[router][msgpack]") {
+    auto config = plain_config();
+    config.max_malformed_messages = 3;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    BareConnection c{router.port()};
+    c.send(rawsocket::encode_handshake_request({.max_length = rawsocket::MaxLengthCode::BYTES_16M,
+                                                .serializer = rawsocket::Serializer::MSGPACK}));
+    auto reply = c.read_n(4);
+    REQUIRE(reply.size() == 4);
+    REQUIRE(reply[0] == 0x7F);
+    CHECK((reply[1] & 0x0F) == 2);   // the router echoes serializer 2
+
+    auto send = [&](const json& message) { c.send(rawsocket::create_wamp_message(json::to_msgpack(message))); };
+    auto read = [&] {
+        auto frame = c.read_frame();
+        return json::from_msgpack(frame, true, false);
+    };
+    send(json::array({1, "test.realm", json::object()}));
+    auto welcome = read();
+    REQUIRE(welcome.is_array());
+    CHECK(welcome[0] == 2);
+
+    // undecodable messages (0xc1 is not MessagePack) end in ABORT once the limit is reached
+    for (int i = 0; i < 3; ++i) c.send(rawsocket::create_wamp_message(std::vector<uint8_t>{0xc1}));
+    bool aborted = false;
+    for (int i = 0; i < 4 && !aborted; ++i) {
+        auto frame = c.read_frame();
+        if (frame.empty()) break;
+        auto message = json::from_msgpack(frame, true, false);
+        aborted = message.is_array() && message[0] == 3;
+    }
+    CHECK(aborted);
+}
+
+TEST_CASE("WampClient speaks MessagePack over WebSocket and RawSocket, talking to CBOR and JSON clients",
+          "[router][msgpack][client][crossshard]") {
+    for (const bool websocket : {true, false}) {
+        INFO(std::string{websocket ? "WebSocket" : "RawSocket"});
+        Router router{plain_config(), Router::Transport::PLAIN, 2};
+        router.start();
+
+        asio::io_context io;
+        WampClient mp_client{io};
+        mp_client.set_serializer(WampClient::Serializer::MSGPACK);
+        if (websocket) mp_client.set_transport(WampClient::Transport::WEBSOCKET);
+        WampClient cbor_client{io};
+        WampClient json_client{io};
+        json_client.set_serializer(WampClient::Serializer::JSON);
+
+        WampList mp_got, cbor_got, json_got, call_result, json_call;
+        bool done = false;
+        const WampList rich{1.5, nullptr, WampList{int64_t{1}, WampDict{{"k", true}}}, WampBytes{9, 8}, std::string{"\xC3\xA9"},
+                            int64_t{-70000}, int64_t{1} << 40};
+
+        co_spawn(io, [&]() -> awaitable<void> {
+            co_await mp_client.connect("127.0.0.1", router.port(), "test.realm");
+            co_await cbor_client.connect("127.0.0.1", router.port(), "test.realm");
+            co_await json_client.connect("127.0.0.1", router.port(), "test.realm");
+            co_await mp_client.subscribe("mp.topic", [&](const EventMessage& e) { mp_got = e.arguments; });
+            co_await cbor_client.subscribe("cbor.topic", [&](const EventMessage& e) { cbor_got = e.arguments; });
+            co_await json_client.subscribe("json.topic", [&](const EventMessage& e) { json_got = e.arguments; });
+            (void)co_await mp_client.register_procedure("mp.echo",
+                [](const InvocationMessage& inv) -> awaitable<YieldMessage> { co_return YieldMessage{inv.request_id, {}, inv.arguments}; });
+
+            (void)co_await cbor_client.publish("mp.topic", rich);
+            (void)co_await mp_client.publish("cbor.topic", rich);
+            (void)co_await mp_client.publish("json.topic", rich);
+            call_result = co_await cbor_client.call("mp.echo", rich);
+            json_call = co_await json_client.call("mp.echo", rich);
+            for (int i = 0; i < 100 && (mp_got.empty() || cbor_got.empty() || json_got.empty()); ++i) co_await pause(io, 20ms);
+            co_await mp_client.disconnect();
+            co_await cbor_client.disconnect();
+            co_await json_client.disconnect();
+            done = true;
+        }, detached);
+        io.run_for(15s);
+
+        REQUIRE(done);
+        CHECK(mp_got == rich);
+        CHECK(cbor_got == rich);
+        CHECK(json_got == rich);
+        CHECK(call_result == rich);
+        CHECK(json_call == rich);
+    }
 }
