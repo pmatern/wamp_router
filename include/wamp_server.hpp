@@ -290,7 +290,9 @@ session_writer(SocketType& socket, EventChannel& channel, const std::string& rem
     // WebSocket: the router's frames are [4-byte RawSocket header][payload]; each is sent as a binary
     // message made of a small WebSocket header (kept here, addresses stable) and the shared payload, unmodified
     std::vector<ws::FrameHeaderBytes> ws_headers;
-    ws_headers.reserve(kMaxBatchFrames + 1);
+    // (reserved up front because the gathered buffers point into it; plain CBOR over RawSocket never uses it, and
+    // 65 x 24 bytes per idle session is not worth paying there)
+    if (websocket || wire != Wire::CBOR) ws_headers.reserve(kMaxBatchFrames + 1);
     // JSON sessions: each frame is converted from CBOR to JSON text into its own string (the strings are
     // referenced by the gathered write, so none may move: a deque keeps its elements in place)
     std::deque<std::string> json_texts;

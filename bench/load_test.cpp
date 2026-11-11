@@ -60,6 +60,7 @@ struct Options {
     size_t payload_args = 10;
     size_t connections = 1000;   // idle: connections to open
     size_t instance = 0;         // names the topic/procedure/realm so several wamp_load processes can share one router
+    size_t idle_cutoff = 1;      // pubsub: seconds without a new event before the run stops waiting
     size_t hold_seconds = 3;     // idle: how long to keep them open (so memory can be sampled)
     size_t queue_size = 100;     // embedded router: per-session event queue size
     std::string overflow = "backpressure";  // embedded router: backpressure | drop
@@ -89,6 +90,7 @@ void usage() {
         "                           a router with several shards: --callers clients, --calls operations each)\n"
         "  --connections N          idle: connections to open (default 1000)\n"
         "  --instance N             suffix topic/procedure names with N, to run several wamp_load processes against one router\n"
+        "  --idle-cutoff S          pubsub: stop waiting after S seconds without a new event (default 1)\n"
         "  --hold S                 idle: seconds to keep them open (default 3)\n"
         "  --subscribers N          pubsub: subscriber clients (default 10)\n"
         "  --messages N             pubsub: events published (default 10000)\n"
@@ -131,6 +133,7 @@ bool parse(int argc, char** argv, Options& o) {
         else if (a == "--connections") { if (!number(o.connections)) return false; }
         else if (a == "--instance") { if (!number(o.instance)) return false; }
         else if (a == "--hold") { if (!number(o.hold_seconds)) return false; }
+        else if (a == "--idle-cutoff") { if (!number(o.idle_cutoff)) return false; }
         else if (a == "--payload-args") { if (!number(o.payload_args)) return false; }
         else { std::fprintf(stderr, "unknown option: %s\n", a.c_str()); usage(); return false; }
     }
@@ -234,6 +237,13 @@ awaitable<void> disconnect_quietly(WampClient& client) {
 struct PubSubState {
     Latencies latency;
     size_t delivered = 0;
+    // Per-subscriber sequence check (argument 1 carries the event number): a jump forward means events that never
+    // arrived before a later one did, so loss rather than lateness; events that stop arriving at the end show up
+    // as the difference between expected and delivered once the idle cutoff has passed
+    std::vector<int64_t> next_seq;
+    size_t gaps = 0;           // events skipped inside a subscriber's sequence
+    size_t reordered = 0;      // events that arrived after a later one
+    size_t duplicates = 0;
     Clock::time_point last_event = Clock::now();
 };
 
@@ -269,8 +279,17 @@ awaitable<void> run_pubsub(asio::io_context& io, ClientPool& pool, const Options
     co_await publisher.connect(host, port, "load.realm");
     for (auto& sub : subs) {
         co_await sub->connect(host, port, "load.realm");
-        co_await sub->subscribe(kTopic, [state](const EventMessage& ev) {
+        const size_t index = state->next_seq.size();
+        state->next_seq.push_back(0);
+        co_await sub->subscribe(kTopic, [state, index](const EventMessage& ev) {
             const int64_t t = ev.arguments.empty() ? 0 : std::get<int64_t>(ev.arguments[0]);
+            if (ev.arguments.size() > 1) {
+                const int64_t seq = std::get<int64_t>(ev.arguments[1]);
+                auto& next = state->next_seq[index];
+                if (seq > next) state->gaps += static_cast<size_t>(seq - next);
+                else if (seq < next) ++state->reordered;
+                if (seq >= next) next = seq + 1;
+            }
             state->latency.add(now_ns() - t);
             ++state->delivered;
             state->last_event = Clock::now();
@@ -289,6 +308,7 @@ awaitable<void> run_pubsub(asio::io_context& io, ClientPool& pool, const Options
             }
         }
         args[0] = now_ns();
+        if (args.size() > 1) args[1] = static_cast<int64_t>(i);
         (void)co_await publisher.publish(kTopic, args);
     }
     const auto publish_end = Clock::now();
@@ -296,7 +316,7 @@ awaitable<void> run_pubsub(asio::io_context& io, ClientPool& pool, const Options
     // Wait for deliveries to finish: all arrived, or nothing new for 1 s
     const size_t expected = o.messages * o.subscribers;
     state->last_event = Clock::now();
-    while (state->delivered < expected && Clock::now() - state->last_event < std::chrono::seconds(1)) {
+    while (state->delivered < expected && Clock::now() - state->last_event < std::chrono::seconds(o.idle_cutoff)) {
         co_await sleep_for(io, std::chrono::milliseconds(10));
     }
     const size_t delivered = state->delivered;
@@ -311,6 +331,12 @@ awaitable<void> run_pubsub(asio::io_context& io, ClientPool& pool, const Options
                 expected - delivered, 100.0 * static_cast<double>(expected - delivered) / static_cast<double>(expected));
     std::printf("%-16s %.0f events/s\n", "delivery rate",
                 static_cast<double>(delivered) / std::max(seconds(start, end), 1e-9));
+    if (o.payload_args > 1) {
+        const size_t missing = expected - delivered;
+        std::printf("%-16s %zu skipped inside a sequence, %zu missing in total (%zu of them at the end of a sequence), "
+                    "%zu out of order\n", "sequence check", state->gaps, missing,
+                    missing > state->gaps ? missing - state->gaps : 0, state->reordered);
+    }
     state->latency.print("latency");
     if (router) {
         std::printf("%-16s %llu\n", "router drops", static_cast<unsigned long long>(router->dropped()));
