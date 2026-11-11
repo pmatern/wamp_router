@@ -16,6 +16,7 @@
 #pragma once
 
 #include "wamp_messages.hpp"
+#include "uri_match.hpp"
 #include "wamp_serializer.hpp"
 #include "raw_socket.hpp"
 #include "json.hpp"
@@ -277,13 +278,17 @@ public:
     // PubSub API
     // ========================================================================
 
-    awaitable<uint64_t> subscribe(std::string topic, EventCallback callback) {
+    // `match` makes `topic` a prefix or wildcard pattern; the callback then finds the published topic in
+    // EventMessage::details["topic"].
+    awaitable<uint64_t> subscribe(std::string topic, EventCallback callback, Match match = Match::EXACT) {
         if (state_ != State::ESTABLISHED) {
             throw std::runtime_error("Not connected");
         }
 
         uint64_t request_id = next_request_id();
-        SubscribeMessage msg{request_id, {}, topic};
+        WampDict options;
+        if (match != Match::EXACT) options["match"] = std::string{to_string(match)};
+        SubscribeMessage msg{request_id, std::move(options), topic};
 
         auto channel = std::make_shared<SubscribedChannel>(io_, 1);
         pending_subscribes_[request_id] = channel;
@@ -362,13 +367,17 @@ public:
     // RPC API
     // ========================================================================
 
-    awaitable<uint64_t> register_procedure(std::string uri, InvocationHandler handler) {
+    // `match` makes `uri` a prefix or wildcard pattern; the handler then finds the called procedure in
+    // InvocationMessage::details["procedure"].
+    awaitable<uint64_t> register_procedure(std::string uri, InvocationHandler handler, Match match = Match::EXACT) {
         if (state_ != State::ESTABLISHED) {
             throw std::runtime_error("Not connected");
         }
 
         uint64_t request_id = next_request_id();
-        RegisterMessage msg{request_id, {}, uri};
+        WampDict options;
+        if (match != Match::EXACT) options["match"] = std::string{to_string(match)};
+        RegisterMessage msg{request_id, std::move(options), uri};
 
         auto channel = std::make_shared<RegisteredChannel>(io_, 1);
         pending_registers_[request_id] = channel;

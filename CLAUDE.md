@@ -289,8 +289,9 @@ wamp_router/
 │   ├── wamp_id.hpp           # ID generators (global, router-scoped)
 │   ├── pubsub_handler.hpp    # SUBSCRIBE/PUBLISH/EVENT handling
 │   ├── procedure_handler.hpp # REGISTER/CALL/YIELD handling
-│   ├── subscription_manager.hpp  # Topic subscription tracking
-│   ├── registration_manager.hpp  # Procedure registration tracking
+│   ├── uri_match.hpp         # Match (exact/prefix/wildcard), pattern matching and precedence helpers
+│   ├── subscription_manager.hpp  # Topic subscription tracking (exact, prefix, wildcard)
+│   ├── registration_manager.hpp  # Procedure registration tracking (exact, prefix, wildcard; best match wins)
 │   ├── invocation_tracker.hpp    # Pending RPC call tracking
 │   └── event_channel.hpp     # Asio channel for event delivery
 └── tests/                     # Catch2 unit and integration tests
@@ -310,6 +311,7 @@ wamp_router/
     ├── test_websocket.cpp
     ├── test_json.cpp
     ├── test_ppt.cpp
+    ├── test_patterns.cpp
     ├── test_logging.cpp
     ├── test_cpu_limits.cpp
     ├── test_cbor.cpp
@@ -378,6 +380,9 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 #### JSON (json.hpp)
 - The router core always works on CBOR. A JSON session converts at its edge: `core_payload()` (JSON text to CBOR on input), `to_wire()` / `ws_wrap()` (CBOR replies to JSON), and `session_writer` (queued shared frames to JSON text, per recipient). `jsoncodec::to_cbor` writes indefinite-length containers, which the CBOR reader accepts.
 - The value model (`WampValue` in `wamp_messages.hpp`) is lossless: null, bool, int64, double, string, bytes, list, dict, nested without limit except the 64-level depth cap.
+
+#### Pattern-based subscriptions and registrations
+- `SUBSCRIBE`/`REGISTER` `match` option (`exact`, `prefix`, `wildcard`) is parsed in `WampSession::pattern_match` (invalid values and patterns get an ERROR, `Permissions::allows_pattern` authorizes). `SubscriptionManager::for_each_subscriber` reports each match's `Match`; pattern matches get an EVENT with `details.topic` (`handle_publish` builds that template on demand, `CrossPublish::pattern_event` carries it). `RegistrationManager::find_callee` returns the best registration (`uri::more_specific`); `ProcedureHandler::handle_call` compares it with `ShardGroup::find_registration` (best remote). `ShardGroup` keeps pattern interest/registration lists next to the exact tables.
 
 #### Call canceling
 - `CANCEL` (caller) is handled by `ProcedureHandler::handle_cancel`: it finds the call through `InvocationTracker::find_by_call` (index by caller session + request id) and applies `skip`, `killnowait` or `kill`; for a callee on another shard it sends `CrossCancelCall` to the other shards, and the one holding the call answers the caller with a `CrossFrame`. The dealer announces `call_canceling`.
@@ -552,6 +557,7 @@ Tests use Catch2 framework with CTest integration:
 - **test_cbor.cpp**: Direct CBOR codec vs nlohmann (byte-identical output, decoding, malformed/fuzzed input)
 - **test_realms.cpp**: Realm isolation of topics and procedures
 - **test_crypto_utils.cpp**: Ed25519 signature verification and challenge generation
+- **test_patterns.cpp**: URI matching, precedence, SubscriptionManager/RegistrationManager patterns, pattern authorization; end-to-end pattern tests are in test_router.cpp
 - **test_ppt.cpp**: payload passthru (ppt_* validation, option round trips, EventTemplate details, role features); end-to-end passthru tests are in test_router.cpp
 - **test_json.cpp**: JSON <-> CBOR transcoding (spec vectors, errors, nesting limits, nlohmann oracle on random payloads, fuzz), UTF-8, base64; JSON end-to-end tests are in test_router.cpp
 - **test_websocket.cpp**: WebSocket upgrade parsing, frame parser (lengths, masking, fragmentation, violations, fuzz); end-to-end WebSocket tests live in test_router.cpp (`tests/ws_test_client.hpp` is the blocking test client)

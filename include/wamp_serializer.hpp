@@ -313,6 +313,24 @@ private:
     cbor::Container& c_;
 };
 
+// A SUBSCRIBE/REGISTER Options dict reduced to the "match" option (a string: exact, prefix or wildcard)
+inline WampDict read_match_option(Fields& f) {
+    WampDict options;
+    if (!f.more()) throw MalformedMessage{};
+    auto& r = f.reader();
+    if (r.peek_major() != cbor::Major::MAP) {
+        r.skip();
+        return options;
+    }
+    auto c = r.read_map();
+    while (r.next(c)) {
+        const std::string key = r.read_text();
+        if (key == "match" && r.peek_major() == cbor::Major::TEXT) options[key] = r.read_text();
+        else r.skip();
+    }
+    return options;
+}
+
 // Reads the fields of one message type in wire order and builds the message
 template<typename E, typename T>
 concept FieldExtractor = requires(E&& extract, Fields& fields) {
@@ -572,7 +590,7 @@ inline std::vector<uint8_t> serialize_subscribe(const SubscribeMessage& msg) {
     out.reserve(16 + msg.topic.size());
     auto w = fast::begin(out, MessageType::SUBSCRIBE, 4);
     w.write_uint(msg.request_id);
-    w.write_empty_map();  // options
+    fast::write_dict(w, msg.options);
     w.write_text(msg.topic);
     return out;
 }
@@ -593,8 +611,8 @@ inline std::expected<SubscribeMessage, std::error_code>
 deserialize_subscribe(const std::vector<uint8_t>& cbor_data) {
     return fast::decode<SubscribeMessage>(cbor_data, MessageType::SUBSCRIBE, 4, "SUBSCRIBE", [](fast::Fields& f) {
         const auto request_id = f.uint64();
-        f.skip();  // options
-        return SubscribeMessage{request_id, WampDict{}, f.text()};
+        auto options = fast::read_match_option(f);
+        return SubscribeMessage{request_id, std::move(options), f.text()};
     });
 }
 
@@ -661,7 +679,7 @@ inline std::vector<uint8_t> serialize_register(const RegisterMessage& msg) {
     out.reserve(16 + msg.procedure.size());
     auto w = fast::begin(out, MessageType::REGISTER, 4);
     w.write_uint(msg.request_id);
-    w.write_empty_map();  // options
+    fast::write_dict(w, msg.options);
     w.write_text(msg.procedure);
     return out;
 }
@@ -682,8 +700,8 @@ inline std::expected<RegisterMessage, std::error_code>
 deserialize_register(const std::vector<uint8_t>& cbor_data) {
     return fast::decode<RegisterMessage>(cbor_data, MessageType::REGISTER, 4, "REGISTER", [](fast::Fields& f) {
         const auto request_id = f.uint64();
-        f.skip();  // options
-        return RegisterMessage{request_id, WampDict{}, f.text()};
+        auto options = fast::read_match_option(f);
+        return RegisterMessage{request_id, std::move(options), f.text()};
     });
 }
 

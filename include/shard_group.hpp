@@ -16,6 +16,7 @@
 #pragma once
 
 #include "shard.hpp"
+#include "uri_match.hpp"
 #include "wamp_serializer.hpp"
 #include <asio/awaitable.hpp>
 #include <asio/co_spawn.hpp>
@@ -29,6 +30,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <mutex>
@@ -48,6 +50,8 @@ struct CrossPublish {
     std::string topic;
     EventTemplate event;
     bool ppt{false};  // a passthru event: only subscribers that announced the feature get it
+    // The same EVENT with details.topic, for prefix/wildcard subscribers; set when any pattern subscription exists
+    std::optional<EventTemplate> pattern_event;
 };
 using CrossPublishPtr = std::shared_ptr<const CrossPublish>;
 
@@ -172,13 +176,56 @@ public:
     [[nodiscard]] std::vector<uint32_t> interested(unsigned self, std::string_view realm, std::string_view topic) {
         Member& m = *members_[self];
         std::lock_guard lock{m.interest_mutex};
-        if (m.interest.empty()) return {};
-        auto realm_it = m.interest.find(realm);
-        if (realm_it == m.interest.end()) return {};
-        auto topic_it = realm_it->second.find(topic);
-        if (topic_it == realm_it->second.end()) return {};
-        return topic_it->second;
+        std::vector<uint32_t> shards;
+        if (!m.interest.empty()) {
+            if (auto realm_it = m.interest.find(realm); realm_it != m.interest.end()) {
+                if (auto topic_it = realm_it->second.find(topic); topic_it != realm_it->second.end()) {
+                    shards = topic_it->second;
+                }
+            }
+        }
+        if (!m.pattern_interest.empty()) {
+            if (auto realm_it = m.pattern_interest.find(realm); realm_it != m.pattern_interest.end()) {
+                for (const auto& entry : realm_it->second) {
+                    if (uri::matches(entry.match, entry.uri, topic) && std::ranges::find(shards, entry.shard) == shards.end()) {
+                        shards.push_back(entry.shard);
+                    }
+                }
+            }
+        }
+        return shards;
     }
+
+    // Shard `from` now has a prefix or wildcard subscription to `uri` where it had none. Pattern interest is a short
+    // list per realm that a publish scans; it is updated only when a shard gains its first or loses its last
+    // subscription for a (match, uri).
+    void add_pattern_interest(unsigned from, const std::string& realm, Match match, const std::string& uri) {
+        pattern_keys_.fetch_add(1);   // before the replicas change: a publisher that sees an entry sees the count
+        for (unsigned j = 0; j < members_.size(); ++j) {
+            if (j == from) continue;
+            Member& m = *members_[j];
+            std::lock_guard lock{m.interest_mutex};
+            auto& entries = m.pattern_interest[realm];
+            const PatternEntry entry{match, uri, from};
+            if (std::ranges::find(entries, entry) == entries.end()) entries.push_back(entry);
+        }
+    }
+
+    void remove_pattern_interest(unsigned from, const std::string& realm, Match match, const std::string& uri) {
+        for (unsigned j = 0; j < members_.size(); ++j) {
+            if (j == from) continue;
+            Member& m = *members_[j];
+            std::lock_guard lock{m.interest_mutex};
+            auto realm_it = m.pattern_interest.find(realm);
+            if (realm_it == m.pattern_interest.end()) continue;
+            std::erase(realm_it->second, PatternEntry{match, uri, from});
+            if (realm_it->second.empty()) m.pattern_interest.erase(realm_it);
+        }
+        pattern_keys_.fetch_sub(1);
+    }
+
+    // True while any shard has a prefix or wildcard subscription: publishers then build the pattern EVENT template
+    [[nodiscard]] bool has_pattern_interest() const { return pattern_keys_.load() > 0; }
 
     // Queue `message` for each shard in `targets`. Shards whose inbox is now above the high-water mark are
     // appended to `congested`: the publishing session should wait_for_room() on them before reading more.
@@ -200,9 +247,20 @@ public:
     // REGISTERED is sent, so a CALL after REGISTERED always finds the callee. The hot path (a CALL looking
     // up a remote procedure) takes only the caller's own replica lock.
 
-    // Claims (realm, procedure) for shard `from`; false if it is registered anywhere already
-    bool try_register(unsigned from, const std::string& realm, const std::string& procedure) {
+    // Claims (realm, match, procedure) for shard `from`; false if it is registered anywhere already
+    bool try_register(unsigned from, const std::string& realm, const std::string& procedure,
+                      Match match = Match::EXACT) {
         std::lock_guard lock{registration_mutex_};
+        if (match != Match::EXACT) {
+            if (!pattern_registrations_[realm].emplace(PatternKey{match, procedure}, from).second) return false;
+            for (unsigned j = 0; j < members_.size(); ++j) {
+                if (j == from) continue;
+                Member& m = *members_[j];
+                std::lock_guard replica_lock{m.procedure_mutex};
+                m.procedure_patterns[realm].push_back(PatternEntry{match, procedure, from});
+            }
+            return true;
+        }
         auto& owners = registrations_[realm];
         if (!owners.emplace(procedure, from).second) return false;
         for (unsigned j = 0; j < members_.size(); ++j) {
@@ -214,8 +272,27 @@ public:
         return true;
     }
 
-    void drop_registration(unsigned from, const std::string& realm, const std::string& procedure) {
+    void drop_registration(unsigned from, const std::string& realm, const std::string& procedure,
+                           Match match = Match::EXACT) {
         std::lock_guard lock{registration_mutex_};
+        if (match != Match::EXACT) {
+            auto owners = pattern_registrations_.find(realm);
+            if (owners == pattern_registrations_.end()) return;
+            auto it = owners->second.find(PatternKey{match, procedure});
+            if (it == owners->second.end() || it->second != from) return;
+            owners->second.erase(it);
+            if (owners->second.empty()) pattern_registrations_.erase(owners);
+            for (unsigned j = 0; j < members_.size(); ++j) {
+                if (j == from) continue;
+                Member& m = *members_[j];
+                std::lock_guard replica_lock{m.procedure_mutex};
+                auto r = m.procedure_patterns.find(realm);
+                if (r == m.procedure_patterns.end()) continue;
+                std::erase(r->second, PatternEntry{match, procedure, from});
+                if (r->second.empty()) m.procedure_patterns.erase(r);
+            }
+            return;
+        }
         auto realm_it = registrations_.find(realm);
         if (realm_it == registrations_.end()) return;
         auto it = realm_it->second.find(procedure);
@@ -233,17 +310,35 @@ public:
         }
     }
 
-    // The other shard that holds the registration for (realm, procedure), as seen by shard `self`
-    [[nodiscard]] std::optional<uint32_t> find_registration(unsigned self, std::string_view realm,
-                                                             std::string_view procedure) {
+    // A registration on another shard that matches a called procedure
+    struct RemoteRegistration {
+        uint32_t shard;
+        Match match;
+        std::string uri;
+    };
+
+    // The best registration on another shard for a call to (realm, procedure), as seen by shard `self`: the exact
+    // one if there is one, else the most specific pattern (uri::more_specific)
+    [[nodiscard]] std::optional<RemoteRegistration> find_registration(unsigned self, std::string_view realm,
+                                                                      std::string_view procedure) {
         Member& m = *members_[self];
         std::lock_guard lock{m.procedure_mutex};
-        if (m.procedures.empty()) return std::nullopt;
-        auto r = m.procedures.find(realm);
-        if (r == m.procedures.end()) return std::nullopt;
-        auto it = r->second.find(procedure);
-        if (it == r->second.end()) return std::nullopt;
-        return it->second;
+        if (m.procedures.empty() && m.procedure_patterns.empty()) return std::nullopt;
+        if (auto r = m.procedures.find(realm); r != m.procedures.end()) {
+            if (auto it = r->second.find(procedure); it != r->second.end()) {
+                return RemoteRegistration{it->second, Match::EXACT, std::string{procedure}};
+            }
+        }
+        std::optional<RemoteRegistration> best;
+        if (auto r = m.procedure_patterns.find(realm); r != m.procedure_patterns.end()) {
+            for (const auto& entry : r->second) {
+                if (!uri::matches(entry.match, entry.uri, procedure)) continue;
+                if (!best || uri::more_specific(entry.match, entry.uri, best->match, best->uri)) {
+                    best = RemoteRegistration{entry.shard, entry.match, entry.uri};
+                }
+            }
+        }
+        return best;
     }
 
     // Suspends the calling session until each of `shards` has worked its inbox back under the low-water
@@ -295,12 +390,23 @@ private:
 
     using TopicMap = std::unordered_map<std::string, std::vector<uint32_t>, StringHash, std::equal_to<>>;
 
+    // A prefix or wildcard (match, uri) that `shard` has a subscription or registration for
+    struct PatternEntry {
+        Match match;
+        std::string uri;
+        uint32_t shard;
+        bool operator==(const PatternEntry&) const = default;
+    };
+    using PatternKey = std::pair<Match, std::string>;
+    using PatternList = std::unordered_map<std::string, std::vector<PatternEntry>, StringHash, std::equal_to<>>;
+
     struct alignas(64) Member {
         Shard* shard{nullptr};
         asio::io_context* io{nullptr};
 
         std::mutex interest_mutex;
         std::unordered_map<std::string, TopicMap, StringHash, std::equal_to<>> interest;  // realm -> topic -> shards
+        PatternList pattern_interest;  // realm -> prefix/wildcard subscriptions of the other shards (interest_mutex)
 
         std::mutex mailbox_mutex;
         std::vector<CrossMessage> mailbox;
@@ -312,6 +418,7 @@ private:
         std::mutex procedure_mutex;
         std::unordered_map<std::string, std::unordered_map<std::string, uint32_t, StringHash, std::equal_to<>>,
                            StringHash, std::equal_to<>> procedures;  // realm -> procedure -> shard (other shards only)
+        PatternList procedure_patterns;  // realm -> prefix/wildcard registrations of the other shards (procedure_mutex)
     };
 
     bool push(uint32_t to, CrossMessage message, std::vector<uint32_t>& congested) {
@@ -362,6 +469,8 @@ private:
     std::vector<std::unique_ptr<Member>> members_;
     std::mutex registration_mutex_;
     std::unordered_map<std::string, std::unordered_map<std::string, uint32_t>> registrations_;  // realm -> procedure -> shard
+    std::unordered_map<std::string, std::map<PatternKey, uint32_t>> pattern_registrations_;     // realm -> (match, uri) -> shard
+    std::atomic<size_t> pattern_keys_{0};   // (shard, match, uri) prefix/wildcard subscriptions that exist
 };
 
 } // namespace wamp

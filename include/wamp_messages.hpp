@@ -173,9 +173,13 @@ struct HelloMessage {
         WampDict caller_features = features;
         caller_features["call_canceling"] = true;
         msg.roles.push_back(Role{"caller", caller_features});
-        msg.roles.push_back(Role{"callee", features});
+        WampDict callee_features = features;
+        callee_features["pattern_based_registration"] = true;
+        msg.roles.push_back(Role{"callee", callee_features});
         msg.roles.push_back(Role{"publisher", features});
-        msg.roles.push_back(Role{"subscriber", features});
+        WampDict subscriber_features = features;
+        subscriber_features["pattern_based_subscription"] = true;
+        msg.roles.push_back(Role{"subscriber", subscriber_features});
 
         return msg;
     }
@@ -225,8 +229,10 @@ struct WelcomeMessage {
         WelcomeMessage msg{session_id, realm_uri};
 
         // Add basic router roles
-        msg.roles.push_back(Role{"broker", WampDict{{"payload_passthru_mode", true}}});
-        msg.roles.push_back(Role{"dealer", WampDict{{"payload_passthru_mode", true}, {"call_canceling", true}}});
+        msg.roles.push_back(Role{"broker", WampDict{{"payload_passthru_mode", true},
+                                                    {"pattern_based_subscription", true}}});
+        msg.roles.push_back(Role{"dealer", WampDict{{"payload_passthru_mode", true}, {"call_canceling", true},
+                                                    {"pattern_based_registration", true}}});
 
         return msg;
     }
@@ -735,6 +741,12 @@ struct ErrorMessage {
         WampDict details;
         details["message"] = reason;
         return ErrorMessage{request_type, request_id, details, "wamp.error.invalid_argument"};
+    }
+
+    static ErrorMessage create_invalid_uri(MessageType request_type, uint64_t request_id, const std::string& reason) {
+        WampDict details;
+        details["message"] = reason;
+        return ErrorMessage{request_type, request_id, details, "wamp.error.invalid_uri"};
     }
 
     static ErrorMessage create_feature_not_supported(MessageType request_type, uint64_t request_id,

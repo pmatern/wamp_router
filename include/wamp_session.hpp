@@ -873,6 +873,42 @@ private:
         return false;
     }
 
+    // True if this session may subscribe/register the pattern `uri` with this match policy
+    [[nodiscard]] bool is_authorized(Action action, const std::string& uri, Match match) const {
+        if (role_ == nullptr || role_->allows_pattern(action, uri, match)) {
+            return true;
+        }
+        spdlog::warn("Denied {} on '{}' ({} match) for authid={} role={}", to_string(action), uri, to_string(match),
+                     authid_, role_name_);
+        return false;
+    }
+
+    // The match policy a SUBSCRIBE/REGISTER asks for ("match" option, default exact). A policy the router does not
+    // know, or a pattern that is not valid for it, is answered with an ERROR in response_buffer_ and nullopt.
+    [[nodiscard]] std::optional<Match> pattern_match(MessageType request_type, uint64_t request_id,
+                                                     const WampDict& options, const std::string& uri) {
+        Match match = Match::EXACT;
+        if (const auto it = options.find("match"); it != options.end()) {
+            const auto* name = std::get_if<std::string>(&it->second);
+            const auto parsed = name != nullptr ? parse_match(*name) : std::nullopt;
+            if (!parsed) {
+                response_buffer_ = rawsocket::create_wamp_message(serialize_error(ErrorMessage::create_invalid_argument(
+                    request_type, request_id, "match must be exact, prefix or wildcard")));
+                return std::nullopt;
+            }
+            match = *parsed;
+        }
+        const bool valid = match == Match::EXACT || (match == Match::PREFIX ? !uri.empty() : uri::valid_wildcard(uri));
+        if (!valid) {
+            response_buffer_ = rawsocket::create_wamp_message(serialize_error(ErrorMessage::create_invalid_uri(
+                request_type, request_id,
+                match == Match::PREFIX ? "A prefix must not be empty"
+                                       : "A wildcard pattern needs at least one empty and one non-empty component")));
+            return std::nullopt;
+        }
+        return match;
+    }
+
     // wamp.error.not_authorized for a denied request
     std::span<const uint8_t> deny(MessageType request_type, uint64_t request_id, Action action,
                                   const std::string& uri) {
@@ -922,7 +958,11 @@ private:
                     return malformed("SUBSCRIBE");
                 }
 
-                if (!is_authorized(Action::SUBSCRIBE, subscribe_result->topic)) {
+                const auto match = pattern_match(MessageType::SUBSCRIBE, subscribe_result->request_id,
+                                                 subscribe_result->options, subscribe_result->topic);
+                if (!match) return std::span<const uint8_t>(response_buffer_);
+
+                if (!is_authorized(Action::SUBSCRIBE, subscribe_result->topic, *match)) {
                     return deny(MessageType::SUBSCRIBE, subscribe_result->request_id,
                                 Action::SUBSCRIBE, subscribe_result->topic);
                 }
@@ -930,7 +970,8 @@ private:
                 response_buffer_ = PubSubHandler::handle_subscribe(
                     *realm_ptr_,
                     *subscribe_result,
-                    session_id_
+                    session_id_,
+                    *match
                 );
 
                 return std::span<const uint8_t>(response_buffer_);
@@ -1070,7 +1111,11 @@ private:
                     return malformed("REGISTER");
                 }
 
-                if (!is_authorized(Action::REGISTER, register_result->procedure)) {
+                const auto match = pattern_match(MessageType::REGISTER, register_result->request_id,
+                                                 register_result->options, register_result->procedure);
+                if (!match) return std::span<const uint8_t>(response_buffer_);
+
+                if (!is_authorized(Action::REGISTER, register_result->procedure, *match)) {
                     return deny(MessageType::REGISTER, register_result->request_id,
                                 Action::REGISTER, register_result->procedure);
                 }
@@ -1078,7 +1123,8 @@ private:
                 auto handle_result = ProcedureHandler::handle_register(
                     *realm_ptr_,
                     *register_result,
-                    session_id_
+                    session_id_,
+                    *match
                 );
 
                 if (!handle_result.has_value()) {

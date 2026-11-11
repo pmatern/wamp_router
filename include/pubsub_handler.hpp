@@ -37,25 +37,26 @@ namespace wamp {
 class PubSubHandler {
 public:
     // Tell the other shards whether this shard still has subscribers for a topic
-    static void interest_gained(Realm& realm, const std::string& topic) {
+    static void interest_gained(Realm& realm, const std::string& topic, Match match = Match::EXACT) {
         auto* group = realm.shard.group;
-        if (group && group->size() > 1 && realm.subscriptions.subscriber_count(topic) == 1) {
-            group->add_interest(realm.shard.index, realm.name, topic);
+        if (group && group->size() > 1 && realm.subscriptions.subscriber_count(match, topic) == 1) {
+            if (match == Match::EXACT) group->add_interest(realm.shard.index, realm.name, topic);
+            else group->add_pattern_interest(realm.shard.index, realm.name, match, topic);
         }
     }
 
-    static void interest_lost(Realm& realm, const std::string& topic) {
+    static void interest_lost(Realm& realm, const std::string& topic, Match match = Match::EXACT) {
         auto* group = realm.shard.group;
         if (group && group->size() > 1) {
-            group->remove_interest(realm.shard.index, realm.name, topic);
+            if (match == Match::EXACT) group->remove_interest(realm.shard.index, realm.name, topic);
+            else group->remove_pattern_interest(realm.shard.index, realm.name, match, topic);
         }
     }
 
     static void cleanup_session(Realm& realm, uint64_t session_id) {
         auto& sub_manager = realm.subscriptions;
-        const auto emptied = sub_manager.unsubscribe_session(session_id);
-        for (const auto& topic : emptied) {
-            interest_lost(realm, topic);
+        for (const auto& key : sub_manager.unsubscribe_session(session_id)) {
+            interest_lost(realm, key.uri, key.match);
         }
         spdlog::debug("Cleaned up subscriptions for session {}", session_id);
     }
@@ -65,11 +66,16 @@ public:
     static void deliver_remote(Shard& shard, const CrossPublish& message) {
         Realm& realm = shard.realms.get(message.realm);
         realm.subscriptions.for_each_subscriber(message.topic,
-            [&](uint64_t subscription_id, uint64_t subscriber_session) {
+            [&](uint64_t subscription_id, uint64_t subscriber_session, Match match) {
                 if (message.ppt && !shard.ppt_sessions.contains(subscriber_session)) return;
+                const EventTemplate* event = &message.event;
+                if (match != Match::EXACT) {
+                    if (!message.pattern_event) return;   // the publisher saw no pattern interest yet
+                    event = &*message.pattern_event;
+                }
                 (void)shard.channels.deliver(subscriber_session,
                     EventToSend{subscriber_session, std::make_shared<std::vector<uint8_t>>(
-                                                        message.event.frame_for(subscription_id))});
+                                                        event->frame_for(subscription_id))});
             });
     }
 
@@ -78,7 +84,8 @@ public:
     [[nodiscard]] static std::vector<uint8_t> handle_subscribe(
         Realm& realm,
         const SubscribeMessage& subscribe,
-        uint64_t session_id
+        uint64_t session_id,
+        Match match = Match::EXACT
     ) {
         auto& sub_manager = realm.subscriptions;
         spdlog::debug("SUBSCRIBE request_id={}, topic={}, session={}",
@@ -86,8 +93,8 @@ public:
 
         uint64_t subscription_id = realm.shard.ids.subscription.generate();
 
-        sub_manager.subscribe(subscription_id, subscribe.topic, session_id);
-        interest_gained(realm, subscribe.topic);
+        sub_manager.subscribe(subscription_id, subscribe.topic, session_id, match);
+        interest_gained(realm, subscribe.topic, match);
 
         auto subscribed = SubscribedMessage{subscribe.request_id, subscription_id};
         auto subscribed_cbor = serialize_subscribed(subscribed);
@@ -118,8 +125,8 @@ public:
         }
 
         sub_manager.unsubscribe(unsubscribe.subscription_id);
-        if (sub_manager.subscriber_count(info->topic) == 0) {
-            interest_lost(realm, info->topic);
+        if (sub_manager.subscriber_count(info->match, info->topic) == 0) {
+            interest_lost(realm, info->topic, info->match);
         }
 
         spdlog::info("Sent UNSUBSCRIBED: request_id={}, subscription_id={}",
@@ -155,13 +162,24 @@ public:
         WampDict ppt = ppt::extract(publish.options);
         const bool passthru = !ppt.empty();
 
-        // Serialize the EVENT once; each subscriber only needs its subscription id stamped in
+        // Serialize the EVENT once; each subscriber only needs its subscription id stamped in. Prefix and wildcard
+        // subscribers get the same EVENT with the published topic in its details (a second template, built on demand).
         std::optional<EventTemplate> event_template;
+        std::optional<EventTemplate> pattern_template;
+        auto pattern_event = [&]() -> const EventTemplate& {
+            if (!pattern_template) {
+                WampDict details = ppt;
+                details["topic"] = publish.topic;
+                pattern_template.emplace(EventMessage{0, publication_id, std::move(details),
+                                                      publish.arguments, publish.arguments_kw});
+            }
+            return *pattern_template;
+        };
         size_t subscriber_count = 0;
         size_t sent_count = 0;
 
         sub_manager.for_each_subscriber(publish.topic,
-            [&](uint64_t subscription_id, uint64_t subscriber_session) {
+            [&](uint64_t subscription_id, uint64_t subscriber_session, Match match) {
                 ++subscriber_count;
 
                 if (exclude_me && subscriber_session == session_id) {
@@ -171,6 +189,14 @@ public:
                     return;
                 }
 
+                if (match != Match::EXACT) {
+                    auto pattern_data = std::make_shared<std::vector<uint8_t>>(pattern_event().frame_for(subscription_id));
+                    if (accepted(realm.shard.channels.deliver(subscriber_session,
+                                                              EventToSend{subscriber_session, std::move(pattern_data)}))) {
+                        ++sent_count;
+                    }
+                    return;
+                }
                 if (!event_template) {
                     event_template.emplace(EventMessage{0, publication_id, ppt,
                                                         publish.arguments, publish.arguments_kw});
@@ -194,12 +220,14 @@ public:
         if (auto* group = realm.shard.group; group && group->size() > 1) {
             const auto targets = group->interested(realm.shard.index, realm.name, publish.topic);
             if (!targets.empty()) {
+                std::optional<EventTemplate> remote_pattern;
+                if (group->has_pattern_interest()) remote_pattern.emplace(pattern_event());
                 auto message = std::make_shared<const CrossPublish>(CrossPublish{
                     realm.name, publish.topic,
                     event_template ? *event_template
                                    : EventTemplate{EventMessage{0, publication_id, ppt, publish.arguments,
                                                                 publish.arguments_kw}},
-                    passthru});
+                    passthru, std::move(remote_pattern)});
                 group->send(targets, message, realm.shard.congested);
                 subscriber_count += targets.size();
             }

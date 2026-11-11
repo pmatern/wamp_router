@@ -281,6 +281,19 @@ A client opens a normal WebSocket connection (`ws://` or, with TLS, `wss://`; an
 - Cost: converting a 10-argument message takes about 0.9 µs (CBOR to JSON) and 1.0 µs (JSON to CBOR) on the machine used for the other micro-benchmarks, per message per JSON session. A JSON subscriber therefore costs more per delivered event than a CBOR one (60 ns with the stamped template); in the in-process load test with 10 subscribers JSON fan-out ran at about 75% of the CBOR rate and JSON RPC at 82%, with the client's own conversion included.
 - Tested with Autobahn|Python over `wss://` and `rss://` with `JsonSerializer` and Cryptosign, including floats, `None`, nested containers and bytes.
 
+### Pattern-based subscriptions and registrations
+
+SUBSCRIBE and REGISTER accept `match`: `"exact"` (default), `"prefix"` or `"wildcard"` (announced as `pattern_based_subscription` and `pattern_based_registration`).
+
+- **Subscriptions:** a publish to topic T reaches every subscription whose pattern matches T. A prefix is a plain string prefix of T (`com.shop.` matches `com.shop.orders`); a wildcard has the same number of dot-separated components and an empty component matches anything (`com.shop..created` matches `com.shop.orders.created`). A session with several matching subscriptions gets one EVENT per subscription. For prefix and wildcard subscriptions the EVENT `details` carry `topic`, the published topic.
+- **Registrations:** at most one callee per (match, URI); registering the same pair again fails with `wamp.error.procedure_already_exists`. A CALL goes to exactly one registration: an exact one, otherwise the longest matching prefix, otherwise the wildcard with the most non-empty components (ties go to the smaller pattern string). For prefix and wildcard registrations the INVOCATION `details` carry `procedure`, the called URI. This works across shards: the more specific of the local and remote candidates wins.
+- **Validation:** an unknown `match` is `wamp.error.invalid_argument`; an empty prefix, or a wildcard without at least one empty and one non-empty component, is `wamp.error.invalid_uri`.
+- **Authorization:** a pattern is allowed only if everything it can match is. An exact rule allows only that exact URI; a prefix pattern needs a prefix rule that is a prefix of it, and a wildcard needs one that covers its literal head (the components before the first empty one). A role that may subscribe to `com.shop.orders` therefore cannot subscribe to the prefix `com.shop.orders` (which would also see `com.shop.orders2`).
+- **Cost:** exact-only realms pay nothing measurable. Prefix matching is one hash lookup per distinct prefix length. Wildcard matching scans the wildcard subscriptions that have the topic's component count (about 22 ns each, so 1000 wildcard subscriptions of the same shape add about 22 µs per publish).
+- Tested with Autobahn|Python over `wss://` (CBOR and JSON, two router threads): a prefix and a wildcard subscription with `details=True`, and a wildcard registration called with `details_arg`.
+- **Not supported:** the meta API, shared/round-robin registrations (one callee per (match, URI)), retained events.
+- `WampClient::subscribe(topic, callback, Match)` and `register_procedure(uri, handler, Match)`; the callbacks receive `details`.
+
 ### Call canceling
 
 A caller can send `CANCEL` for a call it is waiting on (`call_canceling` is announced in WELCOME). The `mode` option decides what happens:

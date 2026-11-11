@@ -275,6 +275,36 @@ TEST_CASE("bench: subscription manager", "[bench][routing]") {
     };
 }
 
+TEST_CASE("bench: pattern subscriptions and registrations", "[bench][routing]") {
+    // 1000 exact topics as background; the publish matches one exact subscriber plus the patterns
+    for (uint64_t patterns : {10u, 100u, 1000u}) {
+        SubscriptionManager manager;
+        for (uint64_t i = 0; i < 1000; ++i) manager.subscribe(i + 1, "com.bench.other." + std::to_string(i), 1);
+        manager.subscribe(5000, kTopic, 2);
+        for (uint64_t i = 0; i < patterns; ++i) {
+            manager.subscribe(10'000 + i, "com.bench.p" + std::to_string(i) + ".", 3, Match::PREFIX);       // no match
+            manager.subscribe(20'000 + i, "com.p" + std::to_string(i) + ".", 3, Match::WILDCARD);   // no match, same component count
+        }
+        manager.subscribe(30'000, "com.", 4, Match::PREFIX);                                                // matches
+        BENCHMARK("for_each_subscriber, exact + " + std::to_string(patterns) + " prefix + " +
+                  std::to_string(patterns) + " wildcard patterns") {
+            uint64_t sum = 0;
+            manager.for_each_subscriber(kTopic, [&](uint64_t sub, uint64_t session) { sum += sub ^ session; });
+            return sum;
+        };
+    }
+
+    RegistrationManager registrations;
+    for (uint64_t i = 0; i < 1000; ++i) {
+        registrations.register_procedure(i + 1, "com.bench.proc." + std::to_string(i), 1);
+    }
+    registrations.register_procedure(5000, "com.", 2, Match::PREFIX);
+    registrations.register_procedure(5001, "com..bench.x", 2, Match::WILDCARD);
+    BENCHMARK("find_callee, falls back to a prefix (1000 exact + 2 patterns)") {
+        return registrations.find_callee("com.bench.unknown.call");
+    };
+}
+
 TEST_CASE("bench: registration manager and invocation tracker", "[bench][routing]") {
     RegistrationManager registrations;
     for (uint64_t i = 0; i < 1000; ++i) {

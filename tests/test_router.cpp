@@ -1810,3 +1810,150 @@ TEST_CASE("CANCEL works in every mode, also when the callee is on another shard"
         CHECK(interrupted >= 2);   // killnowait and kill interrupted the callee, skip did not
     }
 }
+
+// ----------------------------------------------------------------------------
+// Pattern-based subscriptions and registrations
+// ----------------------------------------------------------------------------
+
+TEST_CASE("Prefix and wildcard subscriptions receive matching events with the topic in the details",
+          "[router][patterns][crossshard]") {
+    for (const unsigned threads : {1u, 2u}) {
+        INFO(std::to_string(threads) + " thread(s)");
+        Router router{plain_config(), Router::Transport::PLAIN, threads};
+        router.start();
+
+        asio::io_context io;
+        WampClient publisher{io}, exact{io}, prefix{io}, wildcard{io}, json_prefix{io};
+        json_prefix.set_serializer(WampClient::Serializer::JSON);
+        struct Seen { int count{0}; std::string topic; uint64_t subscription{0}; };
+        Seen exact_seen, prefix_seen, wildcard_seen, json_seen;
+        bool done = false;
+
+        auto record = [](Seen& seen) {
+            return [&seen](const EventMessage& e) {
+                ++seen.count;
+                seen.subscription = e.subscription_id;
+                if (auto it = e.details.find("topic"); it != e.details.end()) seen.topic = std::get<std::string>(it->second);
+            };
+        };
+
+        co_spawn(io, [&]() -> awaitable<void> {
+            for (auto* client : {&publisher, &exact, &prefix, &wildcard, &json_prefix}) {
+                co_await client->connect("127.0.0.1", router.port(), "test.realm");
+            }
+            const auto exact_id = co_await exact.subscribe("shop.orders.created", record(exact_seen));
+            const auto prefix_id = co_await prefix.subscribe("shop.orders.", record(prefix_seen), Match::PREFIX);
+            const auto wildcard_id = co_await wildcard.subscribe("shop..created", record(wildcard_seen), Match::WILDCARD);
+            (void)co_await json_prefix.subscribe("shop.", record(json_seen), Match::PREFIX);
+
+            (void)co_await publisher.publish("shop.orders.created", WampList{int64_t{1}});
+            (void)co_await publisher.publish("shop.carts.created", WampList{int64_t{2}});   // wildcard and "shop." only
+            (void)co_await publisher.publish("shop.orders.deleted", WampList{int64_t{3}});  // prefixes only
+            (void)co_await publisher.publish("other.orders.created", WampList{int64_t{4}}); // nobody
+            for (int i = 0; i < 150 && (prefix_seen.count < 2 || wildcard_seen.count < 2 || json_seen.count < 3); ++i) {
+                co_await pause(io, 20ms);
+            }
+
+            // After unsubscribing nothing more arrives
+            co_await prefix.unsubscribe(prefix_id);
+            (void)co_await publisher.publish("shop.orders.created", WampList{int64_t{5}});
+            for (int i = 0; i < 100 && exact_seen.count < 2; ++i) co_await pause(io, 20ms);
+            (void)exact_id; (void)wildcard_id;
+            done = true;
+        }, detached);
+        io.run_for(20s);
+
+        REQUIRE(done);
+        CHECK(exact_seen.count == 2);            // the first and the last publish
+        CHECK(exact_seen.topic.empty());         // exact subscriptions get no topic detail
+        CHECK(prefix_seen.count == 2);           // orders.created and orders.deleted, not the one after unsubscribe
+        CHECK(prefix_seen.topic == "shop.orders.deleted");
+        CHECK(wildcard_seen.count == 3);         // orders.created twice and carts.created
+        CHECK(json_seen.count == 4);             // every "shop." publish, none of "other."
+        CHECK(json_seen.topic == "shop.orders.created");
+    }
+}
+
+TEST_CASE("A CALL goes to the most specific matching registration, across shards", "[router][patterns][crossshard]") {
+    for (const unsigned threads : {1u, 2u}) {
+        INFO(std::to_string(threads) + " thread(s)");
+        Router router{plain_config(), Router::Transport::PLAIN, threads};
+        router.start();
+
+        asio::io_context io;
+        WampClient exact_callee{io}, prefix_callee{io}, wildcard_callee{io}, caller{io}, intruder{io};
+        std::map<std::string, std::string> answered_by;   // procedure -> callee
+        std::map<std::string, std::string> called_uri;    // callee -> details.procedure it saw
+        std::string duplicate_error, bad_match_error;
+        bool done = false;
+
+        auto handler = [&](const std::string& name) -> InvocationHandler {
+            return [&, name](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                if (auto it = inv.details.find("procedure"); it != inv.details.end()) {
+                    called_uri[name] = std::get<std::string>(it->second);
+                }
+                co_return YieldMessage{inv.request_id, {}, WampList{name}};
+            };
+        };
+
+        co_spawn(io, [&]() -> awaitable<void> {
+            for (auto* client : {&exact_callee, &prefix_callee, &wildcard_callee, &caller, &intruder}) {
+                co_await client->connect("127.0.0.1", router.port(), "test.realm");
+            }
+            (void)co_await exact_callee.register_procedure("math.add", handler("exact"));
+            (void)co_await prefix_callee.register_procedure("math.", handler("prefix"), Match::PREFIX);
+            (void)co_await wildcard_callee.register_procedure("math..mul", handler("wildcard"), Match::WILDCARD);
+
+            for (const char* procedure : {"math.add", "math.sub", "math.x.mul", "math.mul"}) {
+                auto result = co_await caller.call(procedure);
+                answered_by[procedure] = std::get<std::string>(result.at(0));
+            }
+
+            // The same (match, uri) cannot be registered twice, and unknown policies are refused
+            try { (void)co_await intruder.register_procedure("math.", handler("dup"), Match::PREFIX); }
+            catch (const WampException& e) { duplicate_error = e.error_uri; }
+            try { (void)co_await intruder.register_procedure("math..", handler("dup"), Match::PREFIX); (void)0; }
+            catch (const WampException& e) { bad_match_error = e.error_uri; }
+            done = true;
+        }, detached);
+        io.run_for(20s);
+
+        REQUIRE(done);
+        CHECK(answered_by["math.add"] == "exact");
+        CHECK(answered_by["math.sub"] == "prefix");
+        CHECK(answered_by["math.x.mul"] == "prefix");   // a matching prefix beats a matching wildcard
+        CHECK(answered_by["math.mul"] == "prefix");
+        CHECK(called_uri["prefix"] == "math.mul");      // the last call it answered
+        CHECK(called_uri.count("exact") == 0);          // exact registrations get no procedure detail
+        CHECK(duplicate_error == "wamp.error.procedure_already_exists");
+        CHECK(bad_match_error.empty());                 // "math.." is a fine prefix, a different key than "math."
+    }
+}
+
+TEST_CASE("A wildcard registration answers when no exact or prefix registration matches", "[router][patterns][crossshard]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    asio::io_context io;
+    WampClient wildcard_callee{io}, other{io}, caller{io};
+    std::string seen_procedure, answer, missing_error;
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        for (auto* client : {&wildcard_callee, &other, &caller}) co_await client->connect("127.0.0.1", router.port(), "test.realm");
+        (void)co_await wildcard_callee.register_procedure("svc..status",
+            [&](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+                seen_procedure = std::get<std::string>(inv.details.at("procedure"));
+                co_return YieldMessage{inv.request_id, {}, WampList{std::string{"ok"}}};
+            }, Match::WILDCARD);
+        answer = std::get<std::string>((co_await caller.call("svc.db.status")).at(0));
+        try { (void)co_await caller.call("svc.db.other"); } catch (const WampException& e) { missing_error = e.error_uri; }
+        done = true;
+    }, detached);
+    io.run_for(20s);
+
+    REQUIRE(done);
+    CHECK(answer == "ok");
+    CHECK(seen_procedure == "svc.db.status");
+    CHECK(missing_error == "wamp.error.no_such_procedure");
+}

@@ -120,8 +120,10 @@ public:
         auto& shard = realm.shard;
         auto& invocation_tracker = shard.invocations;
 
-        for (const auto& procedure : reg_manager.unregister_session(session_id)) {
-            if (shard.group && shard.group->size() > 1) shard.group->drop_registration(shard.index, realm.name, procedure);
+        for (const auto& key : reg_manager.unregister_session(session_id)) {
+            if (shard.group && shard.group->size() > 1) {
+                shard.group->drop_registration(shard.index, realm.name, key.uri, key.match);
+            }
         }
         cancel_caller(shard, session_id);
         // Calls this session forwarded to other shards are pending there
@@ -152,7 +154,8 @@ public:
     [[nodiscard]] static std::expected<std::vector<uint8_t>, std::error_code> handle_register(
         Realm& realm,
         const RegisterMessage& register_msg,
-        uint64_t session_id
+        uint64_t session_id,
+        Match match = Match::EXACT
     ) {
         auto& reg_manager = realm.registrations;
         spdlog::debug("REGISTER request_id={}, procedure={}, session={}",
@@ -163,10 +166,12 @@ public:
         // With several shards a procedure may be registered once across all of them
         auto* group = realm.shard.group;
         const bool multi = group && group->size() > 1;
-        bool success = !multi || group->try_register(realm.shard.index, realm.name, register_msg.procedure);
+        bool success = !multi || group->try_register(realm.shard.index, realm.name, register_msg.procedure, match);
         if (success) {
-            success = reg_manager.register_procedure(registration_id, register_msg.procedure, session_id);
-            if (!success && multi) group->drop_registration(realm.shard.index, realm.name, register_msg.procedure);
+            success = reg_manager.register_procedure(registration_id, register_msg.procedure, session_id, match);
+            if (!success && multi) {
+                group->drop_registration(realm.shard.index, realm.name, register_msg.procedure, match);
+            }
         }
 
         if (!success) {
@@ -215,7 +220,7 @@ public:
 
         reg_manager.unregister(unregister_msg.registration_id);
         if (auto* group = realm.shard.group; group && group->size() > 1) {
-            group->drop_registration(realm.shard.index, realm.name, info->procedure);
+            group->drop_registration(realm.shard.index, realm.name, info->procedure, info->match);
         }
 
         spdlog::info("Sent UNREGISTERED: request_id={}, registration_id={}",
@@ -239,13 +244,18 @@ public:
                      call.request_id, call.procedure, caller_session_id);
 
         auto registration = reg_manager.find_callee(call.procedure);
-        if (!registration.has_value()) {
-            // Not registered on this shard: maybe on another one
+        // An exact registration here always wins. Otherwise another shard may hold a better match than this
+        // shard's best (or the only one): the more specific of the two takes the call.
+        if (!registration.has_value() || registration->match != Match::EXACT) {
             if (auto* group = realm.shard.group; group && group->size() > 1) {
-                if (auto owner = group->find_registration(realm.shard.index, realm.name, call.procedure)) {
-                    return forward_call(realm, *owner, call, caller_session_id);
+                if (auto owner = group->find_registration(realm.shard.index, realm.name, call.procedure);
+                    owner && (!registration.has_value() ||
+                              uri::more_specific(owner->match, owner->uri, registration->match, registration->procedure))) {
+                    return forward_call(realm, owner->shard, call, caller_session_id);
                 }
             }
+        }
+        if (!registration.has_value()) {
 
             spdlog::warn("CALL to unregistered procedure '{}' from session {}",
                         call.procedure, caller_session_id);
@@ -258,7 +268,7 @@ public:
                      registration->session_id, registration->registration_id);
 
         if (auto failure = start_call(realm.shard, *registration, caller_session_id, call.request_id,
-                                      call.arguments, call.arguments_kw, ppt::extract(call.options),
+                                      call.procedure, call.arguments, call.arguments_kw, ppt::extract(call.options),
                                       call_timeout(realm.shard, call), -1)) {
             return rawsocket::create_wamp_message(serialize_error(*failure));
         }
@@ -276,8 +286,9 @@ public:
             failure = ErrorMessage::create_no_such_procedure(call.request_id, call.procedure);
         } else {
             auto timeout = call.timeout_ms > 0 ? std::chrono::milliseconds{call.timeout_ms} : shard.call_timeout;
-            failure = start_call(shard, *registration, call.caller_session, call.request_id, call.arguments,
-                                 call.arguments_kw, call.ppt, timeout, static_cast<int32_t>(call.caller_shard));
+            failure = start_call(shard, *registration, call.caller_session, call.request_id, call.procedure,
+                                 call.arguments, call.arguments_kw, call.ppt, timeout,
+                                 static_cast<int32_t>(call.caller_shard));
         }
         if (failure) {
             auto frame = std::make_shared<std::vector<uint8_t>>(
@@ -420,6 +431,7 @@ private:
     // caller if the callee cannot take it. caller_shard is -1 when the caller is on this shard too.
     static std::optional<ErrorMessage> start_call(Shard& shard, const RegistrationInfo& registration,
                                                   uint64_t caller_session_id, uint64_t call_request_id,
+                                                  const std::string& called_procedure,
                                                   const WampList& arguments, const WampDict& arguments_kw,
                                                   const WampDict& ppt, std::chrono::milliseconds timeout,
                                                   int32_t caller_shard) {
@@ -430,7 +442,11 @@ private:
         }
         const uint64_t invocation_id = shard.ids.invocation.generate();
 
-        auto invocation = InvocationMessage{invocation_id, registration.registration_id, ppt, arguments, arguments_kw};
+        // A prefix or wildcard registration learns which procedure was called, from the INVOCATION details
+        WampDict details = ppt;
+        if (registration.match != Match::EXACT) details["procedure"] = called_procedure;
+        auto invocation = InvocationMessage{invocation_id, registration.registration_id, std::move(details),
+                                            arguments, arguments_kw};
         auto invocation_data = std::make_shared<std::vector<uint8_t>>(
             rawsocket::create_wamp_message(serialize_invocation(invocation)));
 

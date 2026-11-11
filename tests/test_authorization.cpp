@@ -247,6 +247,38 @@ TEST_CASE("Permissions: ppt schemes", "[authz][ppt]") {
     CHECK_FALSE(limited.allows_ppt_scheme("c"));
 }
 
+TEST_CASE("Pattern subscriptions and registrations are authorized by what they can match", "[authz][patterns][wamp_session]") {
+    auto kp = make_keypair();
+    asio::io_context io;
+    auto config = authz_config(kp.public_hex);   // prefix rules for publish/subscribe under com.example., exact rules for call/register
+    WampSession session{io, config, test_shard()};
+    (void)establish(session, kp, "alice");
+
+    auto subscribe = [&](uint64_t id, const std::string& topic, const std::string& match) {
+        return send(session, serialize_subscribe(SubscribeMessage{id, WampDict{{"match", match}}, topic}));
+    };
+    auto error_of = [](const std::vector<uint8_t>& reply) {
+        auto error = deserialize_error(reply);
+        REQUIRE(error.has_value());
+        return error->error_uri;
+    };
+
+    CHECK(get_message_type_from_cbor(subscribe(1, "com.example.n", "prefix")) == MessageType::SUBSCRIBED);
+    CHECK(get_message_type_from_cbor(subscribe(2, "com.example..x", "wildcard")) == MessageType::SUBSCRIBED);
+    CHECK(error_of(subscribe(3, "com.", "prefix")) == "wamp.error.not_authorized");           // wider than the rule
+    CHECK(error_of(subscribe(4, "com..x", "wildcard")) == "wamp.error.not_authorized");
+    CHECK(error_of(subscribe(5, "", "prefix")) == "wamp.error.invalid_uri");
+    CHECK(error_of(subscribe(6, "com.example.x", "wildcard")) == "wamp.error.invalid_uri");   // no empty component
+    CHECK(error_of(subscribe(7, "com.example.x", "regex")) == "wamp.error.invalid_argument");
+
+    // REGISTER is allowed for the exact procedure only: an exact rule never authorizes a pattern
+    auto reg = [&](uint64_t id, const std::string& uri, const std::string& match) {
+        return send(session, serialize_register(RegisterMessage{id, WampDict{{"match", match}}, uri}));
+    };
+    CHECK(error_of(reg(8, "com.example.add", "prefix")) == "wamp.error.not_authorized");
+    CHECK(get_message_type_from_cbor(reg(9, "com.example.add", "exact")) == MessageType::REGISTERED);
+}
+
 TEST_CASE("Authid without a role can connect but do nothing", "[authz][wamp_session]") {
     auto kp = make_keypair();
     asio::io_context io;

@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "uri_match.hpp"
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -66,6 +67,17 @@ public:
 
     [[nodiscard]] bool allows_ppt_scheme(std::string_view scheme) const {
         return ppt_schemes_.empty() || std::ranges::find(ppt_schemes_, scheme) != ppt_schemes_.end();
+    }
+
+    // A prefix or wildcard subscription/registration is allowed only if everything it can match is: it needs a prefix
+    // rule that is a prefix of the pattern (of its literal head for a wildcard). Exact rules never allow patterns.
+    [[nodiscard]] bool allows_pattern(Action action, std::string_view uri, Match match) const {
+        if (match == Match::EXACT) return allows(action, uri);
+        const std::string_view head = match == Match::PREFIX ? uri : uri::literal_head(uri);
+        for (const auto& prefix : rules_[static_cast<size_t>(action)].prefixes) {
+            if (head.starts_with(prefix)) return true;
+        }
+        return false;
     }
 
     [[nodiscard]] bool allows(Action action, std::string_view uri) const {
