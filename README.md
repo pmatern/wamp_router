@@ -329,6 +329,8 @@ A call that is no longer pending (answered, timed out, unknown, or another sessi
 
 ### Payload passthru
 
+How to use it for your own protocol (schemes, RPC and pub/sub walkthroughs, end-to-end encryption, operating notes): [docs/passthru-guide.md](docs/passthru-guide.md).
+
 WAMP's Payload Passthru Mode (`payload_passthru_mode`) lets an application carry its own payload format through the router. A PUBLISH or CALL (and the YIELD answering it) carries the options `ppt_scheme` (required), `ppt_serializer`, `ppt_cipher` and `ppt_keyid`, and the payload is exactly one binary argument. The router never looks inside the payload. It checks the shape and forwards the `ppt_*` entries unchanged, in the EVENT, INVOCATION or RESULT `details` (a callee's ERROR already carries its own details).
 
 - **Negotiation:** a client announces `payload_passthru_mode` in the `features` of its HELLO roles; the router announces it for `broker` and `dealer` in WELCOME. A session that did not announce it cannot send `ppt_*` (`wamp.error.feature_not_supported`).

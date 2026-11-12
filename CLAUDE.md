@@ -246,7 +246,7 @@ wamp_router/
 ├── config/                    # Configuration templates
 │   ├── clang-format          # Clang-format template
 │   └── vcpkg-baseline.json   # vcpkg version pinning
-├── docs/                      # architecture.md (threads, coordination), threading-analysis.md (profile, measurements)
+├── docs/                      # architecture.md (threads, coordination), threading-analysis.md (profile, measurements), passthru-guide.md (using ppt_* for a custom protocol)
 ├── bench/                     # wamp_bench, wamp_load, wamp_profile_router, wamp_handoff_bench, wamp_tls_probe
 ├── scripts/                   # Docker wrapper scripts and utilities
 │   ├── build.sh              # Build Docker image
