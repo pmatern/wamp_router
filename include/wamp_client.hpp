@@ -446,6 +446,52 @@ public:
         co_return result;
     }
 
+    // Calls a procedure whose callee may answer in several parts (WAMP progressive call results). `on_progress` gets
+    // each partial result (RESULT with details["progress"]) in order; the returned message is the final one. A callee
+    // that cannot stream answers once, and `on_progress` is never called.
+    awaitable<ResultMessage> call_progressive(std::string procedure, WampList args, WampDict args_kw,
+                                              std::function<void(const ResultMessage&)> on_progress,
+                                              std::chrono::milliseconds timeout = std::chrono::milliseconds{0}) {
+        auto call = co_await start_call(std::move(procedure), std::move(args), std::move(args_kw), timeout,
+                                        WampDict{{"receive_progress", true}}, std::move(on_progress));
+        co_return co_await await_call(call);
+    }
+
+    // The sender a streaming procedure handler gets: send() writes a partial result (YIELD with progress), usable
+    // only when the caller asked for them (requested())
+    class ProgressSender {
+    public:
+        [[nodiscard]] bool requested() const { return requested_; }
+        awaitable<void> send(WampList args, WampDict args_kw = {}) {
+            if (!requested_) throw std::logic_error("The caller did not ask for progressive results");
+            co_await client_->send_wamp_message(
+                YieldMessage{invocation_id_, WampDict{{"progress", true}}, std::move(args), std::move(args_kw)});
+        }
+
+    private:
+        friend class WampClient;
+        ProgressSender(WampClient* client, uint64_t invocation_id, bool requested)
+            : client_(client), invocation_id_(invocation_id), requested_(requested) {}
+        WampClient* client_;
+        uint64_t invocation_id_;
+        bool requested_;
+    };
+
+    using StreamingHandler = std::function<awaitable<YieldMessage>(const InvocationMessage&, ProgressSender&)>;
+
+    // Registers a procedure that may answer in several parts: the handler calls sender.send() for each partial result
+    // and returns the final YieldMessage. Without a caller that asked for progress it just runs and returns.
+    awaitable<uint64_t> register_streaming_procedure(std::string uri, StreamingHandler handler, Match match = Match::EXACT) {
+        InvocationHandler wrapped = [this, handler = std::move(handler)](const InvocationMessage& inv) -> awaitable<YieldMessage> {
+            const auto it = inv.details.find("receive_progress");
+            const bool requested = it != inv.details.end() && std::get_if<bool>(&it->second) != nullptr &&
+                                   *std::get_if<bool>(&it->second);
+            ProgressSender sender{this, inv.request_id, requested};
+            co_return co_await handler(inv, sender);
+        };
+        co_return co_await register_procedure(std::move(uri), std::move(wrapped), match);
+    }
+
     // A call that has been sent and not answered yet; await_call() waits for the answer
     struct StartedCall {
         uint64_t request_id{};
@@ -455,7 +501,8 @@ public:
     // Sends a CALL without waiting for the answer, so the caller can cancel it meanwhile (cancel_call).
     awaitable<StartedCall> start_call(std::string procedure, WampList args = {}, WampDict args_kw = {},
                                       std::chrono::milliseconds timeout = std::chrono::milliseconds{0},
-                                      WampDict extra_options = {}) {
+                                      WampDict extra_options = {},
+                                      std::function<void(const ResultMessage&)> on_progress = nullptr) {
         if (state_ != State::ESTABLISHED) {
             throw std::runtime_error("Not connected");
         }
@@ -469,6 +516,7 @@ public:
 
         auto channel = std::make_shared<ResultChannel>(io_, 1);
         pending_calls_[request_id] = channel;
+        if (on_progress) progress_callbacks_[request_id] = std::move(on_progress);
 
         co_await send_wamp_message(msg);
         co_return StartedCall{request_id, std::move(channel)};
@@ -940,6 +988,16 @@ private:
 
         auto it = pending_calls_.find(result.request_id);
         if (it != pending_calls_.end()) {
+            // A partial result (details.progress) goes to the progress callback and leaves the call pending
+            if (const auto progress = result.details.find("progress");
+                progress != result.details.end() && std::get_if<bool>(&progress->second) != nullptr &&
+                *std::get_if<bool>(&progress->second)) {
+                if (const auto callback = progress_callbacks_.find(result.request_id); callback != progress_callbacks_.end()) {
+                    callback->second(result);
+                }
+                return;
+            }
+            progress_callbacks_.erase(result.request_id);
             it->second->try_send(std::error_code(), std::make_optional(result));
             pending_calls_.erase(it);
         } else {
@@ -1012,6 +1070,7 @@ private:
             case MessageType::CALL: {
                 auto it = pending_calls_.find(error.request_id);
                 if (it != pending_calls_.end()) {
+                    progress_callbacks_.erase(error.request_id);
                     it->second->try_send(ec, std::nullopt);
                     pending_calls_.erase(it);
                 }
@@ -1400,6 +1459,7 @@ private:
     std::unordered_map<uint64_t, std::shared_ptr<PublishedChannel>> pending_publishes_;
     std::unordered_map<uint64_t, std::shared_ptr<RegisteredChannel>> pending_registers_;
     std::unordered_map<uint64_t, std::shared_ptr<ResultChannel>> pending_calls_;
+    std::unordered_map<uint64_t, std::function<void(const ResultMessage&)>> progress_callbacks_;
     using UnsubscribedChannel = ReplyChannel<UnsubscribedMessage>;
     using UnregisteredChannel = ReplyChannel<UnregisteredMessage>;
     std::unordered_map<uint64_t, std::shared_ptr<UnsubscribedChannel>> pending_unsubscribes_;

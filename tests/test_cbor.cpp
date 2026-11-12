@@ -215,8 +215,8 @@ TEST_CASE("Session handshake messages produce the bytes nlohmann produced", "[cb
                 reference(json::array({1, "realm1",
                                        json::object({{"authid", "alice"},
                                                      {"authmethods", json::array({"cryptosign", "ticket"})},
-                                                     {"roles", json::object({{"caller", json::object({{"features", json::object({{"call_canceling", true}, {"payload_passthru_mode", true}})}})},
-                                                                             {"callee", json::object({{"features", json::object({{"pattern_based_registration", true}, {"payload_passthru_mode", true}})}})},
+                                                     {"roles", json::object({{"caller", json::object({{"features", json::object({{"call_canceling", true}, {"payload_passthru_mode", true}, {"progressive_call_results", true}})}})},
+                                                                             {"callee", json::object({{"features", json::object({{"pattern_based_registration", true}, {"payload_passthru_mode", true}, {"progressive_call_results", true}})}})},
                                                                              {"publisher", ppt_role},
                                                                              {"subscriber", json::object({{"features", json::object({{"pattern_based_subscription", true}, {"payload_passthru_mode", true}})}})}})}})})));
         // minimal HELLO: no authid / authmethods, no roles
@@ -234,7 +234,7 @@ TEST_CASE("Session handshake messages produce the bytes nlohmann produced", "[cb
                                        json::object({{"authid", "alice"}, {"authrole", "user"},
                                                      {"authmethod", "cryptosign"},
                                                      {"roles", json::object({{"broker", json::object({{"features", {{"payload_passthru_mode", true}, {"pattern_based_subscription", true}}}})},
-                                                                             {"dealer", json::object({{"features", {{"call_canceling", true}, {"pattern_based_registration", true}, {"payload_passthru_mode", true}}}})}})}})})));
+                                                                             {"dealer", json::object({{"features", {{"call_canceling", true}, {"pattern_based_registration", true}, {"payload_passthru_mode", true}, {"progressive_call_results", true}}}})}})}})})));
     }
 
     SECTION("GOODBYE / ABORT / CHALLENGE / AUTHENTICATE") {

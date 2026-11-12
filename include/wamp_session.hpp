@@ -141,6 +141,7 @@ public:
             }
             shard_.channels.remove(session_id_);
             shard_.ppt_sessions.erase(session_id_);
+            shard_.progress_sessions.erase(session_id_);
         }
 
         spdlog::info("WAMP session disconnected");
@@ -771,6 +772,11 @@ private:
         const auto& hello = *hello_result;
         realm_ = hello.realm;  // Store realm for later
         ppt_ = std::ranges::any_of(hello.roles, [](const Role& role) { return ppt::announced(role.features); });
+        progress_ = std::ranges::any_of(hello.roles, [](const Role& role) {
+            const auto it = role.features.find("progressive_call_results");
+            return role.name == "callee" && it != role.features.end() && std::get_if<bool>(&it->second) != nullptr &&
+                   *std::get_if<bool>(&it->second);
+        });
 
         if (config_.auth_keys.empty()) {
             spdlog::info("No authentication configured, establishing session for realm '{}'", realm_);
@@ -780,6 +786,7 @@ private:
             realm_ptr_ = &shard_.realms.get(realm_);
 
             if (ppt_) shard_.ppt_sessions.insert(session_id_);
+            if (progress_) shard_.progress_sessions.insert(session_id_);
 
             auto welcome = WelcomeMessage::create_router(session_id_, realm_);
             auto welcome_cbor = serialize_welcome(welcome);
@@ -910,6 +917,7 @@ private:
 
         shard_.channels.get_or_create(session_id_, io_);
         if (ppt_) shard_.ppt_sessions.insert(session_id_);
+        if (progress_) shard_.progress_sessions.insert(session_id_);
 
         // Resolve the authid's permissions; an authid without a role may connect but do nothing
         static const Permissions no_permissions;
@@ -1373,6 +1381,7 @@ private:
     uint64_t session_id_;
     std::string realm_;
     Realm* realm_ptr_{nullptr};  // routing state of realm_, set when the session is established
+    bool progress_{false};           // the client announced progressive_call_results as a callee
     bool ppt_{false};                // the client announced Payload Passthru Mode in HELLO
     bool wamp_session_established_;  // True after HELLO/WELCOME handshake
 

@@ -269,7 +269,7 @@ public:
 
         if (auto failure = start_call(realm.shard, *registration, caller_session_id, call.request_id,
                                       call.procedure, call.arguments, call.arguments_kw, ppt::extract(call.options),
-                                      call_timeout(realm.shard, call), -1)) {
+                                      call_timeout(realm.shard, call), -1, wants_progress(call.options))) {
             return rawsocket::create_wamp_message(serialize_error(*failure));
         }
 
@@ -288,7 +288,7 @@ public:
             auto timeout = call.timeout_ms > 0 ? std::chrono::milliseconds{call.timeout_ms} : shard.call_timeout;
             failure = start_call(shard, *registration, call.caller_session, call.request_id, call.procedure,
                                  call.arguments, call.arguments_kw, call.ppt, timeout,
-                                 static_cast<int32_t>(call.caller_shard));
+                                 static_cast<int32_t>(call.caller_shard), call.receive_progress);
         }
         if (failure) {
             auto frame = std::make_shared<std::vector<uint8_t>>(
@@ -311,6 +311,36 @@ public:
         spdlog::debug("YIELD invocation_id={}, callee_session={}",
                      yield_msg.invocation_id, callee_session_id);
 
+        // A partial result (YIELD option progress) leaves the call pending; anything else ends it
+        const auto progress_it = yield_msg.options.find("progress");
+        const bool progressive = progress_it != yield_msg.options.end() && std::get_if<bool>(&progress_it->second) != nullptr &&
+                                 *std::get_if<bool>(&progress_it->second);
+        if (progressive) {
+            const auto pending = invocation_tracker.peek_and_refresh(yield_msg.invocation_id, std::chrono::steady_clock::now());
+            if (!pending.has_value()) {
+                spdlog::debug("Progressive YIELD for unknown invocation_id={} from callee session {}",
+                              yield_msg.invocation_id, callee_session_id);
+                return std::vector<uint8_t>{};
+            }
+            if (!pending->receive_progress) {
+                spdlog::warn("Callee session {} sent a progressive YIELD for invocation {} that did not allow it; dropped",
+                             callee_session_id, yield_msg.invocation_id);
+                return std::vector<uint8_t>{};
+            }
+            WampDict ppt = ppt::extract(yield_msg.options);
+            if (!ppt.empty() && !ppt::valid(ppt, yield_msg.arguments, yield_msg.arguments_kw)) {
+                spdlog::warn("Progressive YIELD from callee session {} has malformed passthru options or payload", callee_session_id);
+                return std::vector<uint8_t>{};
+            }
+            ppt["progress"] = true;
+            auto frame = rawsocket::create_wamp_message(serialize_result(
+                ResultMessage{pending->call_request_id, std::move(ppt), yield_msg.arguments, yield_msg.arguments_kw}));
+            if (!deliver_to_caller(shard, *pending, std::move(frame))) {
+                spdlog::debug("Caller session {} gone or full; dropped a progressive result", pending->caller_session_id);
+            }
+            return std::vector<uint8_t>{};
+        }
+
         auto pending_call = invocation_tracker.retrieve(yield_msg.invocation_id);
         if (!pending_call.has_value()) {
             spdlog::warn("YIELD for unknown invocation_id={} from callee session {} (expired/evicted/invalid)",
@@ -328,12 +358,13 @@ public:
 
         // Forward arguments from YIELD to RESULT; passthru options become RESULT details
         std::vector<uint8_t> result_frame;
-        if (!yield_msg.options.empty() && !ppt::valid(yield_msg.options, yield_msg.arguments, yield_msg.arguments_kw)) {
+        const WampDict final_ppt = ppt::extract(yield_msg.options);
+        if (!final_ppt.empty() && !ppt::valid(final_ppt, yield_msg.arguments, yield_msg.arguments_kw)) {
             spdlog::warn("YIELD from callee session {} has malformed passthru options or payload", callee_session_id);
             result_frame = rawsocket::create_wamp_message(serialize_error(ErrorMessage::create_invalid_argument(
                 MessageType::CALL, call_request_id, "The callee's passthru payload is malformed")));
         } else {
-            auto result = ResultMessage{call_request_id, yield_msg.options, yield_msg.arguments, yield_msg.arguments_kw};
+            auto result = ResultMessage{call_request_id, final_ppt, yield_msg.arguments, yield_msg.arguments_kw};
             result_frame = rawsocket::create_wamp_message(serialize_result(result));
         }
 
@@ -390,6 +421,13 @@ public:
         return std::vector<uint8_t>{};
     }
 private:
+    // The CALL option receive_progress: the caller accepts progressive results
+    static bool wants_progress(const WampDict& options) {
+        const auto it = options.find("receive_progress");
+        const auto* flag = it != options.end() ? std::get_if<bool>(&it->second) : nullptr;
+        return flag != nullptr && *flag;
+    }
+
     // The CANCEL "mode" option; anything but "kill" and "killnowait" means "skip"
     static std::string cancel_mode(const CancelMessage& cancel) {
         if (auto it = cancel.options.find("mode"); it != cancel.options.end()) {
@@ -434,7 +472,7 @@ private:
                                                   const std::string& called_procedure,
                                                   const WampList& arguments, const WampDict& arguments_kw,
                                                   const WampDict& ppt, std::chrono::milliseconds timeout,
-                                                  int32_t caller_shard) {
+                                                  int32_t caller_shard, bool receive_progress = false) {
         const uint64_t callee_session_id = registration.session_id;
         if (!ppt.empty() && !shard.ppt_sessions.contains(callee_session_id)) {
             return ErrorMessage::create_feature_not_supported(
@@ -445,6 +483,9 @@ private:
         // A prefix or wildcard registration learns which procedure was called, from the INVOCATION details
         WampDict details = ppt;
         if (registration.match != Match::EXACT) details["procedure"] = called_procedure;
+        // The callee may stream partial results only if the caller wants them and the callee said it can
+        receive_progress = receive_progress && shard.progress_sessions.contains(callee_session_id);
+        if (receive_progress) details["receive_progress"] = true;
         auto invocation = InvocationMessage{invocation_id, registration.registration_id, std::move(details),
                                             arguments, arguments_kw};
         auto invocation_data = std::make_shared<std::vector<uint8_t>>(
@@ -464,8 +505,10 @@ private:
         auto& invocation_tracker = shard.invocations;
         auto deadline = timeout.count() > 0 ? std::chrono::steady_clock::now() + timeout
                                             : std::chrono::steady_clock::time_point::max();
-        invocation_tracker.track(PendingCall{invocation_id, caller_session_id, call_request_id, callee_session_id,
-                                             deadline, caller_shard});
+        PendingCall pending{invocation_id, caller_session_id, call_request_id, callee_session_id, deadline, caller_shard};
+        pending.receive_progress = receive_progress;
+        pending.timeout = timeout;
+        invocation_tracker.track(pending);
 
         spdlog::debug("Tracking invocation_id={} -> caller_session={}, call_request_id={} ({} pending)",
                      invocation_id, caller_session_id, call_request_id, invocation_tracker.pending_count());
@@ -485,7 +528,8 @@ private:
         spdlog::debug("Forwarding CALL '{}' to shard {}", call.procedure, owner);
         const bool sent = shard.group->send_to(owner,
             CrossCall{realm.name, call.procedure, shard.index, caller_session_id, call.request_id,
-                      timeout_option(call), ppt::extract(call.options), call.arguments, call.arguments_kw},
+                      timeout_option(call), ppt::extract(call.options), call.arguments, call.arguments_kw,
+                      wants_progress(call.options)},
             shard.congested);
         if (!sent) {
             return rawsocket::create_wamp_message(serialize_error(

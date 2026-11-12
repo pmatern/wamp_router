@@ -391,6 +391,9 @@ WAMP is a routed protocol providing RPC and PubSub patterns. This router acts as
 #### Pattern-based subscriptions and registrations
 - `SUBSCRIBE`/`REGISTER` `match` option (`exact`, `prefix`, `wildcard`) is parsed in `WampSession::pattern_match` (invalid values and patterns get an ERROR, `Permissions::allows_pattern` authorizes). `SubscriptionManager::for_each_subscriber` reports each match's `Match`; pattern matches get an EVENT with `details.topic` (`handle_publish` builds that template on demand, `CrossPublish::pattern_event` carries it). `RegistrationManager::find_callee` returns the best registration (`uri::more_specific`); `ProcedureHandler::handle_call` compares it with `ShardGroup::find_registration` (best remote). `ShardGroup` keeps pattern interest/registration lists next to the exact tables.
 
+#### Progressive call results
+- `receive_progress` (CALL option) is offered to a callee in `Shard::progress_sessions` (INVOCATION details); a YIELD with `progress: true` goes through `InvocationTracker::peek_and_refresh` (keeps the `PendingCall`, pushes its deadline out by its timeout) and is forwarded as a RESULT with `details.progress`; any other YIELD or an ERROR ends the call as before. Client: `call_progressive`, `register_streaming_procedure` / `ProgressSender`.
+
 #### Call canceling
 - `CANCEL` (caller) is handled by `ProcedureHandler::handle_cancel`: it finds the call through `InvocationTracker::find_by_call` (index by caller session + request id) and applies `skip`, `killnowait` or `kill`; for a callee on another shard it sends `CrossCancelCall` to the other shards, and the one holding the call answers the caller with a `CrossFrame`. The dealer announces `call_canceling`.
 

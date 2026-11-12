@@ -647,3 +647,112 @@ TEST_CASE("InvocationTracker finds calls by caller session and request id, throu
     REQUIRE(tracker.remove_expired(std::chrono::steady_clock::now() + std::chrono::seconds{1}).size() == 1);
     REQUIRE_FALSE(tracker.find_by_call(103, 10).has_value());
 }
+
+TEST_CASE("Progressive call results: partial YIELDs keep the call open", "[protocol][rpc][progress]") {
+    using namespace std::chrono;
+    Sessions s;
+    auto ch_callee = s.add(910061);
+    auto ch_caller = s.add(910062);
+    REQUIRE(ProcedureHandler::handle_register(kRealm(), RegisterMessage{1, {}, "proto.stream"}, 910061).has_value());
+    const WampDict wants{{"receive_progress", true}};
+    const WampDict partial{{"progress", true}};
+
+    auto start = [&](uint64_t request_id, const WampDict& options) {
+        REQUIRE(ProcedureHandler::handle_call(kRealm(), CallMessage{request_id, options, "proto.stream"}, 910062).has_value());
+        auto invocation = deserialize_invocation(payload_of(pop_frame(*ch_callee)));
+        REQUIRE(invocation.has_value());
+        return *invocation;
+    };
+    auto next_result = [&] {
+        auto result = deserialize_result(payload_of(pop_frame(*ch_caller)));
+        REQUIRE(result.has_value());
+        return *result;
+    };
+    auto progress_of = [](const ResultMessage& r) {
+        const auto it = r.details.find("progress");
+        return it != r.details.end() && std::get<bool>(it->second);
+    };
+
+    SECTION("a callee that announced the feature is told, and its partials reach the caller in order") {
+        test_shard().progress_sessions.insert(910061);
+        const auto invocation = start(80, wants);
+        REQUIRE(invocation.details.contains("receive_progress"));
+
+        for (int64_t i = 1; i <= 3; ++i) {
+            REQUIRE(ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation.request_id, partial, WampList{i}}, 910061).has_value());
+        }
+        REQUIRE(ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation.request_id, {}, WampList{int64_t{99}}}, 910061).has_value());
+
+        for (int64_t i = 1; i <= 3; ++i) {
+            const auto result = next_result();
+            CHECK(result.request_id == 80);
+            CHECK(progress_of(result));
+            CHECK(result.arguments == WampList{i});
+        }
+        const auto final_result = next_result();
+        CHECK_FALSE(progress_of(final_result));
+        CHECK(final_result.arguments == WampList{int64_t{99}});
+
+        // the call is over: a late YIELD, partial or not, is ignored
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation.request_id, partial, WampList{int64_t{5}}}, 910061);
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation.request_id, {}, WampList{int64_t{5}}}, 910061);
+        CHECK(pop_frame(*ch_caller).empty());
+        test_shard().progress_sessions.erase(910061);
+    }
+
+    SECTION("a callee that did not announce it gets a plain INVOCATION, and a partial it sends anyway is dropped") {
+        const auto invocation = start(81, wants);
+        CHECK_FALSE(invocation.details.contains("receive_progress"));
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation.request_id, partial, WampList{int64_t{1}}}, 910061);
+        CHECK(pop_frame(*ch_caller).empty());
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation.request_id, {}, WampList{int64_t{2}}}, 910061);
+        const auto result = next_result();
+        CHECK_FALSE(progress_of(result));
+        CHECK(result.arguments == WampList{int64_t{2}});
+    }
+
+    SECTION("a caller that did not ask is not offered progress") {
+        test_shard().progress_sessions.insert(910061);
+        const auto invocation = start(82, {});
+        CHECK_FALSE(invocation.details.contains("receive_progress"));
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation.request_id, partial, WampList{int64_t{1}}}, 910061);
+        CHECK(pop_frame(*ch_caller).empty());
+        test_shard().progress_sessions.erase(910061);
+    }
+
+    SECTION("an ERROR after partials ends the call") {
+        test_shard().progress_sessions.insert(910061);
+        const auto invocation = start(83, wants);
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation.request_id, partial, WampList{int64_t{1}}}, 910061);
+        CHECK(progress_of(next_result()));
+        auto error = ErrorMessage{MessageType::INVOCATION, invocation.request_id, {}, "app.error"};
+        REQUIRE(ProcedureHandler::handle_invocation_error(test_shard(), error, 910061).has_value());
+        auto err = deserialize_error(payload_of(pop_frame(*ch_caller)));
+        REQUIRE(err.has_value());
+        CHECK(err->error_uri == "app.error");
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation.request_id, partial, WampList{int64_t{2}}}, 910061);
+        CHECK(pop_frame(*ch_caller).empty());
+        test_shard().progress_sessions.erase(910061);
+    }
+
+    SECTION("each partial pushes the deadline out by the call's timeout") {
+        test_shard().progress_sessions.insert(910061);
+        const auto saved = test_shard().call_timeout;
+        test_shard().call_timeout = 1000ms;
+        const auto invocation = start(84, wants);
+        const auto t0 = steady_clock::now();
+
+        // silent for longer than the timeout: the call expires
+        CHECK(ProcedureHandler::expire_calls(test_shard(), t0 + 500ms) == 0);
+        (void)ProcedureHandler::handle_yield(test_shard(), YieldMessage{invocation.request_id, partial, WampList{int64_t{1}}}, 910061);
+        CHECK(progress_of(next_result()));
+        // the partial just now restarted the 1 s window, so a check 1.4 s after t0 does not expire it ...
+        CHECK(ProcedureHandler::expire_calls(test_shard(), steady_clock::now() + 900ms) == 0);
+        // ... and total silence for more than the timeout does
+        CHECK(ProcedureHandler::expire_calls(test_shard(), steady_clock::now() + 1500ms) == 1);
+        test_shard().call_timeout = saved;
+        test_shard().progress_sessions.erase(910061);
+        (void)pop_frame(*ch_callee);
+        (void)pop_frame(*ch_caller);
+    }
+}

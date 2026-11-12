@@ -2230,3 +2230,116 @@ TEST_CASE("The message rate applies to JSON over WebSocket too", "[router][rate]
     CHECK(closed);
     CHECK(router.stats()[0].rate_closes == 1);
 }
+
+// ----------------------------------------------------------------------------
+// Progressive call results
+// ----------------------------------------------------------------------------
+
+TEST_CASE("A streaming callee sends partial results and a final one, across shards and serializers",
+          "[router][progress][crossshard]") {
+    struct Variant { unsigned threads; WampClient::Serializer serializer; bool websocket; const char* name; };
+    for (const auto& v : {Variant{1, WampClient::Serializer::CBOR, false, "1 thread, CBOR RawSocket"},
+                          Variant{2, WampClient::Serializer::CBOR, false, "2 threads, CBOR RawSocket"},
+                          Variant{2, WampClient::Serializer::JSON, true, "2 threads, JSON WebSocket"},
+                          Variant{2, WampClient::Serializer::MSGPACK, true, "2 threads, MessagePack WebSocket"}}) {
+        INFO(v.name);
+        Router router{plain_config(), Router::Transport::PLAIN, v.threads};
+        router.start();
+
+        asio::io_context io;
+        WampClient callee{io}, caller{io}, plain_caller{io};
+        caller.set_serializer(v.serializer);
+        if (v.websocket) caller.set_transport(WampClient::Transport::WEBSOCKET);
+
+        std::vector<int64_t> partials;
+        WampList final_args, plain_args;
+        bool done = false;
+
+        co_spawn(io, [&]() -> awaitable<void> {
+            co_await callee.connect("127.0.0.1", router.port(), "test.realm");
+            co_await caller.connect("127.0.0.1", router.port(), "test.realm");
+            co_await plain_caller.connect("127.0.0.1", router.port(), "test.realm");
+
+            (void)co_await callee.register_streaming_procedure("stream.count",
+                [](const InvocationMessage& inv, WampClient::ProgressSender& progress) -> awaitable<YieldMessage> {
+                    const auto n = std::get<int64_t>(inv.arguments.at(0));
+                    if (progress.requested()) {
+                        for (int64_t i = 1; i <= n; ++i) co_await progress.send(WampList{i});
+                    }
+                    co_return YieldMessage{inv.request_id, {}, WampList{std::string{"done"}}};
+                });
+
+            auto result = co_await caller.call_progressive("stream.count", WampList{int64_t{5}}, {},
+                [&](const ResultMessage& r) { partials.push_back(std::get<int64_t>(r.arguments.at(0))); });
+            final_args = result.arguments;
+            plain_args = co_await plain_caller.call("stream.count", WampList{int64_t{5}});   // did not ask: one RESULT
+            done = true;
+        }, detached);
+        io.run_for(20s);
+
+        REQUIRE(done);
+        CHECK(partials == std::vector<int64_t>{1, 2, 3, 4, 5});
+        CHECK(final_args == WampList{std::string{"done"}});
+        CHECK(plain_args == WampList{std::string{"done"}});
+    }
+}
+
+TEST_CASE("Canceling and disconnects end a streaming call", "[router][progress][cancel]") {
+    Router router{plain_config(), Router::Transport::PLAIN, 2};
+    router.start();
+
+    asio::io_context io;
+    WampClient callee{io}, caller{io};
+    int partials_seen = 0;
+    std::string cancel_error, callee_gone_error;
+    std::atomic<bool> interrupted{false};
+    bool done = false;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await callee.connect("127.0.0.1", router.port(), "test.realm");
+        co_await caller.connect("127.0.0.1", router.port(), "test.realm");
+        (void)co_await callee.register_streaming_procedure("stream.forever",
+            [&](const InvocationMessage&, WampClient::ProgressSender& progress) -> awaitable<YieldMessage> {
+                struct Guard { std::atomic<bool>& flag; ~Guard() { flag = true; } } guard{interrupted};
+                for (int64_t i = 0; progress.requested(); ++i) {
+                    co_await progress.send(WampList{i});
+                    asio::steady_timer timer{io};
+                    timer.expires_after(20ms);
+                    co_await timer.async_wait(use_awaitable);   // an INTERRUPT cancels this wait
+                }
+                co_return YieldMessage{0, {}};
+            });
+
+        // CANCEL (killnowait) in the middle of the stream: the caller gets wamp.error.canceled, the callee is interrupted
+        auto call = co_await caller.start_call("stream.forever", {}, {}, 0ms, WampDict{{"receive_progress", true}},
+                                               [&](const ResultMessage&) { ++partials_seen; });
+        for (int i = 0; i < 100 && partials_seen < 3; ++i) co_await pause(io, 20ms);
+        co_await caller.cancel_call(call, WampClient::CancelMode::KILLNOWAIT);
+        try { (void)co_await caller.await_call(call); } catch (const WampException& e) { cancel_error = e.error_uri; }
+        for (int i = 0; i < 100 && !interrupted; ++i) co_await pause(io, 20ms);
+
+        // the callee disconnects in the middle of another stream: callee_failure
+        (void)co_await callee.register_streaming_procedure("stream.again",
+            [&](const InvocationMessage&, WampClient::ProgressSender& progress) -> awaitable<YieldMessage> {
+                co_await progress.send(WampList{int64_t{1}});
+                asio::steady_timer timer{io};
+                timer.expires_after(60s);
+                co_await timer.async_wait(use_awaitable);
+                co_return YieldMessage{0, {}};
+            });
+        int seen = 0;
+        auto second = co_await caller.start_call("stream.again", {}, {}, 0ms, WampDict{{"receive_progress", true}},
+                                                 [&](const ResultMessage&) { ++seen; });
+        for (int i = 0; i < 100 && seen < 1; ++i) co_await pause(io, 20ms);
+        co_await callee.disconnect();
+        try { (void)co_await caller.await_call(second); } catch (const WampException& e) { callee_gone_error = e.error_uri; }
+        done = true;
+    }, detached);
+    io.run_for(20s);
+
+    REQUIRE(done);
+    CHECK(partials_seen >= 3);
+    CHECK(cancel_error == "wamp.error.canceled");
+    CHECK(interrupted);
+    CHECK(callee_gone_error == "wamp.error.callee_failure");
+}

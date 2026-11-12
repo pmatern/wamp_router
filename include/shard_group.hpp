@@ -67,6 +67,7 @@ struct CrossCall {
     WampDict ppt;            // the CALL's ppt_* options, forwarded as INVOCATION details
     WampList arguments;
     WampDict arguments_kw;
+    bool receive_progress{false};   // the CALL asked for progressive results
 };
 
 // A complete frame (RESULT, ERROR) for a session that lives on the receiving shard

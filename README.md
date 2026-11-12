@@ -12,7 +12,7 @@ This router acts as the central message broker, routing messages between clients
 
 ## Features
 
-- **RPC Support**: Full `CALL`, `REGISTER`, `YIELD`, `INVOCATION`, `RESULT` workflow, with call timeouts and call canceling (`CANCEL`, modes `skip`, `kill`, `killnowait`)
+- **RPC Support**: Full `CALL`, `REGISTER`, `YIELD`, `INVOCATION`, `RESULT` workflow, with call timeouts, call canceling (`CANCEL`, modes `skip`, `kill`, `killnowait`) and progressive results
 - **PubSub Support**: `SUBSCRIBE`, `PUBLISH`, `EVENT` messaging
 - **RawSocket and WebSocket Transport**: both on the same port, told apart by the first byte of the connection
 - **CBOR, JSON and MessagePack serializers**: `wamp.2.cbor`, `wamp.2.json` and `wamp.2.msgpack` over WebSocket, serializers 3, 1 and 2 over RawSocket; sessions with different serializers talk to each other
@@ -306,6 +306,16 @@ SUBSCRIBE and REGISTER accept `match`: `"exact"` (default), `"prefix"` or `"wild
 - Tested with Autobahn|Python over `wss://` (CBOR and JSON, two router threads): a prefix and a wildcard subscription with `details=True`, and a wildcard registration called with `details_arg`.
 - **Not supported:** the meta API, shared/round-robin registrations (one callee per (match, URI)), retained events.
 - `WampClient::subscribe(topic, callback, Match)` and `register_procedure(uri, handler, Match)`; the callbacks receive `details`.
+
+### Progressive call results
+
+A callee can answer one CALL in several parts (`progressive_call_results`, announced by the dealer and by clients as `caller` and `callee` features). The caller opts in with the CALL option `receive_progress: true`; the router tells the callee in the INVOCATION details (`receive_progress: true`) only if the callee announced the feature, otherwise the callee answers once and the caller still gets one normal RESULT. A YIELD with the option `progress: true` is a partial result: the router forwards it as a RESULT with `details.progress = true`, in order, and the call stays open; a YIELD without it (or an ERROR) ends the call. Notes:
+
+- A progressive YIELD for a call that did not allow it is dropped with a warning; one for a finished call is ignored.
+- **Timeout:** every partial result pushes the call's deadline out by its timeout again, so the timeout bounds the silence between results, not the length of the stream.
+- CANCEL, the caller or callee disconnecting (`wamp.error.callee_failure`) and the call timeout end a streaming call like any other. Works across shards and in every serializer; passthru options on partial YIELDs are validated like on final ones.
+- Not supported: progressive call *invocations* (the caller streaming arguments in).
+- C++ client: `call_progressive(procedure, args, kwargs, on_progress)` and `register_streaming_procedure(uri, handler)` (the handler gets a `ProgressSender`). Tested with Autobahn|Python (`CallOptions(on_progress=...)`, `details.progress(...)`) over `wss://` and `rss://` with CBOR, JSON and MessagePack.
 
 ### Call canceling
 

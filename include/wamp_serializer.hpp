@@ -762,6 +762,7 @@ deserialize_yield(const std::vector<uint8_t>& cbor_data) {
                 while (r.next(c)) {
                     std::string key = r.read_text();
                     if (ppt::is_ppt_key(key)) options[key] = fast::read_value(r);
+                    else if (key == "progress" && r.peek_is_bool()) options[key] = r.read_bool();
                     else r.skip();
                 }
             } else {

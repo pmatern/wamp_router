@@ -172,9 +172,11 @@ struct HelloMessage {
         if (passthru) features["payload_passthru_mode"] = true;
         WampDict caller_features = features;
         caller_features["call_canceling"] = true;
+        caller_features["progressive_call_results"] = true;
         msg.roles.push_back(Role{"caller", caller_features});
         WampDict callee_features = features;
         callee_features["pattern_based_registration"] = true;
+        callee_features["progressive_call_results"] = true;
         msg.roles.push_back(Role{"callee", callee_features});
         msg.roles.push_back(Role{"publisher", features});
         WampDict subscriber_features = features;
@@ -232,7 +234,8 @@ struct WelcomeMessage {
         msg.roles.push_back(Role{"broker", WampDict{{"payload_passthru_mode", true},
                                                     {"pattern_based_subscription", true}}});
         msg.roles.push_back(Role{"dealer", WampDict{{"payload_passthru_mode", true}, {"call_canceling", true},
-                                                    {"pattern_based_registration", true}}});
+                                                    {"pattern_based_registration", true},
+                                                    {"progressive_call_results", true}}});
 
         return msg;
     }

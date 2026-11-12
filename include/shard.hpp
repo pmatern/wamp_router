@@ -72,6 +72,8 @@ public:
     std::unordered_set<uint64_t> remote_callers;
     // Sessions here that announced Payload Passthru Mode (ppt.hpp); only they get ppt_* events and invocations
     std::unordered_set<uint64_t> ppt_sessions;
+    // Sessions here that announced progressive_call_results as callees: only they are told a caller wants progress
+    std::unordered_set<uint64_t> progress_sessions;
 
     // Counters the owning thread bumps and any thread may read (Router::stats())
     struct alignas(64) Counters {

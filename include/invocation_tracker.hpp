@@ -33,6 +33,8 @@ struct PendingCall {
     uint64_t callee_session_id;   // Who was sent the INVOCATION (0 if unknown)
     std::chrono::steady_clock::time_point deadline;  // time_point::max() = no timeout
     int32_t caller_shard;         // shard the caller's session lives on, -1 = this shard (see ShardGroup)
+    bool receive_progress{false}; // the caller wants progressive results and the callee was told it may send them
+    std::chrono::milliseconds timeout{0};   // the call's timeout, to push the deadline out on each progressive result
 
     PendingCall(uint64_t inv_id, uint64_t caller_id, uint64_t request_id, uint64_t callee_id = 0,
                 std::chrono::steady_clock::time_point call_deadline =
@@ -90,6 +92,18 @@ public:
         const auto map_it = invocation_map_.find(it->second);
         if (map_it == invocation_map_.end()) return std::nullopt;
         return map_it->second->second;
+    }
+
+    // The pending call for a progressive (partial) result: kept pending, and its deadline pushed out by the call's own
+    // timeout (an inactivity timeout, so a long stream is not killed by the timeout meant for a silent callee).
+    [[nodiscard]] std::optional<PendingCall> peek_and_refresh(uint64_t invocation_id,
+                                                              std::chrono::steady_clock::time_point now) {
+        auto map_it = invocation_map_.find(invocation_id);
+        if (map_it == invocation_map_.end()) return std::nullopt;
+        lru_list_.splice(lru_list_.begin(), lru_list_, map_it->second);
+        auto& call = map_it->second->second;
+        if (call.timeout.count() > 0) call.deadline = now + call.timeout;
+        return call;
     }
 
     // Retrieve and remove invocation info (called when YIELD received)
