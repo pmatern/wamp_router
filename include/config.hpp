@@ -159,6 +159,17 @@ struct ServerConfig {
     // behind a proxy or NAT every client shares an address, so leave it off there).
     std::optional<size_t> max_connections;
     size_t max_connections_per_ip{0};
+    // New connections per second one client address may open (0 = no limit), with a burst allowance (0 = the rate itself).
+    // Connections beyond it are closed at accept, before any TLS work. Same caveat as max_connections_per_ip.
+    size_t max_connections_per_second_per_ip{0};
+    size_t connection_burst{0};
+    // WAMP messages per second one session may send (0 = no limit) and its burst allowance (0 = twice the rate, at
+    // least 10). A session over the limit is throttled (the router stops reading its socket until it is back under, so
+    // TCP slows the client and nothing is lost); one that stays over for rate_limit_grace is aborted with
+    // wamp.error.protocol_violation and closed (0 = at the first throttle).
+    size_t max_messages_per_second{0};
+    size_t message_burst{0};
+    std::chrono::milliseconds rate_limit_grace{5000};
     // A session that sends this many undecodable messages in a row (a good one resets the count) is aborted
     // with wamp.error.protocol_violation and closed. 0 = never.
     size_t max_malformed_messages{10};
@@ -267,6 +278,27 @@ public:
                     return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
                 }
                 config.max_malformed_messages = static_cast<size_t>(value);
+            }
+            for (const auto& [key, field] : std::initializer_list<std::pair<const char*, size_t ServerConfig::*>>{
+                     {"max_connections_per_second_per_ip", &ServerConfig::max_connections_per_second_per_ip},
+                     {"connection_burst", &ServerConfig::connection_burst},
+                     {"max_messages_per_second", &ServerConfig::max_messages_per_second},
+                     {"message_burst", &ServerConfig::message_burst}}) {
+                if (!server.contains(key)) continue;
+                const auto& value = toml::find(server, key);
+                if (!value.is_integer() || value.as_integer() < 0) {
+                    spdlog::error("[server] {} must be an integer >= 0 (0 = off or default)", key);
+                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                }
+                config.*field = static_cast<size_t>(value.as_integer());
+            }
+            if (server.contains("rate_limit_grace_ms")) {
+                const auto& value = toml::find(server, "rate_limit_grace_ms");
+                if (!value.is_integer() || value.as_integer() < 0) {
+                    spdlog::error("[server] rate_limit_grace_ms must be an integer >= 0");
+                    return std::unexpected{make_error_code(ConfigError::INVALID_VALUE)};
+                }
+                config.rate_limit_grace = std::chrono::milliseconds{value.as_integer()};
             }
             if (server.contains("max_connections_per_ip")) {
                 const auto value = toml::find<int64_t>(server, "max_connections_per_ip");

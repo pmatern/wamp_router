@@ -72,6 +72,7 @@ add_executable(wamp_tests
     tests/test_msgpack.cpp
     tests/test_ppt.cpp
     tests/test_patterns.cpp
+    tests/test_rate_limit.cpp
     tests/test_concepts.cpp
     tests/test_type_traits.cpp
 )

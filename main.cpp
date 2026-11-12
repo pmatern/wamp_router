@@ -98,12 +98,13 @@ int main(int argc, char* argv[]) {
         const auto stats = router.stats();
         for (size_t i = 0; i < stats.size(); ++i) {
             const auto& s = stats[i];
-            spdlog::info("shard {}: accepted={} publishes={} calls={} handshake_timeouts={} event_drops={} inbox_received={} inbox_dropped={}",
-                         i, s.accepted, s.publishes, s.calls, s.handshake_timeouts, s.event_drops, s.inbox_received, s.inbox_dropped);
+            spdlog::info("shard {}: accepted={} publishes={} calls={} handshake_timeouts={} event_drops={} inbox_received={} inbox_dropped={} rate_throttles={} rate_closes={}",
+                         i, s.accepted, s.publishes, s.calls, s.handshake_timeouts, s.event_drops, s.inbox_received, s.inbox_dropped,
+                         s.rate_throttles, s.rate_closes);
         }
-        if (const auto rejected = router.rejected_connections(); rejected.total_limit + rejected.address_limit > 0) {
-            spdlog::info("Rejected connections: {} over max_connections, {} over max_connections_per_ip",
-                         rejected.total_limit, rejected.address_limit);
+        if (const auto rejected = router.rejected_connections(); rejected.total_limit + rejected.address_limit + rejected.rate_limit > 0) {
+            spdlog::info("Rejected connections: {} over max_connections, {} over max_connections_per_ip, {} over the connection rate",
+                         rejected.total_limit, rejected.address_limit, rejected.rate_limit);
         }
         if (const auto lost = wamp::logging::overruns(); lost > 0) {
             spdlog::warn("{} log line(s) were dropped because the log writer could not keep up", lost);

@@ -25,6 +25,7 @@
 #include "config.hpp"
 #include "authorizer.hpp"
 #include "crypto_utils.hpp"
+#include "rate_limit.hpp"
 #include "wire.hpp"
 #include "websocket.hpp"
 #include <asio/io_context.hpp>
@@ -63,6 +64,12 @@ public:
         , session_id_(0)
         , wamp_session_established_(false)
     {
+        if (config.max_messages_per_second > 0) {
+            const auto rate = static_cast<double>(config.max_messages_per_second);
+            const auto burst = config.message_burst != 0 ? static_cast<double>(config.message_burst)
+                                                         : std::max(10.0, 2.0 * rate);
+            rate_bucket_ = std::make_unique<TokenBucket>(rate, burst, TokenBucket::Clock::now());
+        }
         spdlog::debug("WAMP session created");
     }
 
@@ -145,7 +152,14 @@ public:
     [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> process(std::span<const uint8_t> data) {
         auto result = process_input(data);
         compact_buffer();
+        if (rate_bucket_ && messages_in_turn_ > 0) result = settle_rate(std::move(result));
         return result;
+    }
+
+    // How long the caller should wait before reading this session's socket again because it is over its message rate
+    // (see [server] max_messages_per_second); zero if it is not. Reading and clearing.
+    [[nodiscard]] std::chrono::nanoseconds take_throttle() {
+        return std::exchange(throttle_delay_, std::chrono::nanoseconds{0});
     }
 
 private:
@@ -660,9 +674,56 @@ private:
         // Session is active, handle various message types. Any message that decodes resets the count of
         // malformed ones in a row (see malformed()).
         malformed_this_message_ = false;
+        ++messages_in_turn_;
         auto result = handle_established_message(payload);
         if (!malformed_this_message_) malformed_in_a_row_ = 0;
         return result;
+    }
+
+    // Charges the messages handled by this process() call to the session's rate bucket. Over the limit the session is
+    // throttled (throttle_delay_: the caller stops reading for that long, TCP slows the client, nothing is lost); a
+    // session that has been over it for longer than rate_limit_grace without a break is aborted and closed.
+    [[nodiscard]] std::expected<std::span<const uint8_t>, std::error_code> settle_rate(
+        std::expected<std::span<const uint8_t>, std::error_code> result) {
+        const auto now = TokenBucket::Clock::now();
+        const auto wait = rate_bucket_->consume(std::exchange(messages_in_turn_, 0), now);
+        if (wait.count() <= 0) {
+            throttled_since_.reset();
+            return result;
+        }
+        if (!throttled_since_) throttled_since_ = now;
+        shard_.counters.rate_throttles.fetch_add(1, std::memory_order_relaxed);
+        if (!result || close_requested_) return result;
+        // The wait that would follow is at most a second per read (the debt is carried to the next one)
+        const auto pause = std::min<std::chrono::nanoseconds>(wait, std::chrono::seconds{1});
+        if (now - *throttled_since_ + std::chrono::duration_cast<TokenBucket::Clock::duration>(pause) > config_.rate_limit_grace) {
+            shard_.counters.rate_closes.fetch_add(1, std::memory_order_relaxed);
+            spdlog::warn("Closing session {} (authid '{}'): over {} messages per second for {} ms", session_id_, authid_,
+                         config_.max_messages_per_second,
+                         std::chrono::duration_cast<std::chrono::milliseconds>(now - *throttled_since_ + pause).count());
+            return rate_abort();
+        }
+        spdlog::debug("Session {} is over its message rate: waiting {} us", session_id_,
+                      std::chrono::duration_cast<std::chrono::microseconds>(wait).count());
+        throttle_delay_ = pause;
+        return result;
+    }
+
+    // ABORT wamp.error.protocol_violation and close, in the session's transport and serializer
+    [[nodiscard]] std::span<const uint8_t> rate_abort() {
+        WampDict details{{"message", std::string{"Message rate limit exceeded"}}};
+        const auto abort = rawsocket::create_wamp_message(
+            serialize_abort(AbortMessage{std::move(details), "wamp.error.protocol_violation"}));
+        if (transport_ == Transport::WEBSOCKET) {
+            output_buffer_.clear();
+            ws_wrap(abort);
+            ws_close(ws::kCloseNormal);
+            return std::span<const uint8_t>(output_buffer_);
+        }
+        state_ = SessionProtocolState::SHUTTING_DOWN;
+        close_requested_ = true;
+        response_buffer_ = abort;
+        return to_wire(response_buffer_);
     }
 
     // A message of a known type that does not decode. The session carries on, but a client that keeps
@@ -1271,6 +1332,13 @@ private:
 
     // Serialization the client chose; the router core always works on CBOR
     Wire wire_{Wire::CBOR};
+
+    // [server] max_messages_per_second: the session's bucket (null when off), the messages handled by the current
+    // process() call, when it first went over the limit without a break, and the wait the caller should honour
+    std::unique_ptr<TokenBucket> rate_bucket_;
+    uint64_t messages_in_turn_{0};
+    std::optional<TokenBucket::Clock::time_point> throttled_since_;
+    std::chrono::nanoseconds throttle_delay_{0};
     std::string json_text_;                 // scratch for CBOR -> JSON
     std::vector<uint8_t> json_frames_;      // converted RawSocket output of one call
 

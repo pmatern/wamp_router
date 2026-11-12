@@ -884,3 +884,39 @@ key = ")" + key.path().string() + R"("
     CHECK(load("shutdown_grace_ms = 0\n")->shutdown_grace == std::chrono::milliseconds{0});
     CHECK_FALSE(load("shutdown_grace_ms = -5\n").has_value());
 }
+
+TEST_CASE("Config::load() rate limits", "[config][rate]") {
+    TempCertFile cert("cert");
+    TempCertFile key("key");
+    auto load = [&](const std::string& server_extra) {
+        TempConfigFile config("[server]\nport = 8080\n" + server_extra + "[server.tls]\ncert = \"" + cert.path().string() +
+                              "\"\nkey = \"" + key.path().string() + "\"\n");
+        return wamp::Config::load(config.path());
+    };
+
+    SECTION("everything is off by default") {
+        auto result = load("");
+        REQUIRE(result.has_value());
+        CHECK(result->max_connections_per_second_per_ip == 0);
+        CHECK(result->connection_burst == 0);
+        CHECK(result->max_messages_per_second == 0);
+        CHECK(result->message_burst == 0);
+        CHECK(result->rate_limit_grace == std::chrono::milliseconds{5000});
+    }
+    SECTION("parsing") {
+        auto result = load("max_connections_per_second_per_ip = 20\nconnection_burst = 50\nmax_messages_per_second = 1000\n"
+                           "message_burst = 200\nrate_limit_grace_ms = 750\n");
+        REQUIRE(result.has_value());
+        CHECK(result->max_connections_per_second_per_ip == 20);
+        CHECK(result->connection_burst == 50);
+        CHECK(result->max_messages_per_second == 1000);
+        CHECK(result->message_burst == 200);
+        CHECK(result->rate_limit_grace == std::chrono::milliseconds{750});
+    }
+    SECTION("invalid values are rejected") {
+        CHECK_FALSE(load("max_messages_per_second = -1\n").has_value());
+        CHECK_FALSE(load("max_connections_per_second_per_ip = \"fast\"\n").has_value());
+        CHECK_FALSE(load("connection_burst = 1.5\n").has_value());
+        CHECK_FALSE(load("rate_limit_grace_ms = -5\n").has_value());
+    }
+}

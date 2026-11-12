@@ -38,6 +38,10 @@ Everything inside the router (handlers, `EventTemplate`, cross-shard frames) bui
 
 The acceptor thread asks a `ConnectionLimiter` (a mutex-protected total plus per-address counts, `connection_limiter.hpp`) before it hands a socket to a shard, and the shard's session releases the slot when it ends. The mutex is taken twice per connection lifetime and never on the message path. Over a limit, the socket is closed at once and a counter is bumped. `[server] max_connections` defaults to "auto" (open-file limit minus 128; `main` raises the soft limit to the hard limit first). Accept errors such as EMFILE back off for 100 ms instead of spinning.
 
+### Rate limits
+
+`ConnectionRateLimiter` (`rate_limit.hpp`) is a map of per-address token buckets used by the acceptor thread only, so it needs no lock; it runs before the connection limiter and before any TLS work. The message rate is a per-session `TokenBucket` (null when off) owned by the session's shard thread: `WampSession::process()` counts the messages it handled (`messages_in_turn_`), charges them with one clock read, and records a delay; `handle_socket_read_completion` then sleeps on a timer before the next read (up to 1 s at a time), so the shard keeps serving other sessions and TCP backpressure slows the sender. The debt is carried over, so the average rate is the limit; the burst within one socket read is not split. A session throttled for longer than `rate_limit_grace_ms` gets an ABORT and is closed the way the malformed-message limit does it (`should_close()`).
+
 ### Malformed messages
 
 `WampSession::malformed()` counts messages of a known type that fail to decode; a message that decodes resets the count. At `[server] max_malformed_messages` in a row the session gets `ABORT wamp.error.protocol_violation` and `should_close()` makes the reader close after writing it (WebSocket sends a close frame as well). Decode failures are reported by exceptions inside `fast::decode` and cost about 4-10 µs against 0.8 µs for a valid message; this was measured and the decoder was left as is.

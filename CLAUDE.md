@@ -281,6 +281,7 @@ wamp_router/
 │   ├── cbor.hpp              # Minimal CBOR reader/writer used by the hot-path serializers
 │   ├── wamp_serializer.hpp   # CBOR serialization/deserialization
 │   ├── raw_socket.hpp        # RawSocket framing (4-byte header)
+│   ├── rate_limit.hpp         # TokenBucket, ConnectionRateLimiter (new connections per second per address)
 │   ├── connection_limiter.hpp # ConnectionLimiter (total and per-address connection caps), open-file limit helpers
 │   ├── ppt.hpp               # Payload passthru mode helpers (ppt_* extraction/validation, feature name)
 │   ├── wire.hpp / msgpack.hpp # Wire enum and wirecodec dispatch; MessagePack <-> CBOR streaming transcoders (wamp.2.msgpack)
@@ -313,6 +314,7 @@ wamp_router/
     ├── test_json.cpp
     ├── test_msgpack.cpp
     ├── test_ppt.cpp
+    ├── test_rate_limit.cpp
     ├── test_patterns.cpp
     ├── test_logging.cpp
     ├── test_cpu_limits.cpp
@@ -528,6 +530,7 @@ The router uses TOML configuration files (config.toml or test_config.toml) for a
 - Server port, TLS certificate paths, logging level
 - `threads` (`[server]`) - router threads / shards (default 1, `"auto"` = available CPUs); sessions on different shards still reach each other, see Router
 - `shutdown_grace_ms` (`[server]`) - how long `Router::stop()` waits for sessions to leave after sending each GOODBYE `wamp.close.system_shutdown` (default 3000, 0 = no wait); the writer closes a connection after writing a frame marked `EventToSend::close_after`
+- `max_connections_per_second_per_ip` / `connection_burst` and `max_messages_per_second` / `message_burst` / `rate_limit_grace_ms` (`[server]`) - opt-in rate limits (default 0 = off): connections per address are closed at accept (`ConnectionRateLimiter`), a session over its message rate is throttled (`WampSession::settle_rate`, the reader sleeps `take_throttle()`) and aborted after the grace period
 - `max_malformed_messages` (`[server]`) - undecodable messages in a row before a session is ABORTed with `wamp.error.protocol_violation` and closed (default 10, 0 = never); counted in `WampSession::malformed()`
 - `max_connections` / `max_connections_per_ip` (`[server]`) - open connection caps (default `"auto"` = open-file limit minus 128, and 0 = off); enforced by the acceptor through `ConnectionLimiter` (`connection_limiter.hpp`), which the session releases when it ends
 - `handshake_timeout_ms` (`[server]`) - deadline for a new connection to become an established session (default 10000, 0 disables); enforced in `handle_wamp_session` with a timer that closes the socket
@@ -563,6 +566,7 @@ Tests use Catch2 framework with CTest integration:
 - **test_realms.cpp**: Realm isolation of topics and procedures
 - **test_crypto_utils.cpp**: Ed25519 signature verification and challenge generation
 - **test_patterns.cpp**: URI matching, precedence, SubscriptionManager/RegistrationManager patterns, pattern authorization; end-to-end pattern tests are in test_router.cpp
+- **test_rate_limit.cpp**: TokenBucket and ConnectionRateLimiter with a fake clock; end-to-end rate limit tests are in test_router.cpp
 - **test_ppt.cpp**: payload passthru (ppt_* validation, option round trips, EventTemplate details, role features); end-to-end passthru tests are in test_router.cpp
 - **test_msgpack.cpp**: MessagePack <-> CBOR transcoding (vectors, errors, nlohmann oracle both ways, fuzz); end-to-end MessagePack tests are in test_router.cpp
 - **test_json.cpp**: JSON <-> CBOR transcoding (spec vectors, errors, nesting limits, nlohmann oracle on random payloads, fuzz), UTF-8, base64; JSON end-to-end tests are in test_router.cpp

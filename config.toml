@@ -21,6 +21,20 @@ max_connections = "auto"
 # balancer or NAT, where many clients share one address.
 max_connections_per_ip = 0
 
+# New connections per second one client address may open, 0 = no limit (the default). Connections beyond it are
+# closed at accept, before any TLS work. connection_burst is the allowance on top of the rate (0 = the rate itself).
+# Same caveat as max_connections_per_ip: behind a proxy or NAT many clients share an address.
+max_connections_per_second_per_ip = 0
+connection_burst = 0
+
+# WAMP messages per second one session may send, 0 = no limit (the default); message_burst is the allowance on
+# top (0 = twice the rate, at least 10). A session over the limit is throttled: the router stops reading its
+# socket until it is back under, so TCP slows the client down and nothing is lost. A session that stays over
+# for rate_limit_grace_ms is aborted with wamp.error.protocol_violation and closed (0 = at the first throttle).
+max_messages_per_second = 0
+message_burst = 0
+rate_limit_grace_ms = 5000
+
 # A session that sends this many undecodable messages in a row (a good message resets the count) is
 # aborted with wamp.error.protocol_violation and closed. 0 = never.
 max_malformed_messages = 10

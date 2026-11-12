@@ -264,6 +264,12 @@ handle_socket_read_completion(
         co_return std::unexpected{make_error_code(std::errc::connection_aborted)};
     }
 
+    // Over the message rate: stop reading until the session is back under it (TCP backpressure slows the client)
+    if (const auto delay = protocol.take_throttle(); delay.count() > 0) {
+        asio::steady_timer timer{co_await asio::this_coro::executor, delay};
+        (void)co_await timer.async_wait(asio::as_tuple(asio::use_awaitable));
+    }
+
     co_return true;  // Continue processing
 }
 

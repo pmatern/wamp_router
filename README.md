@@ -57,6 +57,8 @@ threads = 1   # router threads, one shard each; "auto" = one per available CPU (
 handshake_timeout_ms = 10000   # a new connection must become a session (TLS, handshake, HELLO, auth) in this time; 0 = no limit
 max_connections = "auto"       # open connections allowed; "auto" = open-file limit minus a reserve, 0 = no limit
 max_connections_per_ip = 0     # per client address, 0 = no limit (leave off behind a proxy or NAT)
+max_connections_per_second_per_ip = 0   # new connections per second per client address, 0 = no limit; connection_burst = allowance on top
+max_messages_per_second = 0    # WAMP messages per second per session, 0 = no limit; message_burst, rate_limit_grace_ms: see "Rate limits"
 max_malformed_messages = 10    # undecodable messages in a row before a session is aborted; 0 = never
 shutdown_grace_ms = 3000       # on shutdown, how long sessions get to leave after GOODBYE; 0 = do not wait
 
@@ -325,6 +327,14 @@ WAMP's Payload Passthru Mode (`payload_passthru_mode`) lets an application carry
 - **Authorization:** `ppt_schemes = ["x_protobuf"]` in a role table (`[roles.<name>]`) limits the schemes that role may use in PUBLISH and CALL; without it any scheme is allowed.
 - **Serializers:** the blob is a CBOR byte string, or `"\u0000" + base64` for JSON sessions, so passthru works across serializers. The router does not check ppt cipher or key ids, it never decrypts anything, and the size limit is the transport's message limit.
 - **Not done:** the router does not check that the caller of a passthru CALL accepts a passthru RESULT; a callee's passthru YIELD is forwarded as it is.
+
+### Rate limits
+
+Both are off by default (`0`) and configured under `[server]`.
+
+- **New connections per client address** (`max_connections_per_second_per_ip`, `connection_burst`): a token bucket per address in the acceptor. A connection over the rate is closed at accept, before any TLS work, and counted (`Router::rejected_connections().rate_limit`, logged on the first and every 1000th). At most 100,000 addresses are tracked; beyond that new addresses are admitted untracked, because an attacker spraying that many addresses cannot be limited per address anyway. Same caveat as `max_connections_per_ip`: behind a proxy or NAT every client shares one address.
+- **WAMP messages per session** (`max_messages_per_second`, `message_burst` default twice the rate and at least 10, `rate_limit_grace_ms` default 5000): every message a session sends after the handshake costs a token, over RawSocket and WebSocket and in any serializer. The router settles the account once per socket read (at most 64 KiB of messages): a session in debt is *throttled*, meaning the router stops reading its socket for the time the debt takes to pay off (at most 1 s at a time), so TCP backpressure slows the client and nothing it sent is dropped. The debt carries over, so the long-run rate is the limit, but one read's worth of messages (up to a few thousand small ones) is handled at once. A session that stays over the limit for longer than `rate_limit_grace_ms` without a break gets ABORT `wamp.error.protocol_violation` ("Message rate limit exceeded") and is closed; `0` closes at the first throttle. Other sessions on the same shard are unaffected (the wait is a timer, not a block). Counted per shard as `rate_throttles` and `rate_closes` (`Router::stats()`, printed at shutdown).
+- Not covered: limits per realm or role, per message type, or in bytes per second (the message size limits and write backpressure bound those).
 
 ### Authentication
 ### Authentication

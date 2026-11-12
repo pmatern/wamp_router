@@ -2100,3 +2100,133 @@ TEST_CASE("WampClient speaks MessagePack over WebSocket and RawSocket, talking t
         CHECK(json_call == rich);
     }
 }
+
+// ----------------------------------------------------------------------------
+// Rate limits
+// ----------------------------------------------------------------------------
+
+TEST_CASE("The router closes connections that come faster than the per-address rate", "[router][rate][limits]") {
+    auto config = plain_config();
+    config.max_connections_per_second_per_ip = 2;
+    config.connection_burst = 3;
+    config.max_connections = 0;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    std::vector<std::unique_ptr<BareConnection>> admitted;
+    for (int i = 0; i < 3; ++i) admitted.push_back(std::make_unique<BareConnection>(router.port()));   // the burst
+    for (auto& c : admitted) CHECK_FALSE(c->closed_within(50ms));
+    BareConnection too_fast{router.port()};
+    CHECK(too_fast.closed_within(2s));
+    CHECK(router.rejected_connections().rate_limit == 1);
+    CHECK(router.rejected_connections().total_limit == 0);
+    CHECK(router.rejected_connections().address_limit == 0);
+
+    std::this_thread::sleep_for(700ms);                         // 1.4 tokens at 2 per second
+    BareConnection later{router.port()};
+    CHECK_FALSE(later.closed_within(200ms));
+    CHECK(router.rejected_connections().rate_limit == 1);
+}
+
+TEST_CASE("A session over its message rate is slowed, and nothing it sent is lost", "[router][rate]") {
+    auto config = plain_config();
+    config.max_messages_per_second = 200;
+    config.message_burst = 20;
+    config.rate_limit_grace = 60s;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    asio::io_context io;
+    WampClient publisher{io}, subscriber{io};
+    size_t received = 0;
+    double seconds = 0;
+    bool done = false;
+    constexpr size_t kRounds = 5;
+    constexpr size_t kPerRound = 100;
+    constexpr size_t kMessages = kRounds * kPerRound;
+
+    co_spawn(io, [&]() -> awaitable<void> {
+        co_await subscriber.connect("127.0.0.1", router.port(), "test.realm");
+        co_await publisher.connect("127.0.0.1", router.port(), "test.realm");
+        co_await subscriber.subscribe("rate.topic", [&](const EventMessage&) { ++received; });
+        const auto start = std::chrono::steady_clock::now();
+        // The router handles what one socket read brings, then pays the debt before reading again, so the limit holds
+        // on average: five rounds of 100 messages, each round waited for, take about (500 - 20) / 200 = 2.4 s
+        for (size_t round = 1; round <= kRounds; ++round) {
+            for (size_t i = 0; i < kPerRound; ++i) (void)co_await publisher.publish("rate.topic", WampList{int64_t(i)});
+            for (int i = 0; i < 400 && received < round * kPerRound; ++i) co_await pause(io, 10ms);
+        }
+        seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        done = true;
+    }, detached);
+    io.run_for(20s);
+
+    REQUIRE(done);
+    CHECK(received == kMessages);        // throttled, not dropped
+    CHECK(seconds >= 1.6);               // 2.4 s expected; the first round is free
+    CHECK(router.stats()[0].rate_throttles > 0);
+    CHECK(router.stats()[0].rate_closes == 0);
+}
+
+TEST_CASE("A session that stays over its message rate is aborted and closed", "[router][rate]") {
+    auto config = plain_config();
+    config.max_messages_per_second = 100;
+    config.message_burst = 10;
+    config.rate_limit_grace = 300ms;
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    BareConnection c{router.port()};
+    c.send(rawsocket::encode_handshake_request({.max_length = rawsocket::MaxLengthCode::BYTES_16M,
+                                                .serializer = rawsocket::Serializer::CBOR}));
+    REQUIRE(c.read_n(4).size() == 4);
+    c.send(rawsocket::create_wamp_message(serialize_hello(HelloMessage{"test.realm"})));
+    REQUIRE(deserialize_welcome(c.read_frame()).has_value());
+
+    // one big write of unacknowledged publishes: far more than the burst and the grace period allow
+    std::vector<uint8_t> flood;
+    const auto publish = rawsocket::create_wamp_message(serialize_publish(PublishMessage{1, {}, "flood.topic"}));
+    for (int i = 0; i < 3000; ++i) flood.insert(flood.end(), publish.begin(), publish.end());
+    c.send(flood);
+
+    bool aborted = false;
+    for (int i = 0; i < 4 && !aborted; ++i) {
+        auto frame = c.read_frame();
+        if (frame.empty()) break;
+        if (auto abort = deserialize_abort(frame)) aborted = abort->reason == "wamp.error.protocol_violation";
+    }
+    CHECK(aborted);
+    CHECK(c.closed_within(2s));
+    CHECK(router.stats()[0].rate_closes == 1);
+}
+
+TEST_CASE("The message rate applies to JSON over WebSocket too", "[router][rate][json][websocket]") {
+    auto config = plain_config();
+    config.max_messages_per_second = 50;
+    config.message_burst = 10;
+    config.rate_limit_grace = 0ms;      // abort at the first throttle
+    Router router{config, Router::Transport::PLAIN, 1};
+    router.start();
+
+    WsTestClient ws;
+    REQUIRE(ws_json_join(ws, router.port()));
+    try {   // the router closes the connection while we are still sending
+        for (int i = 0; i < 400; ++i) ws.send_text(R"([16,1,{},"flood.topic"])");
+    } catch (const std::exception&) {
+    }
+
+    bool aborted = false;
+    bool closed = false;
+    for (int i = 0; i < 6 && !closed; ++i) {
+        auto frame = ws.read_frame();
+        if (!frame) break;
+        if (frame->opcode == 0x8) closed = true;
+        else if (frame->opcode == 0x1) {
+            auto message = json::parse(std::string{frame->payload.begin(), frame->payload.end()}, nullptr, false);
+            if (message.is_array() && !message.empty() && message[0] == 3) aborted = true;
+        }
+    }
+    CHECK(aborted);
+    CHECK(closed);
+    CHECK(router.stats()[0].rate_closes == 1);
+}

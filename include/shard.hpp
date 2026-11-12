@@ -78,6 +78,8 @@ public:
         std::atomic<uint64_t> publishes{0};   // PUBLISH messages handled here
         std::atomic<uint64_t> calls{0};       // CALL messages handled here
         std::atomic<uint64_t> handshake_timeouts{0};   // connections closed for not becoming a session in time
+        std::atomic<uint64_t> rate_throttles{0};       // times a session was made to wait for exceeding its message rate
+        std::atomic<uint64_t> rate_closes{0};          // sessions aborted for staying over their message rate
     } counters;
 
     EventChannelRegistry channels;

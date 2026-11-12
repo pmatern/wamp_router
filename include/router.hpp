@@ -16,6 +16,7 @@
 #pragma once
 
 #include "connection_limiter.hpp"
+#include "rate_limit.hpp"
 #include "cpu_limits.hpp"
 #include "cross_shard.hpp"
 #include "logging.hpp"
@@ -56,6 +57,9 @@ public:
         , acceptor_(accept_io_, tcp::endpoint(tcp::v4(), config_.port))
         , bound_port_(acceptor_.local_endpoint().port())
         , limiter_(config_.max_connections.value_or(auto_max_connections()), config_.max_connections_per_ip)
+        , rate_limiter_(static_cast<double>(config_.max_connections_per_second_per_ip),
+                        static_cast<double>(config_.connection_burst != 0 ? config_.connection_burst
+                                                                          : config_.max_connections_per_second_per_ip))
     {
         spdlog::info("Connection limit: {} total, {} per address",
                      limiter_.max_total() == 0 ? std::string{"unlimited"} : std::to_string(limiter_.max_total()),
@@ -207,6 +211,8 @@ public:
         size_t inbox_depth{};         // cross-shard messages waiting or being delivered
         uint64_t inbox_received{};    // cross-shard messages taken from the inbox
         uint64_t inbox_dropped{};     // cross-shard events dropped because the inbox was full
+        uint64_t rate_throttles{};    // times a session waited for exceeding [server] max_messages_per_second
+        uint64_t rate_closes{};       // sessions aborted for staying over it
     };
 
     [[nodiscard]] std::vector<ShardStats> stats() const {
@@ -218,7 +224,9 @@ public:
                            w.shard->counters.calls.load(std::memory_order_relaxed),
                            w.shard->counters.handshake_timeouts.load(std::memory_order_relaxed),
                            w.shard->channels.dropped_count(), group_->depth(static_cast<unsigned>(i)),
-                           group_->received(static_cast<unsigned>(i)), group_->dropped(static_cast<unsigned>(i))});
+                           group_->received(static_cast<unsigned>(i)), group_->dropped(static_cast<unsigned>(i)),
+                           w.shard->counters.rate_throttles.load(std::memory_order_relaxed),
+                           w.shard->counters.rate_closes.load(std::memory_order_relaxed)});
         }
         return all;
     }
@@ -227,9 +235,11 @@ public:
     struct RejectedConnections {
         uint64_t total_limit{};     // [server] max_connections
         uint64_t address_limit{};   // [server] max_connections_per_ip
+        uint64_t rate_limit{};      // [server] max_connections_per_second_per_ip
     };
     [[nodiscard]] RejectedConnections rejected_connections() const {
-        return {rejected_total_.load(std::memory_order_relaxed), rejected_per_address_.load(std::memory_order_relaxed)};
+        return {rejected_total_.load(std::memory_order_relaxed), rejected_per_address_.load(std::memory_order_relaxed),
+                rejected_rate_.load(std::memory_order_relaxed)};
     }
 
     // Connections open now (admitted and not yet ended)
@@ -297,6 +307,16 @@ private:
 
             std::error_code peer_ec;
             const auto peer = socket.remote_endpoint(peer_ec).address();
+            if (!rate_limiter_.admit(peer)) {
+                const auto n = rejected_rate_.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n == 1 || n % 1000 == 0) {
+                    spdlog::warn("Rejected connection from {}: connection rate limit reached ({} rejected so far)",
+                                 peer.to_string(), n);
+                }
+                std::error_code ignored;
+                socket.close(ignored);
+                continue;
+            }
             if (const auto verdict = limiter_.admit(peer); verdict != ConnectionLimiter::Result::ADMITTED) {
                 auto& counter = verdict == ConnectionLimiter::Result::TOTAL_LIMIT ? rejected_total_ : rejected_per_address_;
                 const auto n = counter.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -349,6 +369,8 @@ private:
     ConnectionLimiter limiter_;
     std::atomic<uint64_t> rejected_total_{0};
     std::atomic<uint64_t> rejected_per_address_{0};
+    std::atomic<uint64_t> rejected_rate_{0};
+    ConnectionRateLimiter rate_limiter_;   // acceptor thread only
     uint64_t accept_errors_{0};   // touched only by the acceptor thread
     std::unique_ptr<ShardGroup> group_;  // declared before the workers: their sessions may still use it while they shut down
     std::vector<std::unique_ptr<Worker>> workers_;
